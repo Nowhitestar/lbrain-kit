@@ -3,6 +3,14 @@
 
 All notable Kit-owned changes are documented here. Kit releases follow semantic versioning; Personal Skills carry their own versions.
 
+## 0.2.0 — 2026-08-07
+
+- Added full-source Context Intake guidance across Capture and Weave without introducing another semantic layer.
+- Added the default-enabled `lbrain-context-pack` Core Skill and a complete Definition, preview, Candidate, safety, publication, update, verification, revocation, and fork lifecycle.
+- Added independently versioned Pack repositories, CalVer releases, and private-LBrain Git Submodule registration.
+- Added public-disclosure gates, Personal Skill licensing checks, separate GitHub repository-creation and publication approvals, and explicit non-recall semantics.
+- Added synthetic owner-to-recipient and personalized Kit-upgrade acceptance tests without network access or real publication.
+
 ## 0.1.0 — 2026-08-07
 
 - Promoted rc.3 after independent cold-start, cross-session retrieval, personalized upgrade, and isolated runtime acceptance passed without release blockers.

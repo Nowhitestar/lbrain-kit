@@ -1,11 +1,11 @@
 <!-- ownership: kit -->
 # Context Pack Specification and Implementation Plan
 
-Status: proposed for implementation review
+Status: implemented in LBrain Kit 0.2.0
 
 Decision baseline: approved product decisions from the Context Pack design review
 
-Scope gate: this document authorizes specification work only
+Scope: normative Context Pack product and implementation contract
 
 ## Problem Statement
 

@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 TRACER = ROOT / "System/Kit/Examples/Tracer/run.py"
+CONTEXT_PACK_TRACER = ROOT / "System/Kit/Examples/Context-Pack/run.py"
 
 
 def git(repository: Path, *args: str) -> str:
@@ -34,6 +35,19 @@ class WorkflowSmokeTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("TRACE PASS", result.stdout)
+
+    def test_context_pack_intake_to_consumer_tracer(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(CONTEXT_PACK_TRACER)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("INTAKE sources=git,notion,zulip,gmail", result.stdout)
+        self.assertIn("PREVIEW blocked=0", result.stdout)
+        self.assertIn("CONSUME git=unavailable", result.stdout)
+        self.assertIn("CONTEXT PACK TRACE PASS", result.stdout)
 
     def test_release_upgrade_preserves_personal_context(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -82,6 +96,70 @@ class WorkflowSmokeTest(unittest.TestCase):
             (personal_skill / "tests/cases.md").write_text("# Cases\n\n- Preserve the package.\n", encoding="utf-8")
             with (personal / "Skills/Enabled.md").open("a", encoding="utf-8") as file:
                 file.write("\n- [[Skills/Personal/personal-upgrade/SKILL]] — codex, claude, hermes\n")
+
+            pack_source = base / "personal-pack-source"
+            pack_remote = base / "personal-pack.git"
+            pack_path = "Outputs/Context-Packs/Repos/personal-pack"
+            pack_source.mkdir()
+            git(pack_source, "init", "-b", "main")
+            git(pack_source, "config", "user.name", "LBrain User")
+            git(pack_source, "config", "user.email", "lbrain-user@example.invalid")
+            (pack_source / "PACK.md").write_text(
+                "---\n"
+                "type: context-pack-release\n"
+                "pack_id: personal-pack\n"
+                "summary: Personal Pack preserved by the upgrade test.\n"
+                "version: 2026.08.07.1\n"
+                "release_status: published\n"
+                "visibility: private\n"
+                "license: UNLICENSED\n"
+                "created: 2026-08-07\n"
+                "updated: 2026-08-07\n"
+                "---\n# Personal Pack\n",
+                encoding="utf-8",
+            )
+            (pack_source / "SOURCES.md").write_text("# Sources\n\nSynthetic upgrade fixture.\n", encoding="utf-8")
+            git(pack_source, "add", ".")
+            git(pack_source, "commit", "-m", "pack: publish personal-pack 2026.08.07.1")
+            git(pack_source, "tag", "2026.08.07.1")
+            pack_head = git(pack_source, "rev-parse", "HEAD")
+            subprocess.run(["git", "clone", "--bare", str(pack_source), str(pack_remote)], check=True, capture_output=True)
+
+            definition = personal / "Outputs/Context-Packs/personal-pack.md"
+            definition.write_text(
+                "---\n"
+                "type: context-pack\n"
+                "pack_id: personal-pack\n"
+                "summary: Personal Pack preserved by the upgrade test.\n"
+                "status: active\n"
+                "visibility: private\n"
+                f"repository: {pack_remote}\n"
+                f"submodule_path: {pack_path}\n"
+                "created: 2026-08-07\n"
+                "updated: 2026-08-07\n"
+                "---\n# Personal Pack\n\n"
+                "## Purpose\n\nUpgrade preservation.\n\n"
+                "## Includes\n\n- `path:Knowledge/Wiki/Concepts/Personal-Upgrade-Note.md`\n\n"
+                "## Excludes\n\n- None.\n\n"
+                "## Skills\n\n- None.\n\n"
+                "## Build Notes\n\nSynthetic fixture.\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "protocol.file.allow=always",
+                    "-C",
+                    str(personal),
+                    "submodule",
+                    "add",
+                    str(pack_remote),
+                    pack_path,
+                ],
+                check=True,
+                capture_output=True,
+            )
             git(personal, "add", ".")
             git(personal, "commit", "-m", "capture: personalize upgrade fixture")
 
@@ -114,6 +192,10 @@ class WorkflowSmokeTest(unittest.TestCase):
             self.assertTrue((personal / "Knowledge/Wiki/Concepts/Personal-Upgrade-Note.md").is_file())
             self.assertTrue((personal / "Skills/Personal/personal-upgrade/SKILL.md").is_file())
             self.assertIn("Upgrade marker: v0.1.1", (personal / "System/Rules/Core/visibility.md").read_text(encoding="utf-8"))
+            self.assertTrue(definition.is_file())
+            self.assertIn(str(pack_remote), (personal / ".gitmodules").read_text(encoding="utf-8"))
+            self.assertIn("personal-pack", git(personal, "submodule", "status"))
+            self.assertIn(pack_head, git(personal, "ls-tree", "HEAD", pack_path))
 
 
 if __name__ == "__main__":

@@ -288,14 +288,14 @@ def render_definition(pack_id: str, summary: str, visibility: str, audience: str
     today = date.today().isoformat()
     conditional = ""
     if audience:
-        conditional += f"audience:\n  - {audience}\n"
+        conditional += f"audience:\n  - {yaml_scalar(audience)}\n"
     if license_name:
-        conditional += f"license: {license_name}\n"
+        conditional += f"license: {yaml_scalar(license_name)}\n"
     title = pack_id.replace("-", " ").title()
     return f"""---
 type: context-pack
 pack_id: {pack_id}
-summary: {summary}
+summary: {yaml_scalar(summary)}
 status: draft
 visibility: {visibility}
 {conditional}created: {today}
@@ -444,7 +444,10 @@ def manifest(
     summary = str(definition.metadata.get("summary", ""))
     license_name = str(definition.metadata.get("license", "UNLICENSED"))
     audience = definition.metadata.get("audience")
-    audience_line = f"audience: {audience}\n" if audience else ""
+    if isinstance(audience, list):
+        audience_line = "audience:\n" + "".join(f"  - {yaml_scalar(str(item))}\n" for item in audience)
+    else:
+        audience_line = f"audience: {yaml_scalar(str(audience))}\n" if audience else ""
     inventory = "\n".join(
         f"- [{path.as_posix()}]({path.as_posix()})"
         for path in sorted(destinations.values())
@@ -765,10 +768,7 @@ def publish(args: argparse.Namespace) -> int:
         )
         if not existing_release:
             git(release, "init", "-b", "main")
-        parent_name = git(root, "config", "user.name") or "LBrain Context Pack"
-        parent_email = git(root, "config", "user.email") or "context-pack@example.invalid"
-        git(release, "config", "user.name", parent_name)
-        git(release, "config", "user.email", parent_email)
+        configure_identity(release, root)
         git(release, "add", ".")
         git(release, "commit", "-m", f"publish: {definition.pack_id} {version}")
         git(release, "tag", version)
@@ -908,6 +908,8 @@ def verify_pack(pack_root: Path, root: Path) -> tuple[str, str, str]:
             resolved = (markdown_path.parent / target).resolve()
             if not resolved.is_relative_to(pack_root.resolve()) or not resolved.exists():
                 raise ValueError(f"unresolved or escaping Pack link in {markdown_path.relative_to(pack_root)}")
+    if not (pack_root / ".git").exists():
+        return str(metadata.get("pack_id")), version, "unavailable"
     git_check = subprocess.run(
         ["git", "-C", str(pack_root), "rev-parse", "--is-inside-work-tree"],
         text=True,
@@ -957,15 +959,16 @@ def replace_manifest_fields(path: Path, fields: dict[str, str], extra: dict[str,
         end = lines[1:].index("---") + 1
     except ValueError as error:
         raise ValueError("Pack manifest frontmatter is not closed") from error
-    seen: set[str] = set()
+    existing: set[str] = set()
     for index in range(1, end):
         match = re.match(r"^([A-Za-z0-9_-]+):", lines[index])
+        if match:
+            existing.add(match.group(1))
         if match and match.group(1) in fields:
             key = match.group(1)
             lines[index] = f"{key}: {yaml_scalar(fields[key])}"
-            seen.add(key)
     for key, value in (extra or {}).items():
-        if key not in seen:
+        if key not in existing:
             lines.insert(end, f"{key}: {yaml_scalar(value)}")
             end += 1
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1070,10 +1073,9 @@ def fork_pack(args: argparse.Namespace) -> int:
     source = Path(args.source)
     source = source.resolve() if source.is_absolute() else (root / source).resolve()
     source_id, source_version, git_state = verify_pack(source, root)
-    if git_state == "verified":
-        source_status = load_check_helpers(root)[0]((source / "PACK.md").read_text(encoding="utf-8")).get("release_status")
-        if source_status == "revoked":
-            raise ValueError("a revoked Pack must be corrected before it can be forked as published")
+    source_status = load_check_helpers(root)[0]((source / "PACK.md").read_text(encoding="utf-8")).get("release_status")
+    if source_status == "revoked":
+        raise ValueError("a revoked Pack must be corrected before it can be forked as published")
     destination = Path(args.destination)
     destination = destination.resolve() if destination.is_absolute() else (Path.cwd() / destination).resolve()
     if destination.exists():

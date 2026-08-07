@@ -11,7 +11,7 @@ cd <your-lbrain-directory>
 git remote rename origin kit
 git remote set-url --push kit DISABLED
 git branch -m main kit-base
-git switch -c main v0.1.0
+git switch -c main v0.2.0
 ```
 
 `kit-base` follows the public Kit. `main` is the private personal context history. The disabled push URL prevents an accidental push of personal context to the public Kit.
@@ -56,6 +56,15 @@ git switch main
 git merge --no-ff v<release> -m "kit: upgrade to v<release>"
 python3 System/Kit/check.py
 ```
+
+If the selected personal release already registers Context Pack Submodules, restore them after the merge:
+
+```sh
+git submodule sync --recursive
+git submodule update --init --recursive
+```
+
+Kit upgrades preserve user-owned Pack Definitions, `.gitmodules` registrations, and Submodule pointers. A temporarily unavailable Pack remote does not erase those records; restore access and rerun the Submodule update before using that Pack.
 
 `kit-base` may move ahead of the latest release tag so the user can inspect upcoming Kit history. Never merge `kit-base` itself into personal `main`; merge only the exact formal release tag selected above.
 

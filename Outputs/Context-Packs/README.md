@@ -10,3 +10,26 @@ Pack Definitions select private LBrain material for a portable, independently ve
 - LBrain remains canonical. Change canonical context or the Definition, then rebuild the Pack.
 
 See [[System/Kit/CONTEXT_PACK_SPEC]] for the complete contract.
+
+## Owner workflow
+
+Run the Core Skill script from the LBrain root. Paths below are repository-relative:
+
+```sh
+python3 Skills/Kit/lbrain-context-pack/scripts/pack.py create <pack-id> --summary "<purpose>" --visibility public --license MIT
+python3 Skills/Kit/lbrain-context-pack/scripts/pack.py preview Outputs/Context-Packs/<pack-id>.md
+python3 Skills/Kit/lbrain-context-pack/scripts/pack.py build Outputs/Context-Packs/<pack-id>.md
+```
+
+Review the complete Candidate and disclosure summary. Publication is a separate operation and requires explicit approval:
+
+```sh
+python3 Skills/Kit/lbrain-context-pack/scripts/pack.py publish Outputs/Context-Packs/<pack-id>.md --remote <empty-or-registered-pack-repository> --approve-publication
+python3 Skills/Kit/lbrain-context-pack/scripts/pack.py verify Outputs/Context-Packs/<pack-id>.md
+```
+
+GitHub first publication uses two independent approvals: one to create the repository and one to publish the reviewed Candidate. Existing releases use `update`; downloaded copies cannot be recalled, so `revoke` only publishes a forward warning release. `fork` creates a new independent Pack identity and history. Run each command with `--help` for its explicit approval flags.
+
+## Recipient workflow
+
+A recipient may clone the Pack repository or receive a downloaded directory. Start with `PACK.md`, follow its loading order, and load only the included `context/`, `knowledge/`, `skills/`, and `artifacts/` material needed for the task. Git enables release and integrity checks; without Git, the Pack remains usable and verification is structural only. LBrain is not required.

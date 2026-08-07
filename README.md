@@ -1,7 +1,7 @@
 <!-- ownership: kit -->
 # LBrain Kit
 
-LBrain Kit is a Git-versioned, Markdown-native personal context system for people and their agents. It keeps raw sources, synthesized knowledge, personal context, executable skills, and created outputs separate while remaining usable in Obsidian and any text editor.
+LBrain Kit is a Git-versioned, Markdown-native personal context system for people and their agents. It keeps raw sources, synthesized knowledge, personal context, executable skills, and created outputs separate while remaining usable in Obsidian and any text editor. Selected context can be compiled into independently versioned Context Packs for another person or agent without sharing the private LBrain.
 
 The Kit is private by default. It does not include cloud sync, a database, a custom updater, or a hosted service.
 
@@ -22,7 +22,7 @@ All internal links use Obsidian-compatible Wikilinks such as `[[Knowledge/Wiki/I
 | `Knowledge/` | Sources and source-grounded synthesis |
 | `Context/` | Identity, enduring areas, and active projects |
 | `Skills/` | Reusable agent capabilities |
-| `Outputs/` | Draft and published work |
+| `Outputs/` | Draft and published work, including portable Context Packs |
 | `System/` | Kit contracts, rules, templates, and proposals |
 | `Archives/` | Role-preserving inactive material |
 

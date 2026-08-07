@@ -124,7 +124,7 @@ Share approved context.
         with tempfile.TemporaryDirectory() as temporary:
             root = self.copy_repo(Path(temporary))
 
-            result = self.run_pack(root, "create", "agentkey-growth", "--summary", "AgentKey growth context")
+            result = self.run_pack(root, "create", "agentkey-growth", "--summary", "AgentKey: growth context")
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             definition = root / "Outputs/Context-Packs/agentkey-growth.md"
@@ -132,6 +132,7 @@ Share approved context.
             text = definition.read_text(encoding="utf-8")
             self.assertIn("type: context-pack", text)
             self.assertIn("pack_id: agentkey-growth", text)
+            self.assertIn('summary: "AgentKey: growth context"', text)
             self.assertIn("visibility: private", text)
             self.assertIn("status: draft", text)
             self.assertIn("## Includes", text)
@@ -820,7 +821,7 @@ Exercise Skill licensing.
             self.assertNotEqual(untagged.returncode, 0)
             self.assertIn("Pack version tag does not point at HEAD", untagged.stderr)
             git(source, "fetch", "--tags", "origin")
-            copied = base / "copied-pack"
+            copied = root / "Outputs/received-pack"
             shutil.copytree(source, copied, ignore=shutil.ignore_patterns(".git"))
 
             structural = self.run_pack(root, "verify", str(copied))
