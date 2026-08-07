@@ -636,6 +636,31 @@ def validate_remote(remote: str) -> None:
         raise ValueError("remote URL must not contain embedded credentials")
 
 
+def create_github_repository(repository: str, visibility: str) -> str:
+    access = "--public" if visibility == "public" else "--private"
+    created = subprocess.run(
+        ["gh", "repo", "create", repository, access],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if created.returncode:
+        raise ValueError(f"GitHub repository creation failed: {(created.stderr or created.stdout).strip()}")
+    viewed = subprocess.run(
+        ["gh", "repo", "view", repository, "--json", "sshUrl", "--jq", ".sshUrl"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if viewed.returncode or not viewed.stdout.strip():
+        raise ValueError(
+            "GitHub repository was created but its Git URL could not be read; preserve it and attach the remote manually"
+        )
+    remote = viewed.stdout.strip()
+    validate_remote(remote)
+    return remote
+
+
 def publish(args: argparse.Namespace) -> int:
     root = args.root.resolve()
     definition = load_definition(Path(args.definition), root)
@@ -650,22 +675,37 @@ def publish(args: argparse.Namespace) -> int:
     version = str(pack_metadata.get("version", ""))
     if pack_metadata.get("release_status") != "candidate" or not re.fullmatch(r"\d{4}\.\d{2}\.\d{2}\.\d+", version):
         raise ValueError("Candidate manifest has invalid version or release_status")
-    remote = args.remote or str(definition.metadata.get("repository") or "")
-    if not remote:
-        raise ValueError("publication requires --remote for a new Pack")
-    validate_remote(remote)
     registered_remote = str(definition.metadata.get("repository") or "")
+    github_repository = getattr(args, "github_repository", None)
+    if github_repository and not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", github_repository):
+        raise ValueError("--github-repository must be owner/name")
+    if github_repository and (args.remote or registered_remote):
+        raise ValueError("GitHub repository creation is only for a new Pack without another remote")
+    remote = args.remote or registered_remote
+    github_pending = bool(github_repository and not remote)
+    if not remote and not github_pending:
+        raise ValueError("publication requires --remote or --github-repository for a new Pack")
+    if remote:
+        validate_remote(remote)
     if registered_remote and remote != registered_remote:
         raise ValueError("--remote does not match the registered Pack repository")
     existing_release = bool(registered_remote)
     submodule_path = f"Outputs/Context-Packs/Repos/{definition.pack_id}"
+    remote_display = remote or f"github:{github_repository}"
     print(
         f"PLAN pack={definition.pack_id} version={version} visibility={definition.visibility} "
-        f"remote={remote} submodule={submodule_path}"
+        f"remote={remote_display} submodule={submodule_path}"
     )
     print("REVIEW Candidate diff, disclosure summary, destination, visibility, license, and version")
+    missing_approval = False
+    if github_pending and not getattr(args, "approve_repository_creation", False):
+        print("REPOSITORY APPROVAL REQUIRED: rerun with --approve-repository-creation")
+        missing_approval = True
     if not args.approve_publication:
-        print("APPROVAL REQUIRED: rerun with --approve-publication after semantic review")
+        label = "PUBLICATION APPROVAL REQUIRED" if github_pending else "APPROVAL REQUIRED"
+        print(f"{label}: rerun with --approve-publication after semantic review")
+        missing_approval = True
+    if missing_approval:
         return 2
 
     ensure_publishable_parent(root)
@@ -675,6 +715,9 @@ def publish(args: argparse.Namespace) -> int:
         write_candidate(definition, selection, root, expected, version)
         if tree_snapshot(expected) != tree_snapshot(candidate):
             raise ValueError("Candidate is stale or modified; rebuild and review before publication")
+
+        if github_pending:
+            remote = create_github_repository(str(github_repository), definition.visibility)
 
         remote_refs = subprocess.run(
             ["git", "ls-remote", "--heads", "--tags", remote],
@@ -1096,6 +1139,8 @@ def parser() -> argparse.ArgumentParser:
     publish_parser = subcommands.add_parser("publish")
     publish_parser.add_argument("definition")
     publish_parser.add_argument("--remote")
+    publish_parser.add_argument("--github-repository")
+    publish_parser.add_argument("--approve-repository-creation", action="store_true")
     publish_parser.add_argument("--approve-publication", action="store_true")
     publish_parser.set_defaults(handler=publish)
 

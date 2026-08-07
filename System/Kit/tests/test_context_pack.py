@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess
 import sys
@@ -40,12 +41,18 @@ class ContextPackTest(unittest.TestCase):
         shutil.copytree(ROOT, copy, ignore=shutil.ignore_patterns(".git", "__pycache__", ".scratch"))
         return copy
 
-    def run_pack(self, root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    def run_pack(
+        self,
+        root: Path,
+        *args: str,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, str(root / PACK.relative_to(ROOT)), "--root", str(root), *args],
             text=True,
             capture_output=True,
             check=False,
+            env=env,
         )
 
     def write_note(self, root: Path, relative: str, metadata: str, body: str) -> None:
@@ -1034,6 +1041,104 @@ Exercise Skill licensing.
             self.assertNotEqual(collision.returncode, 0)
             self.assertIn("destination already exists", collision.stderr)
             self.assertEqual(git(destination, "rev-parse", "HEAD"), fork_head)
+
+    def test_github_first_publication_uses_double_approval_and_fake_command_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, definition, unused_remote = self.prepare_publishable_candidate(base)
+            shutil.rmtree(unused_remote)
+            fake_bin = base / "bin"
+            fake_bin.mkdir()
+            fake_gh = fake_bin / "gh"
+            fake_remote = base / "github-pack.git"
+            fake_log = base / "gh.log"
+            fake_gh.write_text(
+                """#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_GH_LOG"
+if [ "$1 $2" = "repo create" ]; then
+  git init --bare "$FAKE_GH_REMOTE" >/dev/null 2>&1
+  exit 0
+fi
+if [ "$1 $2" = "repo view" ]; then
+  printf '%s\n' "$FAKE_GH_REMOTE"
+  exit 0
+fi
+exit 1
+""",
+                encoding="utf-8",
+            )
+            fake_gh.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "PATH": f"{fake_bin}:{environment['PATH']}",
+                    "FAKE_GH_REMOTE": str(fake_remote),
+                    "FAKE_GH_LOG": str(fake_log),
+                }
+            )
+
+            planned = self.run_pack(
+                root,
+                "publish",
+                str(definition.relative_to(root)),
+                "--github-repository",
+                "Nowhitestar/agentkey-growth",
+                env=environment,
+            )
+
+            self.assertNotEqual(planned.returncode, 0)
+            self.assertIn("REPOSITORY APPROVAL REQUIRED", planned.stdout)
+            self.assertIn("PUBLICATION APPROVAL REQUIRED", planned.stdout)
+            self.assertFalse(fake_log.exists())
+            self.assertFalse(fake_remote.exists())
+
+            approved = self.run_pack(
+                root,
+                "publish",
+                str(definition.relative_to(root)),
+                "--github-repository",
+                "Nowhitestar/agentkey-growth",
+                "--approve-repository-creation",
+                "--approve-publication",
+                env=environment,
+            )
+
+            self.assertEqual(approved.returncode, 0, approved.stdout + approved.stderr)
+            self.assertTrue(fake_remote.is_dir())
+            commands = fake_log.read_text(encoding="utf-8")
+            self.assertIn("repo create Nowhitestar/agentkey-growth --public", commands)
+            self.assertIn("repo view Nowhitestar/agentkey-growth --json sshUrl --jq .sshUrl", commands)
+            self.assertIn(f"repository: {fake_remote}", definition.read_text(encoding="utf-8"))
+            self.assertIn("PUBLISHED agentkey-growth", approved.stdout)
+
+    def test_github_creation_failure_leaves_parent_unregistered(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, definition, unused_remote = self.prepare_publishable_candidate(base)
+            shutil.rmtree(unused_remote)
+            fake_bin = base / "bin"
+            fake_bin.mkdir()
+            fake_gh = fake_bin / "gh"
+            fake_gh.write_text("#!/bin/sh\necho 'authentication required' >&2\nexit 1\n", encoding="utf-8")
+            fake_gh.chmod(0o755)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+
+            failed = self.run_pack(
+                root,
+                "publish",
+                str(definition.relative_to(root)),
+                "--github-repository",
+                "Nowhitestar/agentkey-growth",
+                "--approve-repository-creation",
+                "--approve-publication",
+                env=environment,
+            )
+
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("GitHub repository creation failed", failed.stderr)
+            self.assertFalse((root / ".gitmodules").exists())
+            self.assertNotIn("repository:", definition.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
