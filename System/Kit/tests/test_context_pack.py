@@ -35,6 +35,10 @@ def git(repository: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def optional_bytes(path: Path) -> bytes | None:
+    return path.read_bytes() if path.is_file() else None
+
+
 class ContextPackTest(unittest.TestCase):
     def copy_repo(self, destination: Path) -> Path:
         copy = destination / "lbrain"
@@ -123,6 +127,7 @@ Share approved context.
     def test_create_writes_a_private_definition_without_remote_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = self.copy_repo(Path(temporary))
+            gitmodules_before = optional_bytes(root / ".gitmodules")
 
             result = self.run_pack(root, "create", "agentkey-growth", "--summary", "AgentKey: growth context")
 
@@ -137,7 +142,7 @@ Share approved context.
             self.assertIn("status: draft", text)
             self.assertIn("## Includes", text)
             self.assertNotIn("repository:", text)
-            self.assertFalse((root / ".gitmodules").exists())
+            self.assertEqual(optional_bytes(root / ".gitmodules"), gitmodules_before)
             self.assertIn("CREATED Outputs/Context-Packs/agentkey-growth.md", result.stdout)
 
             duplicate = definition.with_name("duplicate-name.md")
@@ -431,6 +436,7 @@ Help an agent understand AgentKey growth decisions.
 """,
                 encoding="utf-8",
             )
+            gitmodules_before = optional_bytes(root / ".gitmodules")
 
             result = self.run_pack(root, "build", "Outputs/Context-Packs/agentkey-growth.md")
 
@@ -456,7 +462,7 @@ Help an agent understand AgentKey growth decisions.
             sources = (candidate / "SOURCES.md").read_text(encoding="utf-8")
             self.assertIn("AgentKey project context", sources)
             self.assertNotIn(str(root), sources)
-            self.assertFalse((root / ".gitmodules").exists())
+            self.assertEqual(optional_bytes(root / ".gitmodules"), gitmodules_before)
             first_digest = tree_digest(candidate)
 
             rebuilt = self.run_pack(root, "build", "Outputs/Context-Packs/agentkey-growth.md")
@@ -772,6 +778,7 @@ Exercise Skill licensing.
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             root, definition, remote = self.prepare_publishable_candidate(base)
+            gitmodules_before = optional_bytes(root / ".gitmodules")
 
             planned = self.run_pack(
                 root,
@@ -786,7 +793,7 @@ Exercise Skill licensing.
             self.assertIn("CANDIDATE DIFF BEGIN", planned.stdout)
             self.assertIn("candidate/PACK.md", planned.stdout)
             self.assertIn("DISCLOSURE direct=1", planned.stdout)
-            self.assertFalse((root / ".gitmodules").exists())
+            self.assertEqual(optional_bytes(root / ".gitmodules"), gitmodules_before)
             self.assertEqual(
                 subprocess.run(["git", "--git-dir", str(remote), "show-ref"], capture_output=True).returncode,
                 1,
@@ -1286,6 +1293,7 @@ exit 1
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             root, definition, unused_remote = self.prepare_publishable_candidate(base)
+            gitmodules_before = optional_bytes(root / ".gitmodules")
             shutil.rmtree(unused_remote)
             fake_bin = base / "bin"
             fake_bin.mkdir()
@@ -1308,7 +1316,7 @@ exit 1
 
             self.assertNotEqual(failed.returncode, 0)
             self.assertIn("GitHub repository creation failed", failed.stderr)
-            self.assertFalse((root / ".gitmodules").exists())
+            self.assertEqual(optional_bytes(root / ".gitmodules"), gitmodules_before)
             self.assertNotIn("repository:", definition.read_text(encoding="utf-8"))
 
 
