@@ -20,3 +20,5 @@ Every change is either **Direct**, **Proposal**, or **Forbidden without explicit
 | Git | validated local commit | push, remote change, history rewrite | push personal main to kit |
 
 When several rows apply, use the most restrictive one. A Proposal records intent; only an explicit user decision changes it to `accepted` or `rejected`. Apply an accepted Proposal separately and record evidence.
+
+Scheduled Context Intake follows the same table. It may capture and route verified durable context, but it cannot confirm Identity, publish Outputs or Packs, change Git remotes, move Submodule pointers, or push history. Connector failure makes a run partial and must be reported; it never authorizes guessing the missing source state.

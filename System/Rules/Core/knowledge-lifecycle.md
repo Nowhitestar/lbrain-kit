@@ -5,6 +5,8 @@
 
 Put uncertain or unclassified material in Inbox. If provenance is known and worth retaining, create a Source directly. Capture the smallest lawful amount needed: prefer `reference`, use `excerpt` when analysis needs exact language, and use `full` only when authorized.
 
+Context Intake applies Capture across every enabled external source in one manual or scheduled run. A target Project controls attention, not coverage. Record partial or stale source coverage honestly, deduplicate durable events while retaining provenance, route non-target material to its own role, and avoid mirroring complete external structures. Use the active agent's scheduler and connectors; LBrain stores no scheduler, connector credentials, or ingestion daemon.
+
 ## Process
 
 Classify each capture by durable role. Preserve external claims in Sources; place personal state in Context; make created artifacts Outputs. Fix metadata and provenance before synthesis.
