@@ -53,6 +53,66 @@ class ContextPackTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"---\n{metadata.strip()}\n---\n{body}", encoding="utf-8")
 
+    def prepare_publishable_candidate(self, base: Path) -> tuple[Path, Path, Path]:
+        root = self.copy_repo(base)
+        git(root, "init", "-b", "main")
+        git(root, "config", "user.name", "LBrain Test")
+        git(root, "config", "user.email", "lbrain-test@example.invalid")
+        git(root, "add", ".")
+        git(root, "commit", "-m", "kit: initialize fixture")
+        self.write_note(
+            root,
+            "Context/Projects/AgentKey.md",
+            """
+type: project
+summary: Publishable AgentKey context
+status: active
+visibility: public
+outcome: Share the approved result
+source_of_truth: synthetic
+created: 2026-08-07
+updated: 2026-08-07
+""",
+            "# AgentKey\n\nApproved public context.\n",
+        )
+        definition = root / "Outputs/Context-Packs/agentkey-growth.md"
+        definition.write_text(
+            """---
+type: context-pack
+pack_id: agentkey-growth
+summary: Publishable AgentKey Pack
+status: draft
+visibility: public
+license: MIT
+created: 2026-08-07
+updated: 2026-08-07
+---
+# AgentKey Growth
+
+## Purpose
+
+Share approved context.
+
+## Includes
+
+- path: Context/Projects/AgentKey.md
+
+## Excludes
+
+## Skills
+
+## Build Notes
+""",
+            encoding="utf-8",
+        )
+        git(root, "add", "Context/Projects/AgentKey.md", "Outputs/Context-Packs/agentkey-growth.md")
+        git(root, "commit", "-m", "project: add synthetic Pack source")
+        built = self.run_pack(root, "build", "Outputs/Context-Packs/agentkey-growth.md")
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        remote = base / "agentkey-growth.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+        return root, definition, remote
+
     def test_create_writes_a_private_definition_without_remote_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = self.copy_repo(Path(temporary))
@@ -614,63 +674,7 @@ Exercise Skill licensing.
     def test_approved_publish_creates_local_release_tag_and_parent_submodule_commit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
-            root = self.copy_repo(base)
-            git(root, "init", "-b", "main")
-            git(root, "config", "user.name", "LBrain Test")
-            git(root, "config", "user.email", "lbrain-test@example.invalid")
-            git(root, "add", ".")
-            git(root, "commit", "-m", "kit: initialize fixture")
-            self.write_note(
-                root,
-                "Context/Projects/AgentKey.md",
-                """
-type: project
-summary: Publishable AgentKey context
-status: active
-visibility: public
-outcome: Share the approved result
-source_of_truth: synthetic
-created: 2026-08-07
-updated: 2026-08-07
-""",
-                "# AgentKey\n\nApproved public context.\n",
-            )
-            definition = root / "Outputs/Context-Packs/agentkey-growth.md"
-            definition.write_text(
-                """---
-type: context-pack
-pack_id: agentkey-growth
-summary: Publishable AgentKey Pack
-status: draft
-visibility: public
-license: MIT
-created: 2026-08-07
-updated: 2026-08-07
----
-# AgentKey Growth
-
-## Purpose
-
-Share approved context.
-
-## Includes
-
-- path: Context/Projects/AgentKey.md
-
-## Excludes
-
-## Skills
-
-## Build Notes
-""",
-                encoding="utf-8",
-            )
-            git(root, "add", "Context/Projects/AgentKey.md", "Outputs/Context-Packs/agentkey-growth.md")
-            git(root, "commit", "-m", "project: add synthetic Pack source")
-            built = self.run_pack(root, "build", "Outputs/Context-Packs/agentkey-growth.md")
-            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
-            remote = base / "agentkey-growth.git"
-            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+            root, definition, remote = self.prepare_publishable_candidate(base)
 
             planned = self.run_pack(
                 root,
@@ -734,6 +738,164 @@ Share approved context.
             )
             self.assertNotEqual(invalid.returncode, 0)
             self.assertIn("context-pack repository does not match .gitmodules URL", invalid.stdout)
+
+    def test_owner_update_builds_next_release_and_requires_new_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, definition, remote = self.prepare_publishable_candidate(base)
+            first = self.run_pack(
+                root,
+                "publish",
+                str(definition.relative_to(root)),
+                "--remote",
+                str(remote),
+                "--approve-publication",
+            )
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            project = root / "Context/Projects/AgentKey.md"
+            project.write_text(project.read_text(encoding="utf-8") + "\nNew approved learning.\n", encoding="utf-8")
+            git(root, "add", str(project.relative_to(root)))
+            git(root, "commit", "-m", "project: update Pack source")
+
+            planned = self.run_pack(root, "update", str(definition.relative_to(root)))
+
+            self.assertNotEqual(planned.returncode, 0)
+            version = f"{date.today().isoformat().replace('-', '.')}.2"
+            self.assertIn(f"OWNER UPDATE candidate={version}", planned.stdout)
+            self.assertIn("APPROVAL REQUIRED", planned.stdout)
+            self.assertNotIn(version, git(remote, "tag", "--list"))
+
+            updated = self.run_pack(
+                root,
+                "update",
+                str(definition.relative_to(root)),
+                "--approve-publication",
+            )
+
+            self.assertEqual(updated.returncode, 0, updated.stdout + updated.stderr)
+            self.assertEqual(git(remote, "tag", "--list").splitlines(), [
+                f"{date.today().isoformat().replace('-', '.')}.1",
+                version,
+            ])
+            self.assertIn("New approved learning.", git(remote, "show", "main:context/AgentKey.md"))
+            submodule = root / "Outputs/Context-Packs/Repos/agentkey-growth"
+            self.assertIn("New approved learning.", (submodule / "context/AgentKey.md").read_text(encoding="utf-8"))
+            self.assertEqual(git(root, "status", "--short"), "")
+
+            verified = self.run_pack(root, "verify", str(definition.relative_to(root)))
+
+            self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+            self.assertIn(f"VERIFY OK pack=agentkey-growth version={version} git=verified", verified.stdout)
+
+    def test_verify_copied_pack_reports_structural_only_and_detects_manifest_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, definition, remote = self.prepare_publishable_candidate(base)
+            published = self.run_pack(
+                root,
+                "publish",
+                str(definition.relative_to(root)),
+                "--remote",
+                str(remote),
+                "--approve-publication",
+            )
+            self.assertEqual(published.returncode, 0, published.stdout + published.stderr)
+            source = root / "Outputs/Context-Packs/Repos/agentkey-growth"
+            sources_file = source / "SOURCES.md"
+            sources_file.write_text(sources_file.read_text(encoding="utf-8") + "dirty\n", encoding="utf-8")
+            dirty = self.run_pack(root, "verify", str(definition.relative_to(root)))
+            self.assertNotEqual(dirty.returncode, 0)
+            self.assertIn("Pack Git working tree is dirty", dirty.stderr)
+            git(source, "checkout", "--", "SOURCES.md")
+            version = f"{date.today().isoformat().replace('-', '.')}.1"
+            git(source, "tag", "-d", version)
+            untagged = self.run_pack(root, "verify", str(definition.relative_to(root)))
+            self.assertNotEqual(untagged.returncode, 0)
+            self.assertIn("Pack version tag does not point at HEAD", untagged.stderr)
+            git(source, "fetch", "--tags", "origin")
+            copied = base / "copied-pack"
+            shutil.copytree(source, copied, ignore=shutil.ignore_patterns(".git"))
+
+            structural = self.run_pack(root, "verify", str(copied))
+
+            self.assertEqual(structural.returncode, 0, structural.stdout + structural.stderr)
+            self.assertIn("git=unavailable", structural.stdout)
+            manifest = copied / "PACK.md"
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace("release_status: published", "release_status: broken"),
+                encoding="utf-8",
+            )
+
+            invalid = self.run_pack(root, "verify", str(copied))
+
+            self.assertNotEqual(invalid.returncode, 0)
+            self.assertIn("invalid release_status", invalid.stderr)
+
+    def test_remote_update_detection_does_not_move_pointer_without_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, definition, remote = self.prepare_publishable_candidate(base)
+            published = self.run_pack(
+                root,
+                "publish",
+                str(definition.relative_to(root)),
+                "--remote",
+                str(remote),
+                "--approve-publication",
+            )
+            self.assertEqual(published.returncode, 0, published.stdout + published.stderr)
+            submodule = root / "Outputs/Context-Packs/Repos/agentkey-growth"
+            pinned = git(submodule, "rev-parse", "HEAD")
+            external = base / "external"
+            subprocess.run(
+                ["git", "-c", "protocol.file.allow=always", "clone", str(remote), str(external)],
+                check=True,
+                capture_output=True,
+            )
+            git(external, "config", "user.name", "External Publisher")
+            git(external, "config", "user.email", "external@example.invalid")
+            version = f"{date.today().isoformat().replace('-', '.')}.2"
+            manifest = external / "PACK.md"
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    f"version: {date.today().isoformat().replace('-', '.')}.1",
+                    f"version: {version}",
+                ),
+                encoding="utf-8",
+            )
+            context = external / "context/AgentKey.md"
+            context.write_text(context.read_text(encoding="utf-8") + "\nRemote improvement.\n", encoding="utf-8")
+            git(external, "add", ".")
+            git(external, "commit", "-m", f"publish: agentkey-growth {version}")
+            git(external, "tag", version)
+            git(external, "push", "origin", "main")
+            git(external, "push", "origin", version)
+
+            detected = self.run_pack(
+                root,
+                "update",
+                str(definition.relative_to(root)),
+                "--check-remote",
+            )
+
+            self.assertNotEqual(detected.returncode, 0)
+            self.assertIn("REMOTE UPDATE available", detected.stdout)
+            self.assertIn("APPROVAL REQUIRED", detected.stdout)
+            self.assertEqual(git(submodule, "rev-parse", "HEAD"), pinned)
+
+            approved = self.run_pack(
+                root,
+                "update",
+                str(definition.relative_to(root)),
+                "--check-remote",
+                "--approve-pointer",
+            )
+
+            self.assertEqual(approved.returncode, 0, approved.stdout + approved.stderr)
+            self.assertNotEqual(git(submodule, "rev-parse", "HEAD"), pinned)
+            self.assertIn("Remote improvement.", (submodule / "context/AgentKey.md").read_text(encoding="utf-8"))
+            self.assertIn("publish: update agentkey-growth pointer", git(root, "log", "-1", "--pretty=%s"))
+            self.assertEqual(git(root, "status", "--short"), "")
 
 
 if __name__ == "__main__":

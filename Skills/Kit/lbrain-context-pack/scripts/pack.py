@@ -414,8 +414,24 @@ def rewrite_wikilinks(text: str, source: Path, destinations: dict[Path, Path], r
     return pattern.sub(replace, text)
 
 
-def candidate_version() -> str:
-    return f"{date.today().isoformat().replace('-', '.')}.1"
+def next_version(definition: Definition, root: Path) -> str:
+    prefix = date.today().isoformat().replace("-", ".")
+    submodule_path = str(definition.metadata.get("submodule_path") or "")
+    if not submodule_path or not (root / submodule_path).is_dir():
+        return f"{prefix}.1"
+    result = subprocess.run(
+        ["git", "-C", str(root / submodule_path), "tag", "--list", f"{prefix}.*"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    numbers = []
+    if result.returncode == 0:
+        for tag in result.stdout.splitlines():
+            suffix = tag.removeprefix(f"{prefix}.")
+            if suffix.isdigit():
+                numbers.append(int(suffix))
+    return f"{prefix}.{max(numbers, default=0) + 1}"
 
 
 def manifest(
@@ -528,7 +544,7 @@ def build(args: argparse.Namespace) -> int:
     if selection.blocked:
         raise ValueError("preview blocked: " + "; ".join(sorted(set(selection.blocked))))
     candidate = root / "Outputs/Context-Packs/Candidates" / definition.pack_id
-    version = candidate_version()
+    version = next_version(definition, root)
     file_count = write_candidate(definition, selection, root, candidate, version)
     print(f"BUILT {relative(candidate, root)}")
     print(f"SUMMARY files={file_count} version={version} status=candidate")
@@ -553,6 +569,22 @@ def tree_snapshot(root: Path) -> dict[str, bytes]:
         for path in sorted(root.rglob("*"))
         if path.is_file() and ".git" not in path.parts
     }
+
+
+def comparable_snapshot(root: Path) -> dict[str, bytes]:
+    snapshot = tree_snapshot(root)
+    manifest_bytes = snapshot.get("PACK.md")
+    if manifest_bytes is not None:
+        manifest_text = manifest_bytes.decode("utf-8")
+        manifest_text = re.sub(r"^version: .+$", "version: <release>", manifest_text, flags=re.MULTILINE)
+        manifest_text = re.sub(
+            r"^release_status: .+$",
+            "release_status: <release>",
+            manifest_text,
+            flags=re.MULTILINE,
+        )
+        snapshot["PACK.md"] = manifest_text.encode("utf-8")
+    return snapshot
 
 
 def yaml_scalar(value: str) -> str:
@@ -622,6 +654,10 @@ def publish(args: argparse.Namespace) -> int:
     if not remote:
         raise ValueError("publication requires --remote for a new Pack")
     validate_remote(remote)
+    registered_remote = str(definition.metadata.get("repository") or "")
+    if registered_remote and remote != registered_remote:
+        raise ValueError("--remote does not match the registered Pack repository")
+    existing_release = bool(registered_remote)
     submodule_path = f"Outputs/Context-Packs/Repos/{definition.pack_id}"
     print(
         f"PLAN pack={definition.pack_id} version={version} visibility={definition.visibility} "
@@ -648,11 +684,35 @@ def publish(args: argparse.Namespace) -> int:
         )
         if remote_refs.returncode:
             raise ValueError(f"remote is unavailable: {(remote_refs.stderr or remote_refs.stdout).strip()}")
-        if remote_refs.stdout.strip():
+        if existing_release and not remote_refs.stdout.strip():
+            raise ValueError("registered Pack remote has no published refs")
+        if not existing_release and remote_refs.stdout.strip():
             raise ValueError("first publication requires an empty remote repository")
 
         release = temporary_root / "release"
-        shutil.copytree(candidate, release)
+        if existing_release:
+            cloned = subprocess.run(
+                ["git", "-c", "protocol.file.allow=always", "clone", remote, str(release)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if cloned.returncode:
+                raise ValueError(f"cannot clone registered Pack remote: {(cloned.stderr or cloned.stdout).strip()}")
+            if version in git(release, "tag", "--list", version).splitlines():
+                raise ValueError(f"release tag already exists: {version}")
+            current = comparable_snapshot(release)
+            for path in release.iterdir():
+                if path.name == ".git":
+                    continue
+                shutil.rmtree(path) if path.is_dir() else path.unlink()
+            for path in candidate.iterdir():
+                target = release / path.name
+                shutil.copytree(path, target) if path.is_dir() else shutil.copy2(path, target)
+            if current == comparable_snapshot(release):
+                raise ValueError("Candidate has no changes from the current Pack release")
+        else:
+            shutil.copytree(candidate, release)
         pack_path = release / "PACK.md"
         pack_path.write_text(
             pack_path.read_text(encoding="utf-8").replace(
@@ -660,7 +720,8 @@ def publish(args: argparse.Namespace) -> int:
             ),
             encoding="utf-8",
         )
-        git(release, "init", "-b", "main")
+        if not existing_release:
+            git(release, "init", "-b", "main")
         parent_name = git(root, "config", "user.name") or "LBrain Context Pack"
         parent_email = git(root, "config", "user.email") or "context-pack@example.invalid"
         git(release, "config", "user.name", parent_name)
@@ -668,7 +729,8 @@ def publish(args: argparse.Namespace) -> int:
         git(release, "add", ".")
         git(release, "commit", "-m", f"publish: {definition.pack_id} {version}")
         git(release, "tag", version)
-        git(release, "remote", "add", "origin", remote)
+        if not existing_release:
+            git(release, "remote", "add", "origin", remote)
         git(release, "push", "-u", "origin", "main")
         git(release, "push", "origin", version)
 
@@ -682,10 +744,18 @@ def publish(args: argparse.Namespace) -> int:
     repos = root / "Outputs/Context-Packs/Repos"
     repos.mkdir(parents=True, exist_ok=True)
     try:
-        git(root, "submodule", "add", remote, submodule_path, file_transport=True)
+        if existing_release:
+            submodule = root / submodule_path
+            if not submodule.is_dir():
+                raise ValueError("registered Pack Submodule is not initialized")
+            git(submodule, "fetch", "--tags", "origin", file_transport=True)
+            git(submodule, "checkout", "--detach", version)
+        else:
+            git(root, "submodule", "add", remote, submodule_path, file_transport=True)
         update_definition_registration(definition, root, remote, submodule_path)
         git(root, "add", ".gitmodules", submodule_path, relative(definition.path, root))
-        git(root, "commit", "-m", f"publish: add {definition.pack_id} {version}")
+        action = "update" if existing_release else "add"
+        git(root, "commit", "-m", f"publish: {action} {definition.pack_id} {version}")
     except ValueError as error:
         raise ValueError(
             f"Pack release {version} exists on the remote but parent registration is incomplete; "
@@ -693,6 +763,148 @@ def publish(args: argparse.Namespace) -> int:
         ) from error
     print(f"PUBLISHED {definition.pack_id} {version}")
     print(f"SUBMODULE {submodule_path}")
+    return 0
+
+
+def update(args: argparse.Namespace) -> int:
+    root = args.root.resolve()
+    definition = load_definition(Path(args.definition), root)
+    if args.check_remote:
+        return update_from_remote(args, definition, root)
+    selection = resolve_definition(definition, root)
+    if selection.blocked:
+        raise ValueError("preview blocked: " + "; ".join(sorted(set(selection.blocked))))
+    candidate = root / "Outputs/Context-Packs/Candidates" / definition.pack_id
+    version = next_version(definition, root)
+    write_candidate(definition, selection, root, candidate, version)
+    submodule_path = str(definition.metadata.get("submodule_path") or "")
+    if submodule_path and (root / submodule_path).is_dir():
+        if comparable_snapshot(candidate) == comparable_snapshot(root / submodule_path):
+            print(f"OWNER UPDATE none pack={definition.pack_id}")
+            return 0
+    print(f"OWNER UPDATE candidate={version} pack={definition.pack_id}")
+    if not args.approve_publication:
+        print("APPROVAL REQUIRED: review the Candidate and rerun with --approve-publication")
+        return 2
+    publication_args = argparse.Namespace(
+        root=root,
+        definition=args.definition,
+        remote=None,
+        approve_publication=True,
+    )
+    return publish(publication_args)
+
+
+def remote_main(remote: str) -> str:
+    result = subprocess.run(
+        ["git", "ls-remote", remote, "refs/heads/main"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        raise ValueError(f"cannot read Pack remote: {(result.stderr or result.stdout).strip()}")
+    return result.stdout.partition("\t")[0].strip()
+
+
+def update_from_remote(args: argparse.Namespace, definition: Definition, root: Path) -> int:
+    remote = str(definition.metadata.get("repository") or "")
+    submodule_path = str(definition.metadata.get("submodule_path") or "")
+    if not remote or not submodule_path:
+        raise ValueError("remote update requires a published Pack Definition")
+    submodule = root / submodule_path
+    if not submodule.is_dir():
+        raise ValueError("Pack Submodule is not initialized")
+    current = git(submodule, "rev-parse", "HEAD")
+    available = remote_main(remote)
+    if not available:
+        raise ValueError("Pack remote main is missing")
+    if current == available:
+        print(f"REMOTE UPDATE none pack={definition.pack_id} commit={current}")
+        return 0
+    print(f"REMOTE UPDATE available pack={definition.pack_id} current={current} remote={available}")
+    if not args.approve_pointer:
+        print("APPROVAL REQUIRED: rerun with --approve-pointer to move the Submodule")
+        return 2
+    ensure_publishable_parent(root)
+    git(submodule, "fetch", "--tags", "origin", file_transport=True)
+    git(submodule, "checkout", "--detach", available)
+    git(root, "add", submodule_path)
+    git(root, "commit", "-m", f"publish: update {definition.pack_id} pointer")
+    print(f"SUBMODULE UPDATED {definition.pack_id} {available}")
+    return 0
+
+
+def verify_pack(pack_root: Path, root: Path) -> tuple[str, str, str]:
+    if not pack_root.is_dir():
+        raise ValueError(f"Pack root does not exist: {pack_root}")
+    manifest_path = pack_root / "PACK.md"
+    sources_path = pack_root / "SOURCES.md"
+    if not manifest_path.is_file() or not sources_path.is_file():
+        raise ValueError("Pack requires PACK.md and SOURCES.md")
+    frontmatter, _, _ = load_check_helpers(root)
+    metadata = frontmatter(manifest_path.read_text(encoding="utf-8"))
+    required = {"type", "pack_id", "summary", "version", "release_status", "visibility", "license"}
+    missing = required - metadata.keys()
+    if missing:
+        raise ValueError(f"Pack manifest missing fields: {', '.join(sorted(missing))}")
+    if metadata.get("type") != "context-pack-release":
+        raise ValueError("invalid Pack manifest type")
+    status = str(metadata.get("release_status"))
+    if status not in {"candidate", "published", "revoked"}:
+        raise ValueError(f"invalid release_status: {status}")
+    version = str(metadata.get("version"))
+    if not re.fullmatch(r"\d{4}\.\d{2}\.\d{2}\.\d+", version):
+        raise ValueError(f"invalid Pack version: {version}")
+    markdown_link = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)")
+    for markdown_path in pack_root.rglob("*.md"):
+        for raw in markdown_link.findall(markdown_path.read_text(encoding="utf-8")):
+            target = raw.split("#", 1)[0].strip()
+            if not target or re.match(r"^[a-z][a-z0-9+.-]*:", target, re.IGNORECASE):
+                continue
+            resolved = (markdown_path.parent / target).resolve()
+            if not resolved.is_relative_to(pack_root.resolve()) or not resolved.exists():
+                raise ValueError(f"unresolved or escaping Pack link in {markdown_path.relative_to(pack_root)}")
+    git_check = subprocess.run(
+        ["git", "-C", str(pack_root), "rev-parse", "--is-inside-work-tree"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if git_check.returncode:
+        return str(metadata.get("pack_id")), version, "unavailable"
+    if git(pack_root, "status", "--porcelain"):
+        raise ValueError("Pack Git working tree is dirty")
+    if status in {"published", "revoked"} and version not in git(pack_root, "tag", "--points-at", "HEAD").splitlines():
+        raise ValueError("Pack version tag does not point at HEAD")
+    return str(metadata.get("pack_id")), version, "verified"
+
+
+def verify(args: argparse.Namespace) -> int:
+    root = args.root.resolve()
+    target = Path(args.target)
+    resolved = target if target.is_absolute() else root / target
+    if resolved.is_file():
+        definition = load_definition(resolved, root)
+        submodule_path = str(definition.metadata.get("submodule_path") or "")
+        if not submodule_path:
+            candidate = root / "Outputs/Context-Packs/Candidates" / definition.pack_id
+            pack_root = candidate
+        else:
+            pack_root = root / submodule_path
+        pack_id, version, git_state = verify_pack(pack_root, root)
+        if pack_id != definition.pack_id:
+            raise ValueError("Definition pack_id does not match Pack manifest")
+        if git_state == "verified" and submodule_path:
+            pointer = git(root, "ls-tree", "HEAD", submodule_path).split()
+            if len(pointer) < 3 or pointer[2] != git(pack_root, "rev-parse", "HEAD"):
+                raise ValueError("parent Submodule pointer does not match Pack HEAD")
+            origin = git(pack_root, "config", "--get", "remote.origin.url")
+            if origin != str(definition.metadata.get("repository")):
+                raise ValueError("Pack origin does not match Definition repository")
+    else:
+        pack_id, version, git_state = verify_pack(resolved, root)
+    print(f"VERIFY OK pack={pack_id} version={version} git={git_state}")
     return 0
 
 
@@ -722,6 +934,17 @@ def parser() -> argparse.ArgumentParser:
     publish_parser.add_argument("--remote")
     publish_parser.add_argument("--approve-publication", action="store_true")
     publish_parser.set_defaults(handler=publish)
+
+    update_parser = subcommands.add_parser("update")
+    update_parser.add_argument("definition")
+    update_parser.add_argument("--approve-publication", action="store_true")
+    update_parser.add_argument("--check-remote", action="store_true")
+    update_parser.add_argument("--approve-pointer", action="store_true")
+    update_parser.set_defaults(handler=update)
+
+    verify_parser = subcommands.add_parser("verify")
+    verify_parser.add_argument("target")
+    verify_parser.set_defaults(handler=verify)
     return command
 
 
