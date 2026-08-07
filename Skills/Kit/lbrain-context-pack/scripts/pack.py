@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import shutil
 import sys
 from dataclasses import dataclass, field
 from datetime import date
@@ -21,9 +23,9 @@ def load_check_helpers(root: Path):
     if str(kit) not in sys.path:
         sys.path.insert(0, str(kit))
     sys.dont_write_bytecode = True
-    from check import frontmatter, links  # pylint: disable=import-outside-toplevel
+    from check import RESOURCE, frontmatter, links  # pylint: disable=import-outside-toplevel
 
-    return frontmatter, links
+    return frontmatter, links, RESOURCE
 
 
 @dataclass(frozen=True)
@@ -72,7 +74,7 @@ def load_definition(path: Path, root: Path) -> Definition:
     resolved = resolved.resolve()
     if not resolved.is_relative_to(root) or not resolved.is_file():
         raise ValueError(f"definition does not exist inside LBrain: {path}")
-    frontmatter, _ = load_check_helpers(root)
+    frontmatter, _, _ = load_check_helpers(root)
     text = resolved.read_text(encoding="utf-8")
     metadata = frontmatter(text)
     if metadata.get("type") != "context-pack":
@@ -149,7 +151,7 @@ def source_markdown(root: Path) -> list[Path]:
 
 
 def resolve_definition(definition: Definition, root: Path) -> Preview:
-    frontmatter, links = load_check_helpers(root)
+    frontmatter, links, resource_pattern = load_check_helpers(root)
     preview = Preview()
     markdown = source_markdown(root)
 
@@ -218,6 +220,14 @@ def resolve_definition(definition: Definition, root: Path) -> Preview:
             if dependency not in visited:
                 visited.add(dependency)
                 queue.append(dependency)
+        if source.name == "SKILL.md":
+            for resource in resource_pattern.findall(source.read_text(encoding="utf-8")):
+                dependency = source.parent / resource.rstrip(".,;:")
+                if not dependency.is_file():
+                    preview.blocked.append(f"missing Skill resource: {relative(dependency, root)}")
+                    continue
+                if dependency not in preview.direct:
+                    preview.dependencies.add(dependency)
 
     if definition.visibility == "public":
         for dependency in sorted(preview.dependencies):
@@ -300,6 +310,155 @@ def preview(args: argparse.Namespace) -> int:
     return 2 if result.blocked else 0
 
 
+def destination_for(source: Path, root: Path) -> Path:
+    source_relative = source.relative_to(root)
+    parts = source_relative.parts
+    if len(parts) >= 4 and parts[0] == "Skills" and parts[1] in {"Kit", "Personal"}:
+        package_root = root.joinpath(*parts[:3])
+        return Path("skills") / parts[2] / source.relative_to(package_root)
+    if source.suffix.casefold() != ".md":
+        return Path("artifacts") / source.name
+    frontmatter, _, _ = load_check_helpers(root)
+    note_type = str(frontmatter(source.read_text(encoding="utf-8")).get("type", ""))
+    if note_type in {"knowledge", "source"}:
+        return Path("knowledge") / source.name
+    if note_type in {"identity", "project", "area", "proposal", "note"}:
+        return Path("context") / source.name
+    return Path("artifacts") / source.name
+
+
+def selected_markdown_index(paths: set[Path], root: Path) -> tuple[dict[str, Path], dict[str, list[Path]]]:
+    markdown = [path for path in paths if path.suffix.casefold() == ".md"]
+    by_path = {relative(path, root).removesuffix(".md").casefold(): path for path in markdown}
+    by_stem: dict[str, list[Path]] = {}
+    for path in markdown:
+        by_stem.setdefault(path.stem.casefold(), []).append(path)
+    return by_path, by_stem
+
+
+def rewrite_wikilinks(text: str, source: Path, destinations: dict[Path, Path], root: Path) -> str:
+    pattern = re.compile(r"(?<!!)\[\[([^\]]+)\]\]")
+    by_path, by_stem = selected_markdown_index(set(destinations), root)
+
+    def replace(match: re.Match[str]) -> str:
+        raw = match.group(1)
+        target_with_anchor, separator, label = raw.partition("|")
+        target, anchor_separator, anchor = target_with_anchor.partition("#")
+        normalized = target.strip("/").removesuffix(".md").casefold()
+        matches = [by_path[normalized]] if normalized in by_path else by_stem.get(normalized, [])
+        if len(matches) != 1:
+            return match.group(0)
+        destination = destinations[matches[0]]
+        current = destinations[source].parent
+        link = Path(os.path.relpath(destination, current)).as_posix()
+        if anchor_separator:
+            link += f"#{anchor}"
+        rendered_label = label if separator else (anchor or matches[0].stem)
+        return f"[{rendered_label}]({link})"
+
+    return pattern.sub(replace, text)
+
+
+def candidate_version() -> str:
+    return f"{date.today().isoformat().replace('-', '.')}.1"
+
+
+def manifest(definition: Definition, destinations: dict[Path, Path]) -> str:
+    today = date.today().isoformat()
+    summary = str(definition.metadata.get("summary", ""))
+    license_name = str(definition.metadata.get("license", "UNLICENSED"))
+    audience = definition.metadata.get("audience")
+    audience_line = f"audience: {audience}\n" if audience else ""
+    inventory = "\n".join(
+        f"- [{path.as_posix()}]({path.as_posix()})"
+        for path in sorted(destinations.values())
+    ) or "- No selected content."
+    return f"""---
+type: context-pack-release
+pack_id: {definition.pack_id}
+summary: {summary}
+version: {candidate_version()}
+release_status: candidate
+visibility: {definition.visibility}
+{audience_line}license: {license_name}
+created: {today}
+updated: {today}
+---
+# {definition.pack_id.replace('-', ' ').title()}
+
+{summary}
+
+## Loading Order
+
+1. Read this manifest and its limitations.
+2. Load only the relevant files from `context/` and `knowledge/`.
+3. Load a package under `skills/` only when its behavior is needed.
+4. Open `artifacts/` only when referenced by the task.
+
+## Contents
+
+{inventory}
+
+## Limitations
+
+- This Pack is a compiled snapshot, not its source LBrain.
+- Verify changing external facts before relying on dated context.
+"""
+
+
+def sources_document(paths: set[Path], root: Path) -> str:
+    frontmatter, _, _ = load_check_helpers(root)
+    entries = []
+    for path in sorted(paths):
+        if path.suffix.casefold() == ".md":
+            metadata = frontmatter(path.read_text(encoding="utf-8"))
+            label = str(metadata.get("summary") or path.stem)
+        else:
+            label = path.name
+        entries.append(f"- {label}")
+    return "# Sources\n\nSafe provenance summary for this compiled Pack.\n\n" + "\n".join(entries) + "\n"
+
+
+def build(args: argparse.Namespace) -> int:
+    root = args.root.resolve()
+    definition = load_definition(Path(args.definition), root)
+    selection = resolve_definition(definition, root)
+    if selection.blocked:
+        raise ValueError("preview blocked: " + "; ".join(sorted(set(selection.blocked))))
+    selected = selection.direct | selection.dependencies
+    destinations: dict[Path, Path] = {}
+    occupied: dict[Path, Path] = {}
+    for source in sorted(selected):
+        destination = destination_for(source, root)
+        if destination in occupied and occupied[destination] != source:
+            raise ValueError(
+                f"compiled path collision: {relative(occupied[destination], root)} and "
+                f"{relative(source, root)} -> {destination.as_posix()}"
+            )
+        occupied[destination] = source
+        destinations[source] = destination
+
+    candidate = root / "Outputs/Context-Packs/Candidates" / definition.pack_id
+    if candidate.exists():
+        shutil.rmtree(candidate)
+    candidate.mkdir(parents=True)
+    for source, destination in sorted(destinations.items(), key=lambda item: item[1].as_posix()):
+        target = candidate / destination
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if source.suffix.casefold() == ".md":
+            target.write_text(
+                rewrite_wikilinks(source.read_text(encoding="utf-8"), source, destinations, root),
+                encoding="utf-8",
+            )
+        else:
+            shutil.copy2(source, target)
+    (candidate / "PACK.md").write_text(manifest(definition, destinations), encoding="utf-8")
+    (candidate / "SOURCES.md").write_text(sources_document(selected, root), encoding="utf-8")
+    print(f"BUILT {relative(candidate, root)}")
+    print(f"SUMMARY files={len(destinations) + 2} version={candidate_version()} status=candidate")
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(description=__doc__)
     command.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[4])
@@ -316,6 +475,10 @@ def parser() -> argparse.ArgumentParser:
     preview_parser = subcommands.add_parser("preview")
     preview_parser.add_argument("definition")
     preview_parser.set_defaults(handler=preview)
+
+    build_parser = subcommands.add_parser("build")
+    build_parser.add_argument("definition")
+    build_parser.set_defaults(handler=build)
     return command
 
 
