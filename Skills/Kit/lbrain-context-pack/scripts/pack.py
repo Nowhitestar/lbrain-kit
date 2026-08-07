@@ -908,6 +908,170 @@ def verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def replace_manifest_fields(path: Path, fields: dict[str, str], extra: dict[str, str] | None = None) -> None:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    try:
+        end = lines[1:].index("---") + 1
+    except ValueError as error:
+        raise ValueError("Pack manifest frontmatter is not closed") from error
+    seen: set[str] = set()
+    for index in range(1, end):
+        match = re.match(r"^([A-Za-z0-9_-]+):", lines[index])
+        if match and match.group(1) in fields:
+            key = match.group(1)
+            lines[index] = f"{key}: {yaml_scalar(fields[key])}"
+            seen.add(key)
+    for key, value in (extra or {}).items():
+        if key not in seen:
+            lines.insert(end, f"{key}: {yaml_scalar(value)}")
+            end += 1
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def clone_local_or_remote(remote: str, destination: Path) -> None:
+    cloned = subprocess.run(
+        ["git", "-c", "protocol.file.allow=always", "clone", remote, str(destination)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if cloned.returncode:
+        raise ValueError(f"cannot clone Pack remote: {(cloned.stderr or cloned.stdout).strip()}")
+
+
+def configure_identity(repository: Path, parent: Path) -> None:
+    name = subprocess.run(
+        ["git", "-C", str(parent), "config", "--get", "user.name"],
+        text=True,
+        capture_output=True,
+        check=False,
+    ).stdout.strip() or "LBrain Context Pack"
+    email = subprocess.run(
+        ["git", "-C", str(parent), "config", "--get", "user.email"],
+        text=True,
+        capture_output=True,
+        check=False,
+    ).stdout.strip() or "context-pack@example.invalid"
+    git(repository, "config", "user.name", name)
+    git(repository, "config", "user.email", email)
+
+
+def revoke(args: argparse.Namespace) -> int:
+    root = args.root.resolve()
+    definition = load_definition(Path(args.definition), root)
+    remote = str(definition.metadata.get("repository") or "")
+    submodule_path = str(definition.metadata.get("submodule_path") or "")
+    if not remote or not submodule_path:
+        raise ValueError("revocation requires a published Pack Definition")
+    if "\n" in args.reason or SECRET.search(args.reason) or ABSOLUTE_PRIVATE_PATH.search(args.reason):
+        raise ValueError("revocation reason contains unsafe content")
+    if args.replacement and not re.fullmatch(r"https?://[^\s]+", args.replacement):
+        raise ValueError("replacement must be an HTTP or HTTPS URL")
+    pack_root = root / submodule_path
+    pack_id, current_version, git_state = verify_pack(pack_root, root)
+    if git_state != "verified":
+        raise ValueError("revocation requires a Git-verified Pack")
+    current_meta, _, _ = load_check_helpers(root)
+    if current_meta((pack_root / "PACK.md").read_text(encoding="utf-8")).get("release_status") == "revoked":
+        raise ValueError("Pack is already revoked")
+    version = next_version(definition, root)
+    print(
+        f"PLAN revoke pack={pack_id} current={current_version} version={version} "
+        f"remote={remote} reason={args.reason}"
+    )
+    print("NOTICE revocation is forward-only and cannot recall downloaded copies")
+    if not args.approve_revocation:
+        print("APPROVAL REQUIRED: rerun with --approve-revocation")
+        return 2
+    ensure_publishable_parent(root)
+    with tempfile.TemporaryDirectory() as temporary:
+        release = Path(temporary) / "release"
+        clone_local_or_remote(remote, release)
+        manifest_path = release / "PACK.md"
+        replace_manifest_fields(
+            manifest_path,
+            {
+                "version": version,
+                "release_status": "revoked",
+                "updated": date.today().isoformat(),
+            },
+        )
+        replacement = f"\nReplacement: {args.replacement}\n" if args.replacement else ""
+        with manifest_path.open("a", encoding="utf-8") as manifest_file:
+            manifest_file.write(
+                "\n## Revocation\n\n"
+                f"Reason: {args.reason}\n"
+                f"{replacement}\n"
+                "This revocation cannot recall copies already downloaded.\n"
+            )
+        configure_identity(release, root)
+        git(release, "add", "PACK.md")
+        git(release, "commit", "-m", f"publish: revoke {pack_id} {version}")
+        git(release, "tag", version)
+        git(release, "push", "origin", "main")
+        git(release, "push", "origin", version)
+    git(pack_root, "fetch", "--tags", "origin", file_transport=True)
+    git(pack_root, "checkout", "--detach", version)
+    update_definition_registration(definition, root, remote, submodule_path)
+    git(root, "add", submodule_path, relative(definition.path, root))
+    git(root, "commit", "-m", f"publish: revoke {pack_id} {version}")
+    print(f"REVOKED {pack_id} {version}")
+    print("NOTICE downloaded copies remain outside the owner's control")
+    return 0
+
+
+def fork_pack(args: argparse.Namespace) -> int:
+    root = args.root.resolve()
+    if not PACK_ID.fullmatch(args.pack_id):
+        raise ValueError("fork pack_id must use lowercase letters, digits, and single hyphens")
+    source = Path(args.source)
+    source = source.resolve() if source.is_absolute() else (root / source).resolve()
+    source_id, source_version, git_state = verify_pack(source, root)
+    if git_state == "verified":
+        source_status = load_check_helpers(root)[0]((source / "PACK.md").read_text(encoding="utf-8")).get("release_status")
+        if source_status == "revoked":
+            raise ValueError("a revoked Pack must be corrected before it can be forked as published")
+    destination = Path(args.destination)
+    destination = destination.resolve() if destination.is_absolute() else (Path.cwd() / destination).resolve()
+    if destination.exists():
+        raise ValueError(f"destination already exists: {destination}")
+    if destination == source or destination.is_relative_to(source):
+        raise ValueError("fork destination cannot be inside the source Pack")
+    version = f"{date.today().isoformat().replace('-', '.')}.1"
+    print(
+        f"PLAN fork source={source_id}@{source_version} pack={args.pack_id} "
+        f"version={version} destination={destination}"
+    )
+    if not args.approve_fork:
+        print("APPROVAL REQUIRED: rerun with --approve-fork")
+        return 2
+    shutil.copytree(source, destination, ignore=shutil.ignore_patterns(".git"))
+    manifest_path = destination / "PACK.md"
+    replace_manifest_fields(
+        manifest_path,
+        {
+            "pack_id": args.pack_id,
+            "version": version,
+            "release_status": "published",
+            "updated": date.today().isoformat(),
+        },
+        {"forked_from": f"{source_id}@{source_version}"},
+    )
+    with manifest_path.open("a", encoding="utf-8") as manifest_file:
+        manifest_file.write(
+            "\n## Lineage\n\n"
+            f"Forked from `{source_id}` release `{source_version}`. "
+            "Original attribution and license obligations remain in force.\n"
+        )
+    git(destination, "init", "-b", "main")
+    configure_identity(destination, root)
+    git(destination, "add", ".")
+    git(destination, "commit", "-m", f"publish: fork {args.pack_id} {version}")
+    git(destination, "tag", version)
+    print(f"FORKED {args.pack_id} {version} destination={destination}")
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(description=__doc__)
     command.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[4])
@@ -945,6 +1109,20 @@ def parser() -> argparse.ArgumentParser:
     verify_parser = subcommands.add_parser("verify")
     verify_parser.add_argument("target")
     verify_parser.set_defaults(handler=verify)
+
+    revoke_parser = subcommands.add_parser("revoke")
+    revoke_parser.add_argument("definition")
+    revoke_parser.add_argument("--reason", required=True)
+    revoke_parser.add_argument("--replacement")
+    revoke_parser.add_argument("--approve-revocation", action="store_true")
+    revoke_parser.set_defaults(handler=revoke)
+
+    fork_parser = subcommands.add_parser("fork")
+    fork_parser.add_argument("source")
+    fork_parser.add_argument("--pack-id", required=True)
+    fork_parser.add_argument("--destination", required=True)
+    fork_parser.add_argument("--approve-fork", action="store_true")
+    fork_parser.set_defaults(handler=fork_pack)
     return command
 
 

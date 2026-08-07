@@ -897,6 +897,144 @@ Exercise Skill licensing.
             self.assertIn("publish: update agentkey-growth pointer", git(root, "log", "-1", "--pretty=%s"))
             self.assertEqual(git(root, "status", "--short"), "")
 
+    def test_revoke_preserves_history_and_allows_a_later_corrected_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, definition, remote = self.prepare_publishable_candidate(base)
+            published = self.run_pack(
+                root,
+                "publish",
+                str(definition.relative_to(root)),
+                "--remote",
+                str(remote),
+                "--approve-publication",
+            )
+            self.assertEqual(published.returncode, 0, published.stdout + published.stderr)
+            before = git(remote, "rev-parse", "refs/heads/main")
+
+            planned = self.run_pack(
+                root,
+                "revoke",
+                str(definition.relative_to(root)),
+                "--reason",
+                "Superseded guidance",
+            )
+
+            self.assertNotEqual(planned.returncode, 0)
+            self.assertIn("APPROVAL REQUIRED", planned.stdout)
+            self.assertEqual(git(remote, "rev-parse", "refs/heads/main"), before)
+
+            revoked = self.run_pack(
+                root,
+                "revoke",
+                str(definition.relative_to(root)),
+                "--reason",
+                "Superseded guidance",
+                "--replacement",
+                "https://example.com/replacement",
+                "--approve-revocation",
+            )
+
+            self.assertEqual(revoked.returncode, 0, revoked.stdout + revoked.stderr)
+            prefix = date.today().isoformat().replace("-", ".")
+            self.assertEqual(git(remote, "tag", "--list").splitlines(), [f"{prefix}.1", f"{prefix}.2"])
+            manifest = git(remote, "show", "main:PACK.md")
+            self.assertIn("release_status: revoked", manifest)
+            self.assertIn("Superseded guidance", manifest)
+            self.assertIn("cannot recall copies already downloaded", manifest)
+            self.assertIn("status: active", definition.read_text(encoding="utf-8"))
+            verified = self.run_pack(root, "verify", str(definition.relative_to(root)))
+            self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+            self.assertIn(f"version={prefix}.2", verified.stdout)
+
+            project = root / "Context/Projects/AgentKey.md"
+            project.write_text(project.read_text(encoding="utf-8") + "\nCorrected guidance.\n", encoding="utf-8")
+            git(root, "add", str(project.relative_to(root)))
+            git(root, "commit", "-m", "project: correct revoked Pack source")
+            corrected = self.run_pack(
+                root,
+                "update",
+                str(definition.relative_to(root)),
+                "--approve-publication",
+            )
+
+            self.assertEqual(corrected.returncode, 0, corrected.stdout + corrected.stderr)
+            self.assertIn(f"{prefix}.3", git(remote, "tag", "--list").splitlines())
+            self.assertIn("release_status: published", git(remote, "show", "main:PACK.md"))
+            self.assertIn("Corrected guidance.", git(remote, "show", "main:context/AgentKey.md"))
+
+    def test_fork_creates_an_independent_approved_local_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, definition, remote = self.prepare_publishable_candidate(base)
+            published = self.run_pack(
+                root,
+                "publish",
+                str(definition.relative_to(root)),
+                "--remote",
+                str(remote),
+                "--approve-publication",
+            )
+            self.assertEqual(published.returncode, 0, published.stdout + published.stderr)
+            source = root / "Outputs/Context-Packs/Repos/agentkey-growth"
+            destination = base / "forked-pack"
+            source_head = git(source, "rev-parse", "HEAD")
+
+            planned = self.run_pack(
+                root,
+                "fork",
+                str(source),
+                "--pack-id",
+                "agentkey-growth-fork",
+                "--destination",
+                str(destination),
+            )
+
+            self.assertNotEqual(planned.returncode, 0)
+            self.assertIn("APPROVAL REQUIRED", planned.stdout)
+            self.assertFalse(destination.exists())
+
+            forked = self.run_pack(
+                root,
+                "fork",
+                str(source),
+                "--pack-id",
+                "agentkey-growth-fork",
+                "--destination",
+                str(destination),
+                "--approve-fork",
+            )
+
+            self.assertEqual(forked.returncode, 0, forked.stdout + forked.stderr)
+            self.assertIn("FORKED agentkey-growth-fork", forked.stdout)
+            manifest = (destination / "PACK.md").read_text(encoding="utf-8")
+            self.assertIn("pack_id: agentkey-growth-fork", manifest)
+            self.assertIn("forked_from: agentkey-growth@", manifest)
+            self.assertIn("release_status: published", manifest)
+            version = f"{date.today().isoformat().replace('-', '.')}.1"
+            self.assertEqual(git(destination, "tag", "--list"), version)
+            self.assertEqual(git(destination, "remote"), "")
+            self.assertEqual(git(source, "rev-parse", "HEAD"), source_head)
+            verified = self.run_pack(root, "verify", str(destination))
+            self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+            self.assertIn("git=verified", verified.stdout)
+            fork_head = git(destination, "rev-parse", "HEAD")
+
+            collision = self.run_pack(
+                root,
+                "fork",
+                str(source),
+                "--pack-id",
+                "agentkey-growth-fork",
+                "--destination",
+                str(destination),
+                "--approve-fork",
+            )
+
+            self.assertNotEqual(collision.returncode, 0)
+            self.assertIn("destination already exists", collision.stderr)
+            self.assertEqual(git(destination, "rev-parse", "HEAD"), fork_head)
+
 
 if __name__ == "__main__":
     unittest.main()
