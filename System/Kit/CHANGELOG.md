@@ -3,6 +3,11 @@
 
 All notable Kit-owned changes are documented here. Kit releases follow semantic versioning; Personal Skills carry their own versions.
 
+## 0.2.1 — 2026-08-07
+
+- Preserved imported Source bodies by excluding their author-provided Wikilink markup from repository link validation; Source-to-Wiki integrity remains enforced through `sources` and woven backlinks.
+- Ignored local connector, tool-audit, and generated Wiki cache directories so runtime state is not committed with personal context.
+
 ## 0.2.0 — 2026-08-07
 
 - Added full-source Context Intake guidance across Capture and Weave without introducing another semantic layer.

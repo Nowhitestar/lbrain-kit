@@ -5,6 +5,9 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.gstack/
+.mcp/
+.wiki-cache/
 .obsidian/workspace*.json
 .obsidian/cache
 .trash/

@@ -71,6 +71,19 @@ class ToolingSmokeTest(unittest.TestCase):
             self.assertIn("woven Source has no backlink", result.stdout)
             self.assertIn("context-pack pack_id duplicates", result.stdout)
 
+    def test_validator_preserves_wikilink_markup_in_source_body(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copy = self.copy_repo(Path(temporary))
+            (copy / "Knowledge/Sources/imported.md").write_text(
+                "---\ntype: source\nsummary: imported source\nstatus: active\nvisibility: private\n"
+                "origin: synthetic\ncapture: full\nweaving: pending\ncreated: 2026-08-07\nupdated: 2026-08-07\n"
+                "---\n# Imported Source\n\nThe captured body contains author markup: [[not-an-lbrain-link]].\n",
+                encoding="utf-8",
+            )
+            result = self.run_check(copy)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("not-an-lbrain-link", result.stdout)
+
     def test_isolated_runtime_adapters_and_conflict_guard(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

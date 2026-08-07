@@ -289,6 +289,8 @@ def validate(root: Path) -> list[Finding]:
         relative = path.relative_to(root).as_posix()
         if relative.startswith("System/Templates/Core/"):
             continue
+        if meta_by_path[path].get("type") == "source":
+            continue
         for target in links(text):
             matches = resolve(target, by_path, by_stem)
             if not matches:
