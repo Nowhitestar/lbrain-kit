@@ -74,6 +74,8 @@ Before merging, read `CHANGELOG.md` and the release file under `MIGRATIONS/`. Re
 - preserve User-owned files;
 - preserve personalized Seeded files and apply any suggested seeded change manually.
 
+The 0.2.0 migration requires preserving `Skills/Enabled.md` personalization while adding the seventh mandatory Core Skill entry. Later migrations state their own exact Seeded reconciliation, if any.
+
 Do not push an upgrade until validation passes and the personal content diff is reviewed.
 
 ## Agent commit policy

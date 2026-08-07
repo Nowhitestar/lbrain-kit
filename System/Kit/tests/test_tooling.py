@@ -56,12 +56,20 @@ class ToolingSmokeTest(unittest.TestCase):
                 "---\ntype: source\nsummary: source\nstatus: active\nvisibility: private\norigin: synthetic\ncapture: reference\nweaving: woven\ncreated: 2026-08-07\nupdated: 2026-08-07\n---\n# Source\n",
                 encoding="utf-8",
             )
+            duplicate_definition = (
+                "---\ntype: context-pack\npack_id: duplicate-pack\nsummary: duplicate\n"
+                "status: draft\nvisibility: private\ncreated: 2026-08-07\nupdated: 2026-08-07\n---\n"
+                "# Duplicate Pack\n"
+            )
+            (copy / "Outputs/Context-Packs/duplicate-a.md").write_text(duplicate_definition, encoding="utf-8")
+            (copy / "Outputs/Context-Packs/duplicate-b.md").write_text(duplicate_definition, encoding="utf-8")
             result = self.run_check(copy)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("missing frontmatter fields", result.stdout)
             self.assertIn("public note links non-public note", result.stdout)
             self.assertIn("unresolved Wikilink", result.stdout)
             self.assertIn("woven Source has no backlink", result.stdout)
+            self.assertIn("context-pack pack_id duplicates", result.stdout)
 
     def test_isolated_runtime_adapters_and_conflict_guard(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

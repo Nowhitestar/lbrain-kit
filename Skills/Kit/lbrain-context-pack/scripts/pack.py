@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import re
@@ -14,18 +15,21 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
+from urllib.parse import quote, unquote
 
 
 PACK_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 MANAGED_PARTS = {"Candidates", "Repos"}
 SECTION = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 SECRET = re.compile(
-    r"(?i)\b(?:api[_-]?key|access[_-]?token|secret|password|private[_-]?key)\b"
-    r"\s*[:=]\s*[^\s'\"`]{8,}"
+    r"(?i)(?:\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|secret|password|private[_-]?key)\b"
+    r"\s*[:=]\s*(?:\"[^\"\n]{8,}\"|'[^'\n]{8,}'|[^\s`]{8,})|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
 )
 ABSOLUTE_PRIVATE_PATH = re.compile(r"(?:/Users/|/home/[^$<\s]+|[A-Za-z]:\\Users\\)")
 PRIVATE_URL = re.compile(r"https?://[^\s)\]]*(?:localhost|127\.0\.0\.1|\.internal\b|[?&](?:token|key|secret)=)", re.IGNORECASE)
 SENSITIVE_NAMES = {".env", "credentials", "credentials.json", "secrets", "secrets.json"}
+WIKILINK_REFERENCE = re.compile(r"(!?)\[\[([^\]]+)\]\]")
+MARKDOWN_REFERENCE = re.compile(r"(!?\[[^\]]*\]\()([^)]+)(\))")
 
 
 def load_check_helpers(root: Path):
@@ -79,6 +83,17 @@ def parse_sections(text: str) -> dict[str, list[str]]:
     return sections
 
 
+def definition_with_id(root: Path, pack_id: str, excluding: Path | None = None) -> Path | None:
+    frontmatter, _, _ = load_check_helpers(root)
+    for candidate in sorted((root / "Outputs/Context-Packs").glob("*.md")):
+        if excluding and candidate.resolve() == excluding.resolve():
+            continue
+        metadata = frontmatter(candidate.read_text(encoding="utf-8"))
+        if metadata.get("type") == "context-pack" and metadata.get("pack_id") == pack_id:
+            return candidate
+    return None
+
+
 def load_definition(path: Path, root: Path) -> Definition:
     resolved = path if path.is_absolute() else root / path
     resolved = resolved.resolve()
@@ -89,14 +104,39 @@ def load_definition(path: Path, root: Path) -> Definition:
     metadata = frontmatter(text)
     if metadata.get("type") != "context-pack":
         raise ValueError("definition type must be context-pack")
+    missing_fields = {"pack_id", "summary", "status", "visibility", "created", "updated"} - metadata.keys()
+    if missing_fields:
+        raise ValueError(f"definition missing fields: {', '.join(sorted(missing_fields))}")
     pack_id = str(metadata.get("pack_id", ""))
     if not PACK_ID.fullmatch(pack_id):
         raise ValueError(f"invalid pack_id: {pack_id}")
+    duplicate = definition_with_id(root, pack_id, resolved)
+    if duplicate:
+        raise ValueError(f"duplicate pack_id {pack_id}: {relative(duplicate, root)}")
+    status = str(metadata.get("status"))
+    if status not in {"draft", "active", "archived"}:
+        raise ValueError(f"invalid Definition status: {status}")
+    visibility = str(metadata.get("visibility"))
+    if visibility not in {"private", "trusted", "public"}:
+        raise ValueError(f"invalid Definition visibility: {visibility}")
+    if visibility == "trusted" and not metadata.get("audience"):
+        raise ValueError("trusted Definition requires audience")
+    repository = str(metadata.get("repository") or "")
+    if repository:
+        validate_remote(repository)
     sections = parse_sections(text)
     missing = {"purpose", "includes", "excludes", "skills", "build notes"} - sections.keys()
     if missing:
         raise ValueError(f"definition missing sections: {', '.join(sorted(missing))}")
     return Definition(resolved, metadata, sections)
+
+
+def uses_symlink(path: Path, root: Path) -> bool:
+    return path.is_symlink() or any(
+        parent.is_symlink()
+        for parent in path.parents
+        if parent != root and parent.is_relative_to(root)
+    )
 
 
 def selector_path(raw: str, root: Path) -> tuple[Path | None, str | None]:
@@ -105,24 +145,22 @@ def selector_path(raw: str, root: Path) -> tuple[Path | None, str | None]:
         return None, f"selector escapes LBrain root: {raw}"
     if len(candidate.parts) >= 3 and candidate.parts[:2] == ("Outputs", "Context-Packs") and candidate.parts[2] in MANAGED_PARTS:
         return None, f"selector enters managed Pack content: {raw}"
-    resolved = (root / candidate).resolve()
+    unresolved = root / candidate
+    if uses_symlink(unresolved, root):
+        return None, f"selector uses symlink: {raw}"
+    resolved = unresolved.resolve()
     if not resolved.is_relative_to(root):
         return None, f"selector escapes LBrain root: {raw}"
     if not resolved.exists():
         return None, f"selector does not exist: {raw}"
-    if resolved.is_symlink() or any(parent.is_symlink() for parent in resolved.parents if parent != root.parent):
-        if not resolved.resolve().is_relative_to(root):
-            return None, f"selector follows external symlink: {raw}"
     return resolved, None
 
 
-def selected_files(path: Path) -> set[Path]:
-    if path.is_file():
-        return {path}
-    return {
-        item for item in path.rglob("*")
-        if item.is_file() and ".git" not in item.parts
-    }
+def selected_files(path: Path) -> tuple[set[Path], list[Path]]:
+    items = [path] if path.is_file() or path.is_symlink() else list(path.rglob("*"))
+    symlinks = [item for item in items if item.is_symlink()]
+    files = {item for item in items if not item.is_symlink() and item.is_file() and ".git" not in item.parts}
+    return files, symlinks
 
 
 def query_values(raw: str) -> dict[str, str]:
@@ -148,11 +186,36 @@ def matches_query(metadata: dict[str, object], query: dict[str, str]) -> bool:
     return True
 
 
+def license_id(value: str) -> str:
+    return value.strip().casefold()
+
+
+def license_matches(declared_license: str, license_text: str) -> bool:
+    normalized = license_id(declared_license)
+    text = license_text.strip().casefold()
+    signatures = {
+        "mit": ("mit license", "permission is hereby granted"),
+        "apache-2.0": ("apache license", "version 2.0", "terms and conditions for use"),
+        "bsd-2-clause": ("redistribution and use in source and binary forms", "this list of conditions"),
+        "bsd-3-clause": (
+            "redistribution and use in source and binary forms",
+            "neither the name",
+            "this list of conditions",
+        ),
+        "cc0-1.0": ("creative commons legal code", "cc0 1.0 universal"),
+    }
+    required = signatures.get(normalized)
+    if required:
+        return all(marker in text for marker in required)
+    spdx = f"spdx-license-identifier: {declared_license}".casefold()
+    return spdx in "\n".join(text.splitlines()[:5])
+
+
 def source_markdown(root: Path) -> list[Path]:
     managed = root / "Outputs/Context-Packs"
     result = []
     for path in root.rglob("*.md"):
-        if ".git" in path.parts or ".scratch" in path.parts:
+        if uses_symlink(path, root) or ".git" in path.parts or ".scratch" in path.parts:
             continue
         if path.is_relative_to(managed / "Candidates") or path.is_relative_to(managed / "Repos"):
             continue
@@ -160,8 +223,29 @@ def source_markdown(root: Path) -> list[Path]:
     return sorted(result)
 
 
+def markdown_target(raw: str, source: Path, root: Path) -> tuple[Path | None, str | None]:
+    value = raw.strip()
+    if value.startswith("<") and ">" in value:
+        value = value[1:value.index(">")]
+    else:
+        value = value.split(maxsplit=1)[0]
+    value = unquote(value.split("#", 1)[0])
+    if not value or value.startswith("//") or re.match(r"^[a-z][a-z0-9+.-]*:", value, re.IGNORECASE):
+        return None, None
+    candidate = Path(value)
+    if candidate.is_absolute():
+        return None, f"absolute local link in {relative(source, root)}: {value}"
+    unresolved = source.parent / candidate
+    if uses_symlink(unresolved, root):
+        return None, f"symlink dependency in {relative(source, root)}: {value}"
+    resolved = unresolved.resolve()
+    if not resolved.is_relative_to(root.resolve()) or not resolved.is_file():
+        return None, f"unresolved or escaping Markdown dependency in {relative(source, root)}: {value}"
+    return resolved, None
+
+
 def resolve_definition(definition: Definition, root: Path) -> Preview:
-    frontmatter, links, resource_pattern = load_check_helpers(root)
+    frontmatter, _, resource_pattern = load_check_helpers(root)
     preview = Preview()
     markdown = source_markdown(root)
 
@@ -172,7 +256,9 @@ def resolve_definition(definition: Definition, root: Path) -> Preview:
             if error:
                 preview.blocked.append(error)
             elif path:
-                preview.direct.update(selected_files(path))
+                files, symlinks = selected_files(path)
+                preview.direct.update(files)
+                preview.blocked.extend(f"selected symlink: {relative(item, root)}" for item in symlinks)
         else:
             try:
                 query = query_values(raw)
@@ -192,7 +278,9 @@ def resolve_definition(definition: Definition, root: Path) -> Preview:
             if error:
                 preview.blocked.append(error)
             elif path:
-                excluded_candidates.update(selected_files(path))
+                files, symlinks = selected_files(path)
+                excluded_candidates.update(files)
+                preview.blocked.extend(f"excluded selector contains symlink: {relative(item, root)}" for item in symlinks)
         else:
             try:
                 query = query_values(raw)
@@ -206,38 +294,72 @@ def resolve_definition(definition: Definition, root: Path) -> Preview:
     preview.excluded = preview.direct & excluded_candidates
     preview.direct -= excluded_candidates
 
-    by_path = {relative(path, root).removesuffix(".md").casefold(): path for path in markdown}
+    managed = root / "Outputs/Context-Packs"
+    available = [
+        path
+        for path in root.rglob("*")
+        if path.is_file()
+        and not uses_symlink(path, root)
+        and ".git" not in path.parts
+        and ".scratch" not in path.parts
+        and not path.is_relative_to(managed / "Candidates")
+        and not path.is_relative_to(managed / "Repos")
+    ]
+    by_path: dict[str, Path] = {}
     by_stem: dict[str, list[Path]] = {}
-    for path in markdown:
+    for path in available:
+        key = relative(path, root).casefold()
+        by_path[key] = path
+        if path.suffix.casefold() == ".md":
+            by_path[key.removesuffix(".md")] = path
         by_stem.setdefault(path.stem.casefold(), []).append(path)
 
     queue = [path for path in preview.direct if path.suffix.casefold() == ".md"]
     visited = set(queue)
+
+    def add_dependency(dependency: Path) -> None:
+        if uses_symlink(dependency, root):
+            preview.blocked.append(f"symlink dependency: {relative(dependency, root)}")
+            return
+        if dependency in excluded_candidates:
+            preview.blocked.append(f"required dependency excluded: {relative(dependency, root)}")
+            return
+        if dependency not in preview.direct:
+            preview.dependencies.add(dependency)
+        if dependency.suffix.casefold() == ".md" and dependency not in visited:
+            visited.add(dependency)
+            queue.append(dependency)
+
     while queue:
         source = queue.pop()
-        for target in links(source.read_text(encoding="utf-8")):
-            normalized = target.strip("/").removesuffix(".md")
-            found = [by_path[normalized.casefold()]] if normalized.casefold() in by_path else by_stem.get(normalized.casefold(), [])
+        text = source.read_text(encoding="utf-8")
+        for _, raw in WIKILINK_REFERENCE.findall(text):
+            target = raw.partition("|")[0].partition("#")[0]
+            normalized = target.strip("/")
+            if normalized.casefold().endswith(".md"):
+                normalized = normalized[:-3]
+            stem = Path(normalized).stem.casefold() if Path(normalized).suffix else normalized.casefold()
+            found = [by_path[normalized.casefold()]] if normalized.casefold() in by_path else by_stem.get(stem, [])
             if len(found) != 1:
                 preview.blocked.append(f"unresolved or ambiguous dependency: {target}")
                 continue
-            dependency = found[0]
-            if dependency in excluded_candidates:
-                preview.blocked.append(f"required dependency excluded: {relative(dependency, root)}")
-                continue
-            if dependency not in preview.direct:
-                preview.dependencies.add(dependency)
-            if dependency not in visited:
-                visited.add(dependency)
-                queue.append(dependency)
+            add_dependency(found[0])
+        for _, raw, _ in MARKDOWN_REFERENCE.findall(text):
+            dependency, error = markdown_target(raw, source, root)
+            if error:
+                preview.blocked.append(error)
+            elif dependency:
+                add_dependency(dependency)
         if source.name == "SKILL.md":
-            for resource in resource_pattern.findall(source.read_text(encoding="utf-8")):
+            for resource in resource_pattern.findall(text):
                 dependency = source.parent / resource.rstrip(".,;:")
+                if uses_symlink(dependency, root):
+                    preview.blocked.append(f"symlink Skill resource: {relative(dependency, root)}")
+                    continue
                 if not dependency.is_file():
                     preview.blocked.append(f"missing Skill resource: {relative(dependency, root)}")
                     continue
-                if dependency not in preview.direct:
-                    preview.dependencies.add(dependency)
+                add_dependency(dependency)
 
     selected = preview.direct | preview.dependencies
     personal_packages = {
@@ -248,17 +370,36 @@ def resolve_definition(definition: Definition, root: Path) -> Preview:
     }
     for package in sorted(personal_packages):
         license_path = next((package / name for name in ("LICENSE", "LICENSE.md") if (package / name).is_file()), None)
+        skill_path = package / "SKILL.md"
+        skill_metadata = frontmatter(skill_path.read_text(encoding="utf-8")) if skill_path.is_file() else {}
+        declared_license = str(skill_metadata.get("license") or "")
         if license_path:
             if license_path not in preview.direct:
                 preview.dependencies.add(license_path)
         elif definition.visibility == "public":
             preview.blocked.append(f"public Personal Skill missing license: {relative(package, root)}")
+        if definition.visibility == "public":
+            if not declared_license:
+                preview.blocked.append(f"public Personal Skill missing declared license: {relative(package, root)}")
+            elif license_id(declared_license) != license_id(str(definition.metadata.get("license", ""))):
+                preview.blocked.append(
+                    f"Personal Skill declared license does not match Pack license: {relative(package, root)}"
+                )
+            elif license_path and not license_matches(
+                declared_license,
+                license_path.read_text(encoding="utf-8", errors="replace"),
+            ):
+                preview.blocked.append(f"Personal Skill license file does not match its declaration: {relative(package, root)}")
 
     if definition.visibility == "public":
         if not definition.metadata.get("license"):
             preview.blocked.append("public Definition missing license")
         for dependency in sorted(preview.dependencies):
-            metadata = frontmatter(dependency.read_text(encoding="utf-8"))
+            metadata = (
+                frontmatter(dependency.read_text(encoding="utf-8"))
+                if dependency.suffix.casefold() == ".md"
+                else {}
+            )
             if metadata.get("visibility") in {"private", "trusted"}:
                 preview.blocked.append(f"private dependency: {relative(dependency, root)}")
         for path in sorted(preview.direct | preview.dependencies):
@@ -328,6 +469,9 @@ def create(args: argparse.Namespace) -> int:
     destination = root / "Outputs/Context-Packs" / f"{args.pack_id}.md"
     if destination.exists():
         raise ValueError(f"Definition already exists: {relative(destination, root)}")
+    duplicate = definition_with_id(root, args.pack_id)
+    if duplicate:
+        raise ValueError(f"duplicate pack_id {args.pack_id}: {relative(duplicate, root)}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(
         render_definition(args.pack_id, args.summary, args.visibility, args.audience, args.license),
@@ -352,6 +496,11 @@ def preview(args: argparse.Namespace) -> int:
         print(f"BLOCK {message}")
     if result.blocked:
         print("RESOLVE sanitize, omit, or cancel")
+    else:
+        with tempfile.TemporaryDirectory() as temporary:
+            proposed = Path(temporary) / definition.pack_id
+            write_candidate(definition, result, root, proposed, next_version(definition, root))
+            show_candidate_diff(proposed, pack_baseline(definition, root, include_candidate=True))
     destination = str(definition.metadata.get("repository") or "unconfigured")
     print(
         f"DISCLOSURE visibility={definition.visibility} "
@@ -382,25 +531,31 @@ def destination_for(source: Path, root: Path) -> Path:
     return Path("artifacts") / source.name
 
 
-def selected_markdown_index(paths: set[Path], root: Path) -> tuple[dict[str, Path], dict[str, list[Path]]]:
-    markdown = [path for path in paths if path.suffix.casefold() == ".md"]
-    by_path = {relative(path, root).removesuffix(".md").casefold(): path for path in markdown}
+def selected_file_index(paths: set[Path], root: Path) -> tuple[dict[str, Path], dict[str, list[Path]]]:
+    by_path: dict[str, Path] = {}
     by_stem: dict[str, list[Path]] = {}
-    for path in markdown:
+    for path in paths:
+        key = relative(path, root).casefold()
+        by_path[key] = path
+        if path.suffix.casefold() == ".md":
+            by_path[key.removesuffix(".md")] = path
         by_stem.setdefault(path.stem.casefold(), []).append(path)
     return by_path, by_stem
 
 
 def rewrite_wikilinks(text: str, source: Path, destinations: dict[Path, Path], root: Path) -> str:
-    pattern = re.compile(r"(?<!!)\[\[([^\]]+)\]\]")
-    by_path, by_stem = selected_markdown_index(set(destinations), root)
+    by_path, by_stem = selected_file_index(set(destinations), root)
 
-    def replace(match: re.Match[str]) -> str:
-        raw = match.group(1)
+    def replace_wikilink(match: re.Match[str]) -> str:
+        embedded, raw = match.groups()
         target_with_anchor, separator, label = raw.partition("|")
         target, anchor_separator, anchor = target_with_anchor.partition("#")
-        normalized = target.strip("/").removesuffix(".md").casefold()
-        matches = [by_path[normalized]] if normalized in by_path else by_stem.get(normalized, [])
+        normalized = target.strip("/")
+        if normalized.casefold().endswith(".md"):
+            normalized = normalized[:-3]
+        key = normalized.casefold()
+        stem = Path(normalized).stem.casefold() if Path(normalized).suffix else key
+        matches = [by_path[key]] if key in by_path else by_stem.get(stem, [])
         if len(matches) != 1:
             return match.group(0)
         destination = destinations[matches[0]]
@@ -409,9 +564,27 @@ def rewrite_wikilinks(text: str, source: Path, destinations: dict[Path, Path], r
         if anchor_separator:
             link += f"#{anchor}"
         rendered_label = label if separator else (anchor or matches[0].stem)
-        return f"[{rendered_label}]({link})"
+        return f"{embedded}[{rendered_label}]({quote(link, safe='/#')})"
 
-    return pattern.sub(replace, text)
+    def replace_markdown(match: re.Match[str]) -> str:
+        prefix, raw, suffix = match.groups()
+        dependency, error = markdown_target(raw, source, root)
+        if error or dependency not in destinations:
+            return match.group(0)
+        raw_value = raw.strip()
+        title = ""
+        if not raw_value.startswith("<"):
+            pieces = raw_value.split(maxsplit=1)
+            raw_value = pieces[0]
+            title = f" {pieces[1]}" if len(pieces) == 2 else ""
+        fragment = raw_value.partition("#")[2]
+        current = destinations[source].parent
+        link = Path(os.path.relpath(destinations[dependency], current)).as_posix()
+        if fragment:
+            link += f"#{fragment}"
+        return f"{prefix}{quote(link, safe='/#')}{title}{suffix}"
+
+    return MARKDOWN_REFERENCE.sub(replace_markdown, WIKILINK_REFERENCE.sub(replace_wikilink, text))
 
 
 def next_version(definition: Definition, root: Path) -> str:
@@ -434,6 +607,16 @@ def next_version(definition: Definition, root: Path) -> str:
     return f"{prefix}.{max(numbers, default=0) + 1}"
 
 
+def calver_key(version: str) -> tuple[int, int, int, int]:
+    if not re.fullmatch(r"\d{4}\.\d{2}\.\d{2}\.\d+", version):
+        raise ValueError(f"invalid Pack version: {version}")
+    year, month, day, revision = (int(part) for part in version.split("."))
+    date(year, month, day)
+    if revision < 1:
+        raise ValueError(f"invalid Pack revision: {version}")
+    return year, month, day, revision
+
+
 def manifest(
     definition: Definition,
     destinations: dict[Path, Path],
@@ -448,6 +631,17 @@ def manifest(
         audience_line = "audience:\n" + "".join(f"  - {yaml_scalar(str(item))}\n" for item in audience)
     else:
         audience_line = f"audience: {yaml_scalar(str(audience))}\n" if audience else ""
+    capability_counts = {
+        "Context": sum(path.parts[0] == "context" for path in destinations.values()),
+        "Knowledge": sum(path.parts[0] == "knowledge" for path in destinations.values()),
+        "Skills": sum(path.parts[0] == "skills" for path in destinations.values()),
+        "Artifacts": sum(path.parts[0] == "artifacts" for path in destinations.values()),
+    }
+    capabilities = "\n".join(
+        f"- {name}: {count} included file(s)"
+        for name, count in capability_counts.items()
+        if count
+    ) or "- Manifest and provenance only."
     inventory = "\n".join(
         f"- [{path.as_posix()}]({path.as_posix()})"
         for path in sorted(destinations.values())
@@ -455,11 +649,11 @@ def manifest(
     return f"""---
 type: context-pack-release
 pack_id: {definition.pack_id}
-summary: {summary}
+summary: {yaml_scalar(summary)}
 version: {version}
 release_status: {release_status}
 visibility: {definition.visibility}
-{audience_line}license: {license_name}
+{audience_line}license: {yaml_scalar(license_name)}
 created: {today}
 updated: {today}
 ---
@@ -473,6 +667,10 @@ updated: {today}
 2. Load only the relevant files from `context/` and `knowledge/`.
 3. Load a package under `skills/` only when its behavior is needed.
 4. Open `artifacts/` only when referenced by the task.
+
+## Capabilities
+
+{capabilities}
 
 ## Contents
 
@@ -492,9 +690,22 @@ def sources_document(paths: set[Path], root: Path) -> str:
         if path.suffix.casefold() == ".md":
             metadata = frontmatter(path.read_text(encoding="utf-8"))
             label = str(metadata.get("summary") or path.stem)
+            pointer = next(
+                (
+                    str(metadata[key])
+                    for key in ("origin", "source_of_truth")
+                    if metadata.get(key)
+                    and not SECRET.search(str(metadata[key]))
+                    and not ABSOLUTE_PRIVATE_PATH.search(str(metadata[key]))
+                    and not PRIVATE_URL.search(str(metadata[key]))
+                ),
+                "",
+            )
         else:
             label = path.name
-        entries.append(f"- {label}")
+            pointer = ""
+        suffix = f" — source: `{pointer}`" if pointer else ""
+        entries.append(f"- {label}{suffix}")
     return "# Sources\n\nSafe provenance summary for this compiled Pack.\n\n" + "\n".join(entries) + "\n"
 
 
@@ -574,6 +785,60 @@ def tree_snapshot(root: Path) -> dict[str, bytes]:
     }
 
 
+def review_text(data: bytes) -> list[str] | None:
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    text = SECRET.sub("<redacted-secret>", text)
+    text = re.sub(r"(?:/Users/|/home/)[^\s)\]}`]+", "<private-path>", text)
+    text = re.sub(r"[A-Za-z]:\\Users\\[^\s)\]}`]+", "<private-path>", text)
+    text = PRIVATE_URL.sub("<private-url>", text)
+    return text.splitlines(keepends=True)
+
+
+def show_candidate_diff(candidate: Path, baseline: Path | None) -> int:
+    current = tree_snapshot(baseline) if baseline and baseline.is_dir() else {}
+    proposed = tree_snapshot(candidate)
+    changed = 0
+    print("CANDIDATE DIFF BEGIN")
+    for path in sorted(current.keys() | proposed.keys()):
+        before = current.get(path)
+        after = proposed.get(path)
+        if before == after:
+            continue
+        changed += 1
+        before_lines = review_text(before) if before is not None else []
+        after_lines = review_text(after) if after is not None else []
+        if before_lines is None or after_lines is None:
+            action = "ADD" if before is None else "DELETE" if after is None else "MODIFY"
+            print(f"BINARY {action} {path}")
+            continue
+        print(
+            "".join(
+                difflib.unified_diff(
+                    before_lines,
+                    after_lines,
+                    fromfile=f"current/{path}" if before is not None else "/dev/null",
+                    tofile=f"candidate/{path}" if after is not None else "/dev/null",
+                )
+            ),
+            end="",
+        )
+    if not changed:
+        print("NO CHANGES")
+    print("CANDIDATE DIFF END")
+    return changed
+
+
+def pack_baseline(definition: Definition, root: Path, include_candidate: bool = False) -> Path | None:
+    submodule_path = str(definition.metadata.get("submodule_path") or "")
+    if submodule_path and (root / submodule_path).is_dir():
+        return root / submodule_path
+    candidate = root / "Outputs/Context-Packs/Candidates" / definition.pack_id
+    return candidate if include_candidate and candidate.is_dir() else None
+
+
 def comparable_snapshot(root: Path) -> dict[str, bytes]:
     snapshot = tree_snapshot(root)
     manifest_bytes = snapshot.get("PACK.md")
@@ -639,16 +904,61 @@ def validate_remote(remote: str) -> None:
         raise ValueError("remote URL must not contain embedded credentials")
 
 
+def resume_remote_release(
+    remote: str,
+    candidate: Path,
+    definition: Definition,
+    version: str,
+    root: Path,
+) -> bool:
+    commit = remote_main(remote)
+    if not commit:
+        return False
+    with tempfile.TemporaryDirectory() as temporary:
+        checkout = Path(temporary) / "release"
+        clone_local_or_remote(remote, checkout)
+        git(checkout, "checkout", "--detach", commit)
+        manifest_path = checkout / "PACK.md"
+        if not manifest_path.is_file():
+            return False
+        metadata = load_check_helpers(root)[0](manifest_path.read_text(encoding="utf-8"))
+        pack_id, remote_version, status = validate_pack_manifest(metadata)
+        if (
+            pack_id != definition.pack_id
+            or remote_version != version
+            or status != "published"
+            or comparable_snapshot(checkout) != comparable_snapshot(candidate)
+        ):
+            return False
+        existing_tags = git(checkout, "tag", "--list", version).splitlines()
+        tags_at_head = git(checkout, "tag", "--points-at", "HEAD").splitlines()
+        if existing_tags and version not in tags_at_head:
+            raise ValueError(f"remote tag collision prevents safe recovery: {version}")
+        if not existing_tags:
+            git(checkout, "tag", version)
+            git(checkout, "push", "origin", version)
+        verify_pack(checkout, root)
+    print(f"RESUME verified existing remote release {definition.pack_id} {version}")
+    return True
+
+
 def create_github_repository(repository: str, visibility: str) -> str:
     access = "--public" if visibility == "public" else "--private"
-    created = subprocess.run(
-        ["gh", "repo", "create", repository, access],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        created = subprocess.run(
+            ["gh", "repo", "create", repository, access],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        raise ValueError("GitHub CLI is unavailable; no repository was created and the parent remains unchanged") from error
     if created.returncode:
-        raise ValueError(f"GitHub repository creation failed: {(created.stderr or created.stdout).strip()}")
+        raise ValueError(
+            f"GitHub repository creation failed; the parent remains unchanged. "
+            f"Resolve authentication or name collisions, then review and approve again: "
+            f"{(created.stderr or created.stdout).strip()}"
+        )
     viewed = subprocess.run(
         ["gh", "repo", "view", repository, "--json", "sshUrl", "--jq", ".sshUrl"],
         text=True,
@@ -697,9 +1007,16 @@ def publish(args: argparse.Namespace) -> int:
     remote_display = remote or f"github:{github_repository}"
     print(
         f"PLAN pack={definition.pack_id} version={version} visibility={definition.visibility} "
+        f"license={definition.metadata.get('license') or 'UNLICENSED'} "
         f"remote={remote_display} submodule={submodule_path}"
     )
-    print("REVIEW Candidate diff, disclosure summary, destination, visibility, license, and version")
+    verify_pack(candidate, root)
+    show_candidate_diff(candidate, pack_baseline(definition, root))
+    print(
+        f"DISCLOSURE direct={len(selection.direct)} dependencies={len(selection.dependencies)} "
+        f"excluded={len(selection.excluded)} blocked=0"
+    )
+    print("REVIEW the complete Candidate diff and semantic content before publication")
     missing_approval = False
     if github_pending and not getattr(args, "approve_repository_creation", False):
         print("REPOSITORY APPROVAL REQUIRED: rerun with --approve-repository-creation")
@@ -719,8 +1036,10 @@ def publish(args: argparse.Namespace) -> int:
         if tree_snapshot(expected) != tree_snapshot(candidate):
             raise ValueError("Candidate is stale or modified; rebuild and review before publication")
 
+        created_github = False
         if github_pending:
             remote = create_github_repository(str(github_repository), definition.visibility)
+            created_github = True
 
         remote_refs = subprocess.run(
             ["git", "ls-remote", "--heads", "--tags", remote],
@@ -729,53 +1048,74 @@ def publish(args: argparse.Namespace) -> int:
             check=False,
         )
         if remote_refs.returncode:
+            if created_github:
+                raise ValueError(
+                    f"GitHub repository {github_repository} was created but could not be reached; "
+                    "the parent remains unchanged. Preserve it, restore access, and resume with its Git URL via --remote"
+                )
             raise ValueError(f"remote is unavailable: {(remote_refs.stderr or remote_refs.stdout).strip()}")
         if existing_release and not remote_refs.stdout.strip():
             raise ValueError("registered Pack remote has no published refs")
-        if not existing_release and remote_refs.stdout.strip():
+        resume_release = bool(remote_refs.stdout.strip()) and resume_remote_release(
+            remote,
+            candidate,
+            definition,
+            version,
+            root,
+        )
+        if not existing_release and remote_refs.stdout.strip() and not resume_release:
             raise ValueError("first publication requires an empty remote repository")
 
-        release = temporary_root / "release"
-        if existing_release:
-            cloned = subprocess.run(
-                ["git", "-c", "protocol.file.allow=always", "clone", remote, str(release)],
-                text=True,
-                capture_output=True,
-                check=False,
+        if not resume_release:
+            release = temporary_root / "release"
+            if existing_release:
+                cloned = subprocess.run(
+                    ["git", "-c", "protocol.file.allow=always", "clone", remote, str(release)],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                if cloned.returncode:
+                    raise ValueError(f"cannot clone registered Pack remote: {(cloned.stderr or cloned.stdout).strip()}")
+                if version in git(release, "tag", "--list", version).splitlines():
+                    raise ValueError(f"release tag already exists: {version}")
+                current = comparable_snapshot(release)
+                for path in release.iterdir():
+                    if path.name == ".git":
+                        continue
+                    shutil.rmtree(path) if path.is_dir() else path.unlink()
+                for path in candidate.iterdir():
+                    target = release / path.name
+                    shutil.copytree(path, target) if path.is_dir() else shutil.copy2(path, target)
+                if current == comparable_snapshot(release):
+                    raise ValueError("Candidate has no changes from the current Pack release")
+            else:
+                shutil.copytree(candidate, release)
+            pack_path = release / "PACK.md"
+            pack_path.write_text(
+                pack_path.read_text(encoding="utf-8").replace(
+                    "release_status: candidate", "release_status: published", 1
+                ),
+                encoding="utf-8",
             )
-            if cloned.returncode:
-                raise ValueError(f"cannot clone registered Pack remote: {(cloned.stderr or cloned.stdout).strip()}")
-            if version in git(release, "tag", "--list", version).splitlines():
-                raise ValueError(f"release tag already exists: {version}")
-            current = comparable_snapshot(release)
-            for path in release.iterdir():
-                if path.name == ".git":
-                    continue
-                shutil.rmtree(path) if path.is_dir() else path.unlink()
-            for path in candidate.iterdir():
-                target = release / path.name
-                shutil.copytree(path, target) if path.is_dir() else shutil.copy2(path, target)
-            if current == comparable_snapshot(release):
-                raise ValueError("Candidate has no changes from the current Pack release")
-        else:
-            shutil.copytree(candidate, release)
-        pack_path = release / "PACK.md"
-        pack_path.write_text(
-            pack_path.read_text(encoding="utf-8").replace(
-                "release_status: candidate", "release_status: published", 1
-            ),
-            encoding="utf-8",
-        )
-        if not existing_release:
-            git(release, "init", "-b", "main")
-        configure_identity(release, root)
-        git(release, "add", ".")
-        git(release, "commit", "-m", f"publish: {definition.pack_id} {version}")
-        git(release, "tag", version)
-        if not existing_release:
-            git(release, "remote", "add", "origin", remote)
-        git(release, "push", "-u", "origin", "main")
-        git(release, "push", "origin", version)
+            if not existing_release:
+                git(release, "init", "-b", "main")
+            configure_identity(release, root)
+            git(release, "add", ".")
+            git(release, "commit", "-m", f"publish: {definition.pack_id} {version}")
+            git(release, "tag", version)
+            if not existing_release:
+                git(release, "remote", "add", "origin", remote)
+            try:
+                git(release, "push", "-u", "origin", "main")
+                git(release, "push", "origin", version)
+            except ValueError as error:
+                raise ValueError(
+                    f"Pack remote may contain a partial release for {version}; the parent remains unchanged. "
+                    f"If remote main matches the reviewed Candidate, resume with --remote {remote} "
+                    "--approve-publication (do not repeat --github-repository): "
+                    f"{error}"
+                ) from error
 
     remote_path = Path(remote)
     if remote_path.is_dir() and (remote_path / "HEAD").is_file():
@@ -826,6 +1166,7 @@ def update(args: argparse.Namespace) -> int:
             print(f"OWNER UPDATE none pack={definition.pack_id}")
             return 0
     print(f"OWNER UPDATE candidate={version} pack={definition.pack_id}")
+    show_candidate_diff(candidate, pack_baseline(definition, root))
     if not args.approve_publication:
         print("APPROVAL REQUIRED: review the Candidate and rerun with --approve-publication")
         return 2
@@ -850,6 +1191,32 @@ def remote_main(remote: str) -> str:
     return result.stdout.partition("\t")[0].strip()
 
 
+def verify_remote_release(
+    remote: str,
+    commit: str,
+    current: str,
+    expected_pack_id: str,
+    root: Path,
+) -> tuple[str, str, bool]:
+    with tempfile.TemporaryDirectory() as temporary:
+        checkout = Path(temporary) / "pack"
+        clone_local_or_remote(remote, checkout)
+        git(checkout, "checkout", "--detach", commit)
+        pack_id, version, git_state = verify_pack(checkout, root)
+        if git_state != "verified" or pack_id != expected_pack_id:
+            raise ValueError("remote main does not identify the registered Pack")
+        metadata = load_check_helpers(root)[0]((checkout / "PACK.md").read_text(encoding="utf-8"))
+        status = str(metadata.get("release_status"))
+        if status == "candidate":
+            raise ValueError("remote main points to an unpublished Candidate")
+        ancestry = subprocess.run(
+            ["git", "-C", str(checkout), "merge-base", "--is-ancestor", current, commit],
+            capture_output=True,
+            check=False,
+        )
+        return version, status, ancestry.returncode == 0
+
+
 def update_from_remote(args: argparse.Namespace, definition: Definition, root: Path) -> int:
     remote = str(definition.metadata.get("repository") or "")
     submodule_path = str(definition.metadata.get("submodule_path") or "")
@@ -858,24 +1225,75 @@ def update_from_remote(args: argparse.Namespace, definition: Definition, root: P
     submodule = root / submodule_path
     if not submodule.is_dir():
         raise ValueError("Pack Submodule is not initialized")
+    if git(submodule, "config", "--get", "remote.origin.url") != remote:
+        raise ValueError("Pack Submodule origin does not match its Definition")
     current = git(submodule, "rev-parse", "HEAD")
+    current_id, current_version, current_git_state = verify_pack(submodule, root)
+    if current_git_state != "verified" or current_id != definition.pack_id:
+        raise ValueError("current Submodule is not a verified release of the registered Pack")
     available = remote_main(remote)
     if not available:
         raise ValueError("Pack remote main is missing")
+    version, status, descends_from_current = verify_remote_release(
+        remote,
+        available,
+        current,
+        definition.pack_id,
+        root,
+    )
     if current == available:
-        print(f"REMOTE UPDATE none pack={definition.pack_id} commit={current}")
+        print(f"REMOTE UPDATE none pack={definition.pack_id} version={version} status={status} commit={current}")
         return 0
-    print(f"REMOTE UPDATE available pack={definition.pack_id} current={current} remote={available}")
+    if calver_key(version) <= calver_key(current_version):
+        raise ValueError(f"remote main is not a newer release: current={current_version} remote={version}")
+    if not descends_from_current:
+        raise ValueError("remote main rewrites Pack history instead of descending from the pinned release")
+    print(
+        f"REMOTE UPDATE available pack={definition.pack_id} version={version} status={status} "
+        f"current={current} remote={available}"
+    )
     if not args.approve_pointer:
         print("APPROVAL REQUIRED: rerun with --approve-pointer to move the Submodule")
         return 2
     ensure_publishable_parent(root)
     git(submodule, "fetch", "--tags", "origin", file_transport=True)
-    git(submodule, "checkout", "--detach", available)
+    try:
+        git(submodule, "checkout", "--detach", available)
+        verified_id, verified_version, git_state = verify_pack(submodule, root)
+        if git_state != "verified" or verified_id != definition.pack_id or verified_version != version:
+            raise ValueError("fetched release does not match the reviewed remote release")
+    except ValueError as error:
+        git(submodule, "checkout", "--detach", current)
+        raise ValueError(f"Submodule pointer was not committed; restored {current}: {error}") from error
     git(root, "add", submodule_path)
     git(root, "commit", "-m", f"publish: update {definition.pack_id} pointer")
     print(f"SUBMODULE UPDATED {definition.pack_id} {available}")
     return 0
+
+
+def validate_pack_manifest(metadata: dict[str, object]) -> tuple[str, str, str]:
+    required = {"type", "pack_id", "summary", "version", "release_status", "visibility", "license"}
+    missing = required - metadata.keys()
+    if missing:
+        raise ValueError(f"Pack manifest missing fields: {', '.join(sorted(missing))}")
+    if metadata.get("type") != "context-pack-release":
+        raise ValueError("invalid Pack manifest type")
+    pack_id = str(metadata.get("pack_id"))
+    if not PACK_ID.fullmatch(pack_id):
+        raise ValueError(f"invalid Pack manifest pack_id: {pack_id}")
+    status = str(metadata.get("release_status"))
+    if status not in {"candidate", "published", "revoked"}:
+        raise ValueError(f"invalid release_status: {status}")
+    version = str(metadata.get("version"))
+    calver_key(version)
+    visibility = str(metadata.get("visibility"))
+    if visibility not in {"private", "trusted", "public"}:
+        raise ValueError(f"invalid Pack visibility: {visibility}")
+    if visibility == "trusted" and not metadata.get("audience"):
+        raise ValueError("trusted Pack manifest requires audience")
+    if visibility == "public" and str(metadata.get("license")) in {"", "UNLICENSED"}:
+        raise ValueError("public Pack manifest requires an explicit license")
+    return pack_id, version, status
 
 
 def verify_pack(pack_root: Path, root: Path) -> tuple[str, str, str]:
@@ -885,31 +1303,36 @@ def verify_pack(pack_root: Path, root: Path) -> tuple[str, str, str]:
     sources_path = pack_root / "SOURCES.md"
     if not manifest_path.is_file() or not sources_path.is_file():
         raise ValueError("Pack requires PACK.md and SOURCES.md")
+    allowed = {".git", "PACK.md", "SOURCES.md", "context", "knowledge", "skills", "artifacts"}
+    unexpected = sorted(path.name for path in pack_root.iterdir() if path.name not in allowed)
+    if unexpected:
+        raise ValueError(f"Pack has unexpected root entries: {', '.join(unexpected)}")
+    symlinks = [
+        path.relative_to(pack_root).as_posix()
+        for path in pack_root.rglob("*")
+        if ".git" not in path.relative_to(pack_root).parts and path.is_symlink()
+    ]
+    if symlinks:
+        raise ValueError(f"Pack contains symlinks: {', '.join(sorted(symlinks))}")
     frontmatter, _, _ = load_check_helpers(root)
-    metadata = frontmatter(manifest_path.read_text(encoding="utf-8"))
-    required = {"type", "pack_id", "summary", "version", "release_status", "visibility", "license"}
-    missing = required - metadata.keys()
-    if missing:
-        raise ValueError(f"Pack manifest missing fields: {', '.join(sorted(missing))}")
-    if metadata.get("type") != "context-pack-release":
-        raise ValueError("invalid Pack manifest type")
-    status = str(metadata.get("release_status"))
-    if status not in {"candidate", "published", "revoked"}:
-        raise ValueError(f"invalid release_status: {status}")
-    version = str(metadata.get("version"))
-    if not re.fullmatch(r"\d{4}\.\d{2}\.\d{2}\.\d+", version):
-        raise ValueError(f"invalid Pack version: {version}")
-    markdown_link = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)")
+    manifest_text = manifest_path.read_text(encoding="utf-8")
+    metadata = frontmatter(manifest_text)
+    pack_id, version, status = validate_pack_manifest(metadata)
+    for heading in ("## Loading Order", "## Capabilities", "## Contents", "## Limitations"):
+        if heading not in manifest_text:
+            raise ValueError(f"Pack manifest missing section: {heading}")
     for markdown_path in pack_root.rglob("*.md"):
-        for raw in markdown_link.findall(markdown_path.read_text(encoding="utf-8")):
-            target = raw.split("#", 1)[0].strip()
-            if not target or re.match(r"^[a-z][a-z0-9+.-]*:", target, re.IGNORECASE):
-                continue
-            resolved = (markdown_path.parent / target).resolve()
-            if not resolved.is_relative_to(pack_root.resolve()) or not resolved.exists():
-                raise ValueError(f"unresolved or escaping Pack link in {markdown_path.relative_to(pack_root)}")
+        if ".git" in markdown_path.relative_to(pack_root).parts:
+            continue
+        text = markdown_path.read_text(encoding="utf-8")
+        if WIKILINK_REFERENCE.search(text):
+            raise ValueError(f"unresolved Wikilink in {markdown_path.relative_to(pack_root)}")
+        for _, raw, _ in MARKDOWN_REFERENCE.findall(text):
+            _, error = markdown_target(raw, markdown_path, pack_root)
+            if error:
+                raise ValueError(error)
     if not (pack_root / ".git").exists():
-        return str(metadata.get("pack_id")), version, "unavailable"
+        return pack_id, version, "unavailable"
     git_check = subprocess.run(
         ["git", "-C", str(pack_root), "rev-parse", "--is-inside-work-tree"],
         text=True,
@@ -917,12 +1340,12 @@ def verify_pack(pack_root: Path, root: Path) -> tuple[str, str, str]:
         check=False,
     )
     if git_check.returncode:
-        return str(metadata.get("pack_id")), version, "unavailable"
+        return pack_id, version, "unavailable"
     if git(pack_root, "status", "--porcelain"):
         raise ValueError("Pack Git working tree is dirty")
     if status in {"published", "revoked"} and version not in git(pack_root, "tag", "--points-at", "HEAD").splitlines():
         raise ValueError("Pack version tag does not point at HEAD")
-    return str(metadata.get("pack_id")), version, "verified"
+    return pack_id, version, "verified"
 
 
 def verify(args: argparse.Namespace) -> int:
@@ -1054,8 +1477,14 @@ def revoke(args: argparse.Namespace) -> int:
         git(release, "add", "PACK.md")
         git(release, "commit", "-m", f"publish: revoke {pack_id} {version}")
         git(release, "tag", version)
-        git(release, "push", "origin", "main")
-        git(release, "push", "origin", version)
+        try:
+            git(release, "push", "origin", "main")
+            git(release, "push", "origin", version)
+        except ValueError as error:
+            raise ValueError(
+                f"Pack remote may contain a partial revocation for {version}; the parent remains unchanged. "
+                f"Inspect remote main and tag {version} before resuming: {error}"
+            ) from error
     git(pack_root, "fetch", "--tags", "origin", file_transport=True)
     git(pack_root, "checkout", "--detach", version)
     update_definition_registration(definition, root, remote, submodule_path)
@@ -1072,7 +1501,7 @@ def fork_pack(args: argparse.Namespace) -> int:
         raise ValueError("fork pack_id must use lowercase letters, digits, and single hyphens")
     source = Path(args.source)
     source = source.resolve() if source.is_absolute() else (root / source).resolve()
-    source_id, source_version, git_state = verify_pack(source, root)
+    source_id, source_version, _ = verify_pack(source, root)
     source_status = load_check_helpers(root)[0]((source / "PACK.md").read_text(encoding="utf-8")).get("release_status")
     if source_status == "revoked":
         raise ValueError("a revoked Pack must be corrected before it can be forked as published")

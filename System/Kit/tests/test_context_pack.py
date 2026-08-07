@@ -140,6 +140,13 @@ Share approved context.
             self.assertFalse((root / ".gitmodules").exists())
             self.assertIn("CREATED Outputs/Context-Packs/agentkey-growth.md", result.stdout)
 
+            duplicate = definition.with_name("duplicate-name.md")
+            shutil.copy2(definition, duplicate)
+            collision = self.run_pack(root, "preview", str(definition.relative_to(root)))
+
+            self.assertNotEqual(collision.returncode, 0)
+            self.assertIn("duplicate pack_id agentkey-growth", collision.stderr)
+
     def test_preview_resolves_paths_queries_exclusions_and_dependencies_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = self.copy_repo(Path(temporary))
@@ -309,6 +316,50 @@ Test safety.
             self.assertIn("BLOCK private dependency: Context/Projects/Private.md", result.stdout)
             self.assertIn("BLOCK selector escapes LBrain root: ../outside.md", result.stdout)
 
+    def test_preview_blocks_nested_symlinks_for_non_public_packs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = self.copy_repo(base)
+            selected = root / "Context/Projects/Linked"
+            selected.mkdir(parents=True)
+            external = base / "external.md"
+            external.write_text("private external content\n", encoding="utf-8")
+            os.symlink(external, selected / "external.md")
+            definition = root / "Outputs/Context-Packs/linked.md"
+            definition.write_text(
+                """---
+type: context-pack
+pack_id: linked
+summary: Private symlink boundary.
+status: draft
+visibility: private
+created: 2026-08-07
+updated: 2026-08-07
+---
+# Linked
+
+## Purpose
+
+Exercise the symlink boundary.
+
+## Includes
+
+- path: Context/Projects/Linked
+
+## Excludes
+
+## Skills
+
+## Build Notes
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_pack(root, "preview", "Outputs/Context-Packs/linked.md")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("BLOCK selected symlink: Context/Projects/Linked/external.md", result.stdout)
+
     def test_build_creates_a_portable_deterministic_candidate_without_git_effects(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = self.copy_repo(Path(temporary))
@@ -325,8 +376,14 @@ source_of_truth: synthetic
 created: 2026-08-07
 updated: 2026-08-07
 """,
-                "# AgentKey\n\nUse [[Knowledge/Wiki/Analyses/Growth-Learnings|growth lessons]].\n",
+                "# AgentKey\n\n"
+                "Use [[Knowledge/Wiki/Analyses/Growth-Learnings|growth lessons]].\n\n"
+                "![[Knowledge/Wiki/Analyses/chart.png|chart]]\n\n"
+                "[Evidence](../../Knowledge/Wiki/Analyses/evidence.pdf)\n",
             )
+            assets = root / "Knowledge/Wiki/Analyses"
+            (assets / "chart.png").write_bytes(b"synthetic chart")
+            (assets / "evidence.pdf").write_bytes(b"synthetic evidence")
             self.write_note(
                 root,
                 "Knowledge/Wiki/Analyses/Growth-Learnings.md",
@@ -383,13 +440,18 @@ Help an agent understand AgentKey growth decisions.
             self.assertTrue((candidate / "SOURCES.md").is_file())
             self.assertTrue((candidate / "context/AgentKey.md").is_file())
             self.assertTrue((candidate / "knowledge/Growth-Learnings.md").is_file())
-            self.assertFalse((candidate / "artifacts").exists())
+            self.assertTrue((candidate / "artifacts/chart.png").is_file())
+            self.assertTrue((candidate / "artifacts/evidence.pdf").is_file())
             manifest = (candidate / "PACK.md").read_text(encoding="utf-8")
             self.assertIn("pack_id: agentkey-growth", manifest)
             self.assertIn("release_status: candidate", manifest)
             self.assertIn("## Loading Order", manifest)
+            self.assertIn("## Capabilities", manifest)
+            self.assertIn("- Context: 1 included file(s)", manifest)
             context = (candidate / "context/AgentKey.md").read_text(encoding="utf-8")
             self.assertIn("[growth lessons](../knowledge/Growth-Learnings.md)", context)
+            self.assertIn("![chart](../artifacts/chart.png)", context)
+            self.assertIn("[Evidence](../artifacts/evidence.pdf)", context)
             self.assertNotIn("[[", context)
             sources = (candidate / "SOURCES.md").read_text(encoding="utf-8")
             self.assertIn("AgentKey project context", sources)
@@ -415,6 +477,7 @@ description: Applies a synthetic growth review.
 version: 1.0.0
 status: active
 visibility: public
+license: MIT
 created: 2026-08-07
 updated: 2026-08-07
 ---
@@ -483,7 +546,7 @@ source_of_truth: synthetic
 created: 2026-08-07
 updated: 2026-08-07
 """,
-                f"# Unsafe\n\napi_key={secret_value}\n\n/Users/example/private.md\n\nhttps://admin.internal/dashboard\n",
+                f'# Unsafe\n\napi_key="{secret_value}"\n\n/Users/example/private.md\n\nhttps://admin.internal/dashboard\n',
             )
             self.write_note(
                 root,
@@ -634,6 +697,7 @@ description: Synthetic unlicensed Skill.
 version: 1.0.0
 status: active
 visibility: public
+license: MIT
 created: 2026-08-07
 updated: 2026-08-07
 ---
@@ -679,6 +743,31 @@ Exercise Skill licensing.
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("BLOCK public Personal Skill missing license: Skills/Personal/unlicensed", result.stdout)
 
+            skill_manifest = skill / "SKILL.md"
+            skill_manifest.write_text(
+                skill_manifest.read_text(encoding="utf-8").replace("license: MIT", "license: Apache-2.0"),
+                encoding="utf-8",
+            )
+            (skill / "LICENSE").write_text("Apache License\nVersion 2.0\n", encoding="utf-8")
+            incompatible = self.run_pack(root, "preview", "Outputs/Context-Packs/unlicensed.md")
+
+            self.assertNotEqual(incompatible.returncode, 0)
+            self.assertIn("BLOCK Personal Skill declared license does not match Pack license", incompatible.stdout)
+
+            skill_manifest.write_text(
+                skill_manifest.read_text(encoding="utf-8").replace("Apache-2.0", "GPL-2.0+"),
+                encoding="utf-8",
+            )
+            (skill / "LICENSE").write_text("SPDX-License-Identifier: GPL-2.0+\n", encoding="utf-8")
+            definition.write_text(
+                definition.read_text(encoding="utf-8").replace("license: MIT", "license: GPL-2.0"),
+                encoding="utf-8",
+            )
+            punctuation_sensitive = self.run_pack(root, "preview", "Outputs/Context-Packs/unlicensed.md")
+
+            self.assertNotEqual(punctuation_sensitive.returncode, 0)
+            self.assertIn("BLOCK Personal Skill declared license does not match Pack license", punctuation_sensitive.stdout)
+
     def test_approved_publish_creates_local_release_tag_and_parent_submodule_commit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -694,10 +783,35 @@ Exercise Skill licensing.
 
             self.assertNotEqual(planned.returncode, 0)
             self.assertIn("APPROVAL REQUIRED", planned.stdout)
+            self.assertIn("CANDIDATE DIFF BEGIN", planned.stdout)
+            self.assertIn("candidate/PACK.md", planned.stdout)
+            self.assertIn("DISCLOSURE direct=1", planned.stdout)
             self.assertFalse((root / ".gitmodules").exists())
             self.assertEqual(
                 subprocess.run(["git", "--git-dir", str(remote), "show-ref"], capture_output=True).returncode,
                 1,
+            )
+
+            partial = base / "partial-release"
+            shutil.copytree(root / "Outputs/Context-Packs/Candidates/agentkey-growth", partial)
+            partial_manifest = partial / "PACK.md"
+            partial_manifest.write_text(
+                partial_manifest.read_text(encoding="utf-8").replace(
+                    "release_status: candidate", "release_status: published", 1
+                ),
+                encoding="utf-8",
+            )
+            git(partial, "init", "-b", "main")
+            git(partial, "config", "user.name", "Partial Publisher")
+            git(partial, "config", "user.email", "partial@example.invalid")
+            git(partial, "add", ".")
+            git(partial, "commit", "-m", "publish: interrupted before tag")
+            git(partial, "remote", "add", "origin", str(remote))
+            git(partial, "push", "-u", "origin", "main")
+            subprocess.run(
+                ["git", "--git-dir", str(remote), "symbolic-ref", "HEAD", "refs/heads/main"],
+                check=True,
+                capture_output=True,
             )
 
             published = self.run_pack(
@@ -711,6 +825,7 @@ Exercise Skill licensing.
 
             self.assertEqual(published.returncode, 0, published.stdout + published.stderr)
             version = f"{date.today().isoformat().replace('-', '.')}.1"
+            self.assertIn("RESUME verified existing remote release", published.stdout)
             self.assertIn(f"PUBLISHED agentkey-growth {version}", published.stdout)
             self.assertEqual(git(remote, "tag", "--list"), version)
             manifest = git(remote, "show", "main:PACK.md")
@@ -875,8 +990,15 @@ Exercise Skill licensing.
             context.write_text(context.read_text(encoding="utf-8") + "\nRemote improvement.\n", encoding="utf-8")
             git(external, "add", ".")
             git(external, "commit", "-m", f"publish: agentkey-growth {version}")
-            git(external, "tag", version)
             git(external, "push", "origin", "main")
+
+            untagged = self.run_pack(root, "update", str(definition.relative_to(root)), "--check-remote")
+
+            self.assertNotEqual(untagged.returncode, 0)
+            self.assertIn("Pack version tag does not point at HEAD", untagged.stderr)
+            self.assertEqual(git(submodule, "rev-parse", "HEAD"), pinned)
+
+            git(external, "tag", version)
             git(external, "push", "origin", version)
 
             detected = self.run_pack(
@@ -887,7 +1009,7 @@ Exercise Skill licensing.
             )
 
             self.assertNotEqual(detected.returncode, 0)
-            self.assertIn("REMOTE UPDATE available", detected.stdout)
+            self.assertIn("REMOTE UPDATE available", detected.stdout, detected.stdout + detected.stderr)
             self.assertIn("APPROVAL REQUIRED", detected.stdout)
             self.assertEqual(git(submodule, "rev-parse", "HEAD"), pinned)
 
@@ -904,6 +1026,36 @@ Exercise Skill licensing.
             self.assertIn("Remote improvement.", (submodule / "context/AgentKey.md").read_text(encoding="utf-8"))
             self.assertIn("publish: update agentkey-growth pointer", git(root, "log", "-1", "--pretty=%s"))
             self.assertEqual(git(root, "status", "--short"), "")
+
+            updated_head = git(submodule, "rev-parse", "HEAD")
+            first_version = f"{date.today().isoformat().replace('-', '.')}.1"
+            git(external, "push", "--force", "origin", f"{first_version}:main")
+            downgrade = self.run_pack(root, "update", str(definition.relative_to(root)), "--check-remote")
+
+            self.assertNotEqual(downgrade.returncode, 0)
+            self.assertIn("remote main is not a newer release", downgrade.stderr)
+            self.assertEqual(git(submodule, "rev-parse", "HEAD"), updated_head)
+
+            divergent_version = f"{date.today().isoformat().replace('-', '.')}.3"
+            external_manifest = external / "PACK.md"
+            external_manifest.write_text(
+                external_manifest.read_text(encoding="utf-8").replace(
+                    f"version: {version}",
+                    f"version: {divergent_version}",
+                ),
+                encoding="utf-8",
+            )
+            git(external, "add", "PACK.md")
+            divergent_tree = git(external, "write-tree")
+            divergent_commit = git(external, "commit-tree", divergent_tree, "-m", "publish: divergent history")
+            git(external, "tag", divergent_version, divergent_commit)
+            git(external, "push", "--force", "origin", f"{divergent_commit}:main")
+            git(external, "push", "origin", divergent_version)
+            divergent = self.run_pack(root, "update", str(definition.relative_to(root)), "--check-remote")
+
+            self.assertNotEqual(divergent.returncode, 0)
+            self.assertIn("remote main rewrites Pack history", divergent.stderr)
+            self.assertEqual(git(submodule, "rev-parse", "HEAD"), updated_head)
 
     def test_revoke_preserves_history_and_allows_a_later_corrected_release(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1058,6 +1210,8 @@ Exercise Skill licensing.
 printf '%s\n' "$*" >> "$FAKE_GH_LOG"
 if [ "$1 $2" = "repo create" ]; then
   git init --bare "$FAKE_GH_REMOTE" >/dev/null 2>&1
+  printf '#!/bin/sh\nwhile read old new ref; do\n  case "$ref" in\n    refs/tags/*) exit 1 ;;\n  esac\ndone\nexit 0\n' > "$FAKE_GH_REMOTE/hooks/pre-receive"
+  chmod +x "$FAKE_GH_REMOTE/hooks/pre-receive"
   exit 0
 fi
 if [ "$1 $2" = "repo view" ]; then
@@ -1093,7 +1247,7 @@ exit 1
             self.assertFalse(fake_log.exists())
             self.assertFalse(fake_remote.exists())
 
-            approved = self.run_pack(
+            interrupted = self.run_pack(
                 root,
                 "publish",
                 str(definition.relative_to(root)),
@@ -1104,13 +1258,29 @@ exit 1
                 env=environment,
             )
 
-            self.assertEqual(approved.returncode, 0, approved.stdout + approved.stderr)
+            self.assertNotEqual(interrupted.returncode, 0)
             self.assertTrue(fake_remote.is_dir())
+            self.assertIn(f"--remote {fake_remote} --approve-publication", interrupted.stderr)
+            self.assertNotIn("repository:", definition.read_text(encoding="utf-8"))
+            (fake_remote / "hooks/pre-receive").unlink()
+
+            resumed = self.run_pack(
+                root,
+                "publish",
+                str(definition.relative_to(root)),
+                "--remote",
+                str(fake_remote),
+                "--approve-publication",
+                env=environment,
+            )
+
+            self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+            self.assertIn("RESUME verified existing remote release", resumed.stdout)
             commands = fake_log.read_text(encoding="utf-8")
             self.assertIn("repo create Nowhitestar/agentkey-growth --public", commands)
             self.assertIn("repo view Nowhitestar/agentkey-growth --json sshUrl --jq .sshUrl", commands)
             self.assertIn(f"repository: {fake_remote}", definition.read_text(encoding="utf-8"))
-            self.assertIn("PUBLISHED agentkey-growth", approved.stdout)
+            self.assertIn("PUBLISHED agentkey-growth", resumed.stdout)
 
     def test_github_creation_failure_leaves_parent_unregistered(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

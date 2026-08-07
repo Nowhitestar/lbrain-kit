@@ -217,6 +217,7 @@ def validate(root: Path) -> list[Finding]:
     meta_by_path: dict[Path, dict[str, object]] = {}
     by_path: dict[str, Path] = {}
     by_stem: dict[str, list[Path]] = {}
+    pack_definitions: dict[str, Path] = {}
 
     for path in markdown:
         relative = path.relative_to(root).as_posix()
@@ -254,6 +255,14 @@ def validate(root: Path) -> list[Finding]:
                 pack_id = str(meta.get("pack_id", ""))
                 if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", pack_id):
                     add("ERROR", path, "context-pack pack_id must use lowercase letters, digits, and single hyphens")
+                elif pack_id in pack_definitions:
+                    add(
+                        "ERROR",
+                        path,
+                        f"context-pack pack_id duplicates {pack_definitions[pack_id].relative_to(root)}",
+                    )
+                else:
+                    pack_definitions[pack_id] = path
                 if meta.get("status") not in {"draft", "active", "archived"}:
                     add("ERROR", path, "context-pack status must be draft, active, or archived")
                 if meta.get("visibility") == "trusted" and not meta.get("audience"):

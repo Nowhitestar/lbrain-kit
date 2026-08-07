@@ -57,6 +57,14 @@ class WorkflowSmokeTest(unittest.TestCase):
             private_origin = base / "private-origin.git"
             shutil.copytree(ROOT, kit, ignore=shutil.ignore_patterns(".git", "__pycache__"))
 
+            enabled = kit / "Skills/Enabled.md"
+            enabled.write_text(
+                enabled.read_text(encoding="utf-8")
+                .replace("All seven Core Skills", "All six Core Skills")
+                .replace("- [[Skills/Kit/lbrain-context-pack/SKILL]] — codex, claude, hermes\n", ""),
+                encoding="utf-8",
+            )
+
             git(kit, "init", "-b", "main")
             git(kit, "config", "user.name", "LBrain Test")
             git(kit, "config", "user.email", "lbrain-test@example.invalid")
@@ -120,7 +128,7 @@ class WorkflowSmokeTest(unittest.TestCase):
             )
             (pack_source / "SOURCES.md").write_text("# Sources\n\nSynthetic upgrade fixture.\n", encoding="utf-8")
             git(pack_source, "add", ".")
-            git(pack_source, "commit", "-m", "pack: publish personal-pack 2026.08.07.1")
+            git(pack_source, "commit", "-m", "publish: personal-pack 2026.08.07.1")
             git(pack_source, "tag", "2026.08.07.1")
             pack_head = git(pack_source, "rev-parse", "HEAD")
             subprocess.run(["git", "clone", "--bare", str(pack_source), str(pack_remote)], check=True, capture_output=True)
@@ -163,6 +171,15 @@ class WorkflowSmokeTest(unittest.TestCase):
             git(personal, "add", ".")
             git(personal, "commit", "-m", "capture: personalize upgrade fixture")
 
+            enabled.write_text(
+                enabled.read_text(encoding="utf-8")
+                .replace("All six Core Skills", "All seven Core Skills")
+                .replace(
+                    "\nAdd active Personal Skills below",
+                    "\n- [[Skills/Kit/lbrain-context-pack/SKILL]] — codex, claude, hermes\n\nAdd active Personal Skills below",
+                ),
+                encoding="utf-8",
+            )
             (kit / "System/Kit/VERSION").write_text("0.1.1\n", encoding="utf-8")
             with (kit / "System/Rules/Core/visibility.md").open("a", encoding="utf-8") as file:
                 file.write("\nUpgrade marker: v0.1.1.\n")
@@ -191,6 +208,9 @@ class WorkflowSmokeTest(unittest.TestCase):
             self.assertIn("Personal identity marker", (personal / "Context/Identity/Profile.md").read_text(encoding="utf-8"))
             self.assertTrue((personal / "Knowledge/Wiki/Concepts/Personal-Upgrade-Note.md").is_file())
             self.assertTrue((personal / "Skills/Personal/personal-upgrade/SKILL.md").is_file())
+            enabled_text = (personal / "Skills/Enabled.md").read_text(encoding="utf-8")
+            self.assertIn("[[Skills/Kit/lbrain-context-pack/SKILL]]", enabled_text)
+            self.assertIn("[[Skills/Personal/personal-upgrade/SKILL]]", enabled_text)
             self.assertIn("Upgrade marker: v0.1.1", (personal / "System/Rules/Core/visibility.md").read_text(encoding="utf-8"))
             self.assertTrue(definition.is_file())
             self.assertIn(str(pack_remote), (personal / ".gitmodules").read_text(encoding="utf-8"))

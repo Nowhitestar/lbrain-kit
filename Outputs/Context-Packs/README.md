@@ -21,14 +21,18 @@ python3 Skills/Kit/lbrain-context-pack/scripts/pack.py preview Outputs/Context-P
 python3 Skills/Kit/lbrain-context-pack/scripts/pack.py build Outputs/Context-Packs/<pack-id>.md
 ```
 
-Review the complete Candidate and disclosure summary. Publication is a separate operation and requires explicit approval:
+Preview and publication print a complete file diff with recognized secrets and private paths redacted. Review the Candidate itself for semantic sensitivity. Publication is a separate operation and requires explicit approval:
 
 ```sh
 python3 Skills/Kit/lbrain-context-pack/scripts/pack.py publish Outputs/Context-Packs/<pack-id>.md --remote <empty-or-registered-pack-repository> --approve-publication
 python3 Skills/Kit/lbrain-context-pack/scripts/pack.py verify Outputs/Context-Packs/<pack-id>.md
 ```
 
-GitHub first publication uses two independent approvals: one to create the repository and one to publish the reviewed Candidate. Existing releases use `update`; downloaded copies cannot be recalled, so `revoke` only publishes a forward warning release. `fork` creates a new independent Pack identity and history. Run each command with `--help` for its explicit approval flags.
+GitHub first publication uses two independent approvals: one to create the repository and one to publish the reviewed Candidate. If a push stops after remote `main` is created, the error prints the exact `--remote` resume boundary; the retry verifies matching content before completing the tag and parent registration. Existing releases use `update`; downloaded copies cannot be recalled, so `revoke` only publishes a forward warning release. `fork` creates a new independent Pack identity and history. Run each command with `--help` for its explicit approval flags.
+
+An owner update is also two-step: run `update <definition>` to rebuild and inspect the diff, then rerun it with `--approve-publication`. A consumer runs `update <definition> --check-remote`; the command verifies remote `main`, the manifest, and its matching CalVer tag before offering `--approve-pointer`.
+
+For a public Pack, every included Personal or imported third-party Skill needs an exact SPDX-style license declaration in `SKILL.md` and its own matching license file. The declared identifier must exactly equal the Pack license; unknown license texts need a matching `SPDX-License-Identifier` line near the top. A failed or uncertain match pauses publication for an explicit licensing decision.
 
 ## Recipient workflow
 

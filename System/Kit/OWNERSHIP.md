@@ -23,7 +23,7 @@ These files are copied once and then become user-owned:
 - `Context/Identity/Profile.md`, `State.md`, and `Principles.md`;
 - `Skills/Enabled.md`.
 
-Kit releases must not modify seeded files after the initial release. A migration may describe an optional manual change but cannot apply it silently.
+The public Kit may update a seed for new installations, but an installed copy is user-owned and must not be silently overwritten. A migration must identify any required manual reconciliation, preserve personalization, and show the exact intended change.
 
 ## User-owned (U)
 

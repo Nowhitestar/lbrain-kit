@@ -112,6 +112,7 @@ description: Summarizes the synthetic AgentKey growth context for another agent.
 version: 1.0.0
 status: active
 visibility: public
+license: MIT
 created: 2026-08-07
 updated: 2026-08-07
 ---
