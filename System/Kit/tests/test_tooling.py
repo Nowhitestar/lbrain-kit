@@ -18,6 +18,7 @@ CORE_SKILLS = {
     "lbrain-review",
     "lbrain-write",
     "lbrain-skill-manager",
+    "lbrain-context-pack",
 }
 
 

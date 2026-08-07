@@ -21,6 +21,7 @@ CORE_SKILLS = {
     "lbrain-review",
     "lbrain-write",
     "lbrain-skill-manager",
+    "lbrain-context-pack",
 }
 RUNTIMES = {"codex", "claude", "hermes"}
 REQUIRED_DIRS = (
@@ -41,6 +42,7 @@ REQUIRED_DIRS = (
     "Skills/Personal",
     "Outputs",
     "Outputs/Writing",
+    "Outputs/Context-Packs",
     "System",
     "System/Kit",
     "System/Rules",
@@ -64,6 +66,7 @@ CONTENT_PREFIXES = (
     "Context/Areas/",
     "Context/Projects/",
     "Outputs/Writing/",
+    "Outputs/Context-Packs/",
     "System/Rules/Local/",
     "System/Proposals/",
     "Archives/",
@@ -75,6 +78,7 @@ TYPE_FIELDS = {
     "project": {"outcome", "source_of_truth"},
     "writing": {"sources"},
     "proposal": {"target", "action"},
+    "context-pack": {"pack_id"},
 }
 WIKILINK = re.compile(r"(?<!!)\[\[([^\]]+)\]\]")
 RESOURCE = re.compile(r"\b((?:references|scripts|assets|examples|tests)/[A-Za-z0-9_./-]+)")
@@ -136,6 +140,8 @@ def is_content_note(relative: str) -> bool:
         return True
     if relative.startswith("Skills/Personal/"):
         return False
+    if relative.startswith(("Outputs/Context-Packs/Candidates/", "Outputs/Context-Packs/Repos/")):
+        return False
     return relative.startswith(CONTENT_PREFIXES)
 
 
@@ -172,7 +178,14 @@ def validate(root: Path) -> list[Finding]:
         elif not (path / "README.md").is_file():
             add("ERROR", directory, "semantic directory is missing README.md")
 
-    markdown = sorted(path for path in root.rglob("*.md") if ".git" not in path.parts)
+    pack_candidates = root / "Outputs/Context-Packs/Candidates"
+    pack_repos = root / "Outputs/Context-Packs/Repos"
+    markdown = sorted(
+        path for path in root.rglob("*.md")
+        if ".git" not in path.parts
+        and not path.is_relative_to(pack_candidates)
+        and not path.is_relative_to(pack_repos)
+    )
     text_by_path: dict[Path, str] = {}
     meta_by_path: dict[Path, dict[str, object]] = {}
     by_path: dict[str, Path] = {}
@@ -210,6 +223,18 @@ def validate(root: Path) -> list[Finding]:
                 add("ERROR", path, "identity kind must be profile, state, or principle")
             if note_type == "proposal" and meta.get("status") not in {"pending", "accepted", "applied", "rejected"}:
                 add("ERROR", path, "proposal status has an invalid lifecycle state")
+            if note_type == "context-pack":
+                pack_id = str(meta.get("pack_id", ""))
+                if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", pack_id):
+                    add("ERROR", path, "context-pack pack_id must use lowercase letters, digits, and single hyphens")
+                if meta.get("status") not in {"draft", "active", "archived"}:
+                    add("ERROR", path, "context-pack status must be draft, active, or archived")
+                if meta.get("visibility") == "trusted" and not meta.get("audience"):
+                    add("ERROR", path, "trusted context-pack requires audience")
+                if meta.get("visibility") == "public" and not meta.get("license"):
+                    add("ERROR", path, "public context-pack requires license")
+                if bool(meta.get("repository")) != bool(meta.get("submodule_path")):
+                    add("ERROR", path, "context-pack repository and submodule_path must be set together")
 
     for path, text in text_by_path.items():
         relative = path.relative_to(root).as_posix()
@@ -280,6 +305,8 @@ def validate(root: Path) -> list[Finding]:
         add("ERROR", enabled_path, f"required Core Skill is not enabled: {missing}")
 
     for path in root.rglob("*"):
+        if path.is_relative_to(pack_candidates) or path.is_relative_to(pack_repos):
+            continue
         if path.is_symlink():
             target = Path(os.readlink(path))
             resolved = target if target.is_absolute() else (path.parent / target).resolve()

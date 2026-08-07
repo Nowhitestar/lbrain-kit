@@ -1,4 +1,4 @@
 <!-- ownership: kit -->
 # Core Templates
 
-Kit-owned templates for Sources, Wiki knowledge, Identity, Areas, Projects, Writing, and Proposals.
+Kit-owned templates for Sources, Wiki knowledge, Identity, Areas, Projects, Writing, Context Packs, and Proposals.

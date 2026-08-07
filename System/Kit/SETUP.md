@@ -31,7 +31,7 @@ A local-only LBrain may omit `origin`, but loses off-device backup. Confirm the 
 
 1. Rewrite [[HOME]].
 2. Personalize the seeded notes under [[Context/Identity/README|Identity]]. A user may edit their own Identity directly. An assisting agent must first present the exact Identity values in one initialization Proposal and apply them only after explicit acceptance; it must not infer missing identity from a general setup request.
-3. Keep the six Core Skills enabled in [[Skills/Enabled]].
+3. Keep the seven Core Skills enabled in [[Skills/Enabled]].
 4. Add local rules under [[System/Rules/Local/README|Local Rules]].
 5. Run `python3 System/Kit/check.py`.
 6. Commit the initialized personal baseline to `main`.
