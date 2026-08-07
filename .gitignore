@@ -1,0 +1,12 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.obsidian/workspace*.json
+.obsidian/cache
+.trash/
+credentials/
+secrets/
