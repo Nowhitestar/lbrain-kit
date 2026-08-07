@@ -63,7 +63,6 @@ CONTENT_PREFIXES = (
     "Context/Identity/",
     "Context/Areas/",
     "Context/Projects/",
-    "Skills/Personal/",
     "Outputs/Writing/",
     "System/Rules/Local/",
     "System/Proposals/",
@@ -135,6 +134,8 @@ def is_content_note(relative: str) -> bool:
         return False
     if relative in {"HOME.md", "Knowledge/Wiki/Index.md", "Skills/Enabled.md"}:
         return True
+    if relative.startswith("Skills/Personal/"):
+        return False
     return relative.startswith(CONTENT_PREFIXES)
 
 
