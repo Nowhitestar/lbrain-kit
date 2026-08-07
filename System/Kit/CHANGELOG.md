@@ -3,6 +3,11 @@
 
 All notable Kit-owned changes are documented here. Kit releases follow semantic versioning; Personal Skills carry their own versions.
 
+## 0.1.0 — 2026-08-07
+
+- Promoted rc.3 after independent cold-start, cross-session retrieval, personalized upgrade, and isolated runtime acceptance passed without release blockers.
+- No behavior or ownership contract changed from rc.3.
+
 ## 0.1.0-rc.3 — 2026-08-07
 
 - Made the runtime adapter smoke test accept valid Personal Skills instead of assuming exactly six installed packages.
