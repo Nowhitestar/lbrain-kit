@@ -11,10 +11,12 @@ cd <your-lbrain-directory>
 git remote rename origin kit
 git remote set-url --push kit DISABLED
 git branch -m main kit-base
-git switch -c main v0.1.0-rc.1
+git switch -c main v0.1.0-rc.2
 ```
 
 `kit-base` follows the public Kit. `main` is the private personal context history. The disabled push URL prevents an accidental push of personal context to the public Kit.
+
+Clone the full Kit repository. Do not use a tag-only `--single-branch` clone: `kit-base` needs the `kit/main` reference even though personal `main` starts from a release tag.
 
 For a private remote:
 
@@ -27,17 +29,20 @@ A local-only LBrain may omit `origin`, but loses off-device backup. Confirm the 
 
 ## Personalize
 
-1. Rewrite [[HOME]] and the seeded notes under [[Context/Identity/README|Identity]].
-2. Keep the six Core Skills enabled in [[Skills/Enabled]].
-3. Add local rules under [[System/Rules/Local/README|Local Rules]].
-4. Run `python3 System/Kit/check.py`.
-5. Commit the initialized personal baseline to `main`.
+1. Rewrite [[HOME]].
+2. Personalize the seeded notes under [[Context/Identity/README|Identity]]. A user may edit their own Identity directly. An assisting agent must first present the exact Identity values in one initialization Proposal and apply them only after explicit acceptance; it must not infer missing identity from a general setup request.
+3. Keep the six Core Skills enabled in [[Skills/Enabled]].
+4. Add local rules under [[System/Rules/Local/README|Local Rules]].
+5. Run `python3 System/Kit/check.py`.
+6. Commit the initialized personal baseline to `main`.
 
 Runtime installation is optional. Preview first and always target a deliberate directory:
 
 ```sh
 python3 Skills/Kit/lbrain-skill-manager/scripts/install.py --runtime codex --target <isolated-or-runtime-skill-directory> --dry-run
 ```
+
+Rerunning the installer is safe: unchanged installed packages are skipped and newly enabled Skills are added. A divergent existing package stops the entire install before any write. Symlink installs follow canonical LBrain updates automatically; copy installs must be reviewed and replaced explicitly when their canonical package changes.
 
 ## Upgrade
 

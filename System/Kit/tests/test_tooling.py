@@ -57,10 +57,11 @@ class ToolingSmokeTest(unittest.TestCase):
     def test_isolated_runtime_adapters_and_conflict_guard(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
+            fixture = self.copy_repo(base)
             for runtime in ("codex", "claude", "hermes"):
                 target = base / runtime
                 result = subprocess.run(
-                    [sys.executable, str(INSTALL), "--runtime", runtime, "--target", str(target)],
+                    [sys.executable, str(INSTALL), "--root", str(fixture), "--runtime", runtime, "--target", str(target)],
                     text=True,
                     capture_output=True,
                     check=False,
@@ -71,27 +72,62 @@ class ToolingSmokeTest(unittest.TestCase):
                 self.assertTrue(all(path.parent.is_symlink() for path in installed))
 
                 conflict = subprocess.run(
-                    [sys.executable, str(INSTALL), "--runtime", runtime, "--target", str(target)],
+                    [sys.executable, str(INSTALL), "--root", str(fixture), "--runtime", runtime, "--target", str(target)],
                     text=True,
                     capture_output=True,
                     check=False,
                 )
-                self.assertNotEqual(conflict.returncode, 0)
-                self.assertIn("refusing to overwrite", conflict.stderr)
+                self.assertEqual(conflict.returncode, 0, conflict.stdout + conflict.stderr)
+                self.assertIn("ALREADY INSTALLED", conflict.stdout)
+
+            personal = fixture / "Skills/Personal/incremental-skill"
+            (personal / "tests").mkdir(parents=True)
+            (personal / "SKILL.md").write_text("---\nname: incremental-skill\ndescription: Tests incremental installation.\nversion: 0.1.0\nstatus: active\nvisibility: private\ncreated: 2026-08-07\nupdated: 2026-08-07\n---\n# Incremental\n", encoding="utf-8")
+            (personal / "tests/cases.md").write_text("# Cases\n", encoding="utf-8")
+            with (fixture / "Skills/Enabled.md").open("a", encoding="utf-8") as file:
+                file.write("\n- [[Skills/Personal/incremental-skill/SKILL]] — codex\n")
+            incremental = subprocess.run(
+                [sys.executable, str(INSTALL), "--root", str(fixture), "--runtime", "codex", "--target", str(base / "codex")],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(incremental.returncode, 0, incremental.stdout + incremental.stderr)
+            self.assertTrue((base / "codex/incremental-skill/SKILL.md").is_file())
+
+            conflict_path = base / "codex/lbrain-capture"
+            conflict_path.unlink()
+            conflict_path.mkdir()
+            blocked = subprocess.run(
+                [sys.executable, str(INSTALL), "--root", str(fixture), "--runtime", "codex", "--target", str(base / "codex")],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("refusing to overwrite", blocked.stderr)
 
             copy_target = base / "copy"
             copied = subprocess.run(
-                [sys.executable, str(INSTALL), "--runtime", "codex", "--target", str(copy_target), "--mode", "copy"],
+                [sys.executable, str(INSTALL), "--root", str(fixture), "--runtime", "codex", "--target", str(copy_target), "--mode", "copy"],
                 text=True,
                 capture_output=True,
                 check=False,
             )
             self.assertEqual(copied.returncode, 0, copied.stdout + copied.stderr)
             self.assertFalse(next(copy_target.glob("*/SKILL.md")).parent.is_symlink())
+            copied_again = subprocess.run(
+                [sys.executable, str(INSTALL), "--root", str(fixture), "--runtime", "codex", "--target", str(copy_target), "--mode", "copy"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(copied_again.returncode, 0, copied_again.stdout + copied_again.stderr)
+            self.assertIn("ALREADY INSTALLED", copied_again.stdout)
 
             dry_target = base / "dry"
             preview = subprocess.run(
-                [sys.executable, str(INSTALL), "--runtime", "codex", "--target", str(dry_target), "--dry-run"],
+                [sys.executable, str(INSTALL), "--root", str(fixture), "--runtime", "codex", "--target", str(dry_target), "--dry-run"],
                 text=True,
                 capture_output=True,
                 check=False,

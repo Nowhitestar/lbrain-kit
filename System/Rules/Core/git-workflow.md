@@ -25,5 +25,6 @@ After an authorized change, validate it and create a local commit by default. Ne
 - `writing:` draft output
 - `publish:` confirmed publication state
 - `skill:` Personal or Core Skill work
+- `proposal:` protected changes awaiting a user decision
 - `archive:` role-preserving archival
 - `kit:` Kit structure, rules, releases, and migrations

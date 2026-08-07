@@ -1,7 +1,7 @@
 ---
 name: lbrain-skill-manager
 description: Creates, validates, enables, installs, updates, and archives LBrain Skills. Use when the user asks to manage Core or Personal Skills or runtime installations.
-version: 0.1.0
+version: 0.1.1
 status: active
 visibility: public
 created: 2026-08-07
@@ -25,6 +25,6 @@ Only the user may make a skill public or publish it. Public and published are se
 
 ## Runtime installation
 
-Read `references/runtimes.md`, preview with `scripts/install.py --dry-run`, then use an explicit target. Prefer symlinks so LBrain remains canonical; use copy mode only when symlinks are unsuitable. Never overwrite an existing target without an explicit user decision.
+Read `references/runtimes.md`, preview with `scripts/install.py --dry-run`, then use an explicit target. Prefer symlinks so LBrain remains canonical; use copy mode only when symlinks are unsuitable. Reruns skip identical packages and add newly enabled Skills. Never overwrite a divergent existing target without an explicit user decision.
 
 Core Skills update through Kit release tags. Never edit installed runtime copies as the source of truth.
