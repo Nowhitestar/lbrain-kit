@@ -163,6 +163,33 @@ def git_value(root: Path, *args: str) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def submodule_url(root: Path, registered_path: str) -> str:
+    modules = root / ".gitmodules"
+    if not modules.is_file():
+        return ""
+    paths = subprocess.run(
+        ["git", "-C", str(root), "config", "-f", str(modules), "--get-regexp", r"^submodule\..*\.path$"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if paths.returncode:
+        return ""
+    for line in paths.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        if value.strip() != registered_path:
+            continue
+        name = key.removeprefix("submodule.").removesuffix(".path")
+        url = subprocess.run(
+            ["git", "-C", str(root), "config", "-f", str(modules), "--get", f"submodule.{name}.url"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return url.stdout.strip() if url.returncode == 0 else ""
+    return ""
+
+
 def validate(root: Path) -> list[Finding]:
     root = root.resolve()
     findings: list[Finding] = []
@@ -235,6 +262,19 @@ def validate(root: Path) -> list[Finding]:
                     add("ERROR", path, "public context-pack requires license")
                 if bool(meta.get("repository")) != bool(meta.get("submodule_path")):
                     add("ERROR", path, "context-pack repository and submodule_path must be set together")
+                repository = str(meta.get("repository", ""))
+                submodule_path = str(meta.get("submodule_path", ""))
+                expected_path = f"Outputs/Context-Packs/Repos/{pack_id}"
+                if submodule_path and submodule_path != expected_path:
+                    add("ERROR", path, f"context-pack submodule_path must be {expected_path}")
+                if meta.get("status") == "active" and not repository:
+                    add("ERROR", path, "active context-pack requires repository and submodule_path")
+                if repository:
+                    registered_url = submodule_url(root, submodule_path)
+                    if not registered_url:
+                        add("ERROR", path, "context-pack submodule_path is not registered in .gitmodules")
+                    elif registered_url != repository:
+                        add("ERROR", path, "context-pack repository does not match .gitmodules URL")
 
     for path, text in text_by_path.items():
         relative = path.relative_to(root).as_posix()

@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -415,7 +418,12 @@ def candidate_version() -> str:
     return f"{date.today().isoformat().replace('-', '.')}.1"
 
 
-def manifest(definition: Definition, destinations: dict[Path, Path]) -> str:
+def manifest(
+    definition: Definition,
+    destinations: dict[Path, Path],
+    version: str,
+    release_status: str,
+) -> str:
     today = date.today().isoformat()
     summary = str(definition.metadata.get("summary", ""))
     license_name = str(definition.metadata.get("license", "UNLICENSED"))
@@ -429,8 +437,8 @@ def manifest(definition: Definition, destinations: dict[Path, Path]) -> str:
 type: context-pack-release
 pack_id: {definition.pack_id}
 summary: {summary}
-version: {candidate_version()}
-release_status: candidate
+version: {version}
+release_status: {release_status}
 visibility: {definition.visibility}
 {audience_line}license: {license_name}
 created: {today}
@@ -471,12 +479,14 @@ def sources_document(paths: set[Path], root: Path) -> str:
     return "# Sources\n\nSafe provenance summary for this compiled Pack.\n\n" + "\n".join(entries) + "\n"
 
 
-def build(args: argparse.Namespace) -> int:
-    root = args.root.resolve()
-    definition = load_definition(Path(args.definition), root)
-    selection = resolve_definition(definition, root)
-    if selection.blocked:
-        raise ValueError("preview blocked: " + "; ".join(sorted(set(selection.blocked))))
+def write_candidate(
+    definition: Definition,
+    selection: Preview,
+    root: Path,
+    candidate: Path,
+    version: str,
+    release_status: str = "candidate",
+) -> int:
     selected = selection.direct | selection.dependencies
     destinations: dict[Path, Path] = {}
     occupied: dict[Path, Path] = {}
@@ -490,7 +500,6 @@ def build(args: argparse.Namespace) -> int:
         occupied[destination] = source
         destinations[source] = destination
 
-    candidate = root / "Outputs/Context-Packs/Candidates" / definition.pack_id
     if candidate.exists():
         shutil.rmtree(candidate)
     candidate.mkdir(parents=True)
@@ -504,10 +513,186 @@ def build(args: argparse.Namespace) -> int:
             )
         else:
             shutil.copy2(source, target)
-    (candidate / "PACK.md").write_text(manifest(definition, destinations), encoding="utf-8")
+    (candidate / "PACK.md").write_text(
+        manifest(definition, destinations, version, release_status),
+        encoding="utf-8",
+    )
     (candidate / "SOURCES.md").write_text(sources_document(selected, root), encoding="utf-8")
+    return len(destinations) + 2
+
+
+def build(args: argparse.Namespace) -> int:
+    root = args.root.resolve()
+    definition = load_definition(Path(args.definition), root)
+    selection = resolve_definition(definition, root)
+    if selection.blocked:
+        raise ValueError("preview blocked: " + "; ".join(sorted(set(selection.blocked))))
+    candidate = root / "Outputs/Context-Packs/Candidates" / definition.pack_id
+    version = candidate_version()
+    file_count = write_candidate(definition, selection, root, candidate, version)
     print(f"BUILT {relative(candidate, root)}")
-    print(f"SUMMARY files={len(destinations) + 2} version={candidate_version()} status=candidate")
+    print(f"SUMMARY files={file_count} version={version} status=candidate")
+    return 0
+
+
+def git(repository: Path, *arguments: str, file_transport: bool = False) -> str:
+    command = ["git"]
+    if file_transport:
+        command.extend(["-c", "protocol.file.allow=always"])
+    command.extend(["-C", str(repository), *arguments])
+    result = subprocess.run(command, text=True, capture_output=True, check=False)
+    if result.returncode:
+        message = (result.stderr or result.stdout).strip()
+        raise ValueError(f"git {' '.join(arguments)} failed: {message}")
+    return result.stdout.strip()
+
+
+def tree_snapshot(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and ".git" not in path.parts
+    }
+
+
+def yaml_scalar(value: str) -> str:
+    return value if re.fullmatch(r"[A-Za-z0-9_./:@+\-]+", value) else json.dumps(value)
+
+
+def update_definition_registration(definition: Definition, root: Path, remote: str, submodule_path: str) -> None:
+    text = definition.path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    try:
+        end = lines[1:].index("---") + 1
+    except ValueError as error:
+        raise ValueError("Definition frontmatter is not closed") from error
+    fields = {
+        "status": "active",
+        "repository": remote,
+        "submodule_path": submodule_path,
+        "updated": date.today().isoformat(),
+    }
+    seen: set[str] = set()
+    for index in range(1, end):
+        match = re.match(r"^([A-Za-z0-9_-]+):", lines[index])
+        if match and match.group(1) in fields:
+            key = match.group(1)
+            lines[index] = f"{key}: {yaml_scalar(fields[key])}"
+            seen.add(key)
+    insert_at = end
+    for key in ("repository", "submodule_path"):
+        if key not in seen:
+            lines.insert(insert_at, f"{key}: {yaml_scalar(fields[key])}")
+            insert_at += 1
+    definition.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def ensure_publishable_parent(root: Path) -> None:
+    try:
+        top = Path(git(root, "rev-parse", "--show-toplevel")).resolve()
+    except ValueError as error:
+        raise ValueError("publication requires an initialized parent LBrain Git repository") from error
+    if top != root:
+        raise ValueError("--root must be the parent LBrain Git repository root")
+    dirty = git(root, "status", "--porcelain", "--untracked-files=no")
+    if dirty:
+        raise ValueError("parent LBrain Git working tree must be clean before publication")
+
+
+def validate_remote(remote: str) -> None:
+    if re.search(r"://[^/@\s]+:[^/@\s]+@", remote):
+        raise ValueError("remote URL must not contain embedded credentials")
+
+
+def publish(args: argparse.Namespace) -> int:
+    root = args.root.resolve()
+    definition = load_definition(Path(args.definition), root)
+    selection = resolve_definition(definition, root)
+    if selection.blocked:
+        raise ValueError("preview blocked: " + "; ".join(sorted(set(selection.blocked))))
+    candidate = root / "Outputs/Context-Packs/Candidates" / definition.pack_id
+    if not (candidate / "PACK.md").is_file():
+        raise ValueError("Candidate is missing; run build before publication")
+    candidate_meta, _, _ = load_check_helpers(root)
+    pack_metadata = candidate_meta((candidate / "PACK.md").read_text(encoding="utf-8"))
+    version = str(pack_metadata.get("version", ""))
+    if pack_metadata.get("release_status") != "candidate" or not re.fullmatch(r"\d{4}\.\d{2}\.\d{2}\.\d+", version):
+        raise ValueError("Candidate manifest has invalid version or release_status")
+    remote = args.remote or str(definition.metadata.get("repository") or "")
+    if not remote:
+        raise ValueError("publication requires --remote for a new Pack")
+    validate_remote(remote)
+    submodule_path = f"Outputs/Context-Packs/Repos/{definition.pack_id}"
+    print(
+        f"PLAN pack={definition.pack_id} version={version} visibility={definition.visibility} "
+        f"remote={remote} submodule={submodule_path}"
+    )
+    print("REVIEW Candidate diff, disclosure summary, destination, visibility, license, and version")
+    if not args.approve_publication:
+        print("APPROVAL REQUIRED: rerun with --approve-publication after semantic review")
+        return 2
+
+    ensure_publishable_parent(root)
+    with tempfile.TemporaryDirectory() as temporary:
+        temporary_root = Path(temporary)
+        expected = temporary_root / "expected"
+        write_candidate(definition, selection, root, expected, version)
+        if tree_snapshot(expected) != tree_snapshot(candidate):
+            raise ValueError("Candidate is stale or modified; rebuild and review before publication")
+
+        remote_refs = subprocess.run(
+            ["git", "ls-remote", "--heads", "--tags", remote],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if remote_refs.returncode:
+            raise ValueError(f"remote is unavailable: {(remote_refs.stderr or remote_refs.stdout).strip()}")
+        if remote_refs.stdout.strip():
+            raise ValueError("first publication requires an empty remote repository")
+
+        release = temporary_root / "release"
+        shutil.copytree(candidate, release)
+        pack_path = release / "PACK.md"
+        pack_path.write_text(
+            pack_path.read_text(encoding="utf-8").replace(
+                "release_status: candidate", "release_status: published", 1
+            ),
+            encoding="utf-8",
+        )
+        git(release, "init", "-b", "main")
+        parent_name = git(root, "config", "user.name") or "LBrain Context Pack"
+        parent_email = git(root, "config", "user.email") or "context-pack@example.invalid"
+        git(release, "config", "user.name", parent_name)
+        git(release, "config", "user.email", parent_email)
+        git(release, "add", ".")
+        git(release, "commit", "-m", f"publish: {definition.pack_id} {version}")
+        git(release, "tag", version)
+        git(release, "remote", "add", "origin", remote)
+        git(release, "push", "-u", "origin", "main")
+        git(release, "push", "origin", version)
+
+    remote_path = Path(remote)
+    if remote_path.is_dir() and (remote_path / "HEAD").is_file():
+        subprocess.run(
+            ["git", "--git-dir", str(remote_path), "symbolic-ref", "HEAD", "refs/heads/main"],
+            check=False,
+            capture_output=True,
+        )
+    repos = root / "Outputs/Context-Packs/Repos"
+    repos.mkdir(parents=True, exist_ok=True)
+    try:
+        git(root, "submodule", "add", remote, submodule_path, file_transport=True)
+        update_definition_registration(definition, root, remote, submodule_path)
+        git(root, "add", ".gitmodules", submodule_path, relative(definition.path, root))
+        git(root, "commit", "-m", f"publish: add {definition.pack_id} {version}")
+    except ValueError as error:
+        raise ValueError(
+            f"Pack release {version} exists on the remote but parent registration is incomplete; "
+            f"preserve the remote and repair the Submodule registration: {error}"
+        ) from error
+    print(f"PUBLISHED {definition.pack_id} {version}")
+    print(f"SUBMODULE {submodule_path}")
     return 0
 
 
@@ -531,6 +716,12 @@ def parser() -> argparse.ArgumentParser:
     build_parser = subcommands.add_parser("build")
     build_parser.add_argument("definition")
     build_parser.set_defaults(handler=build)
+
+    publish_parser = subcommands.add_parser("publish")
+    publish_parser.add_argument("definition")
+    publish_parser.add_argument("--remote")
+    publish_parser.add_argument("--approve-publication", action="store_true")
+    publish_parser.set_defaults(handler=publish)
     return command
 
 

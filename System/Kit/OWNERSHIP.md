@@ -32,8 +32,11 @@ All personal content is user-owned, including:
 - captures, Sources, Wiki notes, Areas, Projects, Outputs, and Archives;
 - `System/Rules/Local/`, `System/Proposals/`, and optional `LOCAL.md` or `Index.md` files;
 - `Skills/Personal/` and each Personal Skill's history and license.
+- Pack Definitions, `.gitmodules`, and Pack Submodule gitlinks under `Outputs/Context-Packs/Repos/`.
 
 Kit upgrades never overwrite or delete User-owned material.
+
+Pack repository contents have their own Git history and explicit license. They are not Kit-owned merely because a Submodule is mounted inside LBrain.
 
 ## Extension points
 
