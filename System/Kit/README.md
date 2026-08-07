@@ -7,6 +7,7 @@ This directory is the release and maintenance control plane for LBrain Kit.
 - `CHANGELOG.md` explains release changes.
 - `SETUP.md` defines initialization and upgrades.
 - `OWNERSHIP.md` defines files a Kit release may and may not change.
+- `CONTEXT_PACK_SPEC.md` records the Context Pack design and its gated implementation plan.
 - `MIGRATIONS/` contains explicit, reviewable migration instructions.
 - `Examples/` contains synthetic material only.
 - `check.py` validates an LBrain without modifying it.
