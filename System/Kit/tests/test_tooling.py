@@ -11,6 +11,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 CHECK = ROOT / "System/Kit/check.py"
 INSTALL = ROOT / "Skills/Kit/lbrain-skill-manager/scripts/install.py"
+CORE_SKILLS = {
+    "lbrain-capture",
+    "lbrain-weave",
+    "lbrain-retrieve",
+    "lbrain-review",
+    "lbrain-write",
+    "lbrain-skill-manager",
+}
 
 
 class ToolingSmokeTest(unittest.TestCase):
@@ -68,7 +76,9 @@ class ToolingSmokeTest(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 installed = sorted(target.glob("*/SKILL.md"))
-                self.assertEqual(len(installed), 6)
+                installed_names = {path.parent.name for path in installed}
+                self.assertTrue(CORE_SKILLS <= installed_names)
+                self.assertEqual(result.stdout.count("INSTALLED "), len(installed))
                 self.assertTrue(all(path.parent.is_symlink() for path in installed))
 
                 conflict = subprocess.run(

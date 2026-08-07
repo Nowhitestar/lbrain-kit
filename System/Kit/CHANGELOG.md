@@ -3,6 +3,11 @@
 
 All notable Kit-owned changes are documented here. Kit releases follow semantic versioning; Personal Skills carry their own versions.
 
+## 0.1.0-rc.3 — 2026-08-07
+
+- Made the runtime adapter smoke test accept valid Personal Skills instead of assuming exactly six installed packages.
+- Clarified that personal `main` merges a formal release tag, never the possibly newer `kit-base` branch.
+
 ## 0.1.0-rc.2 — 2026-08-07
 
 - Made runtime installation idempotent and allowed newly enabled Skills to be added without overwriting existing packages.
