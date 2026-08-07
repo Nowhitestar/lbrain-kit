@@ -16,6 +16,13 @@ from pathlib import Path
 PACK_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 MANAGED_PARTS = {"Candidates", "Repos"}
 SECTION = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
+SECRET = re.compile(
+    r"(?i)\b(?:api[_-]?key|access[_-]?token|secret|password|private[_-]?key)\b"
+    r"\s*[:=]\s*[^\s'\"`]{8,}"
+)
+ABSOLUTE_PRIVATE_PATH = re.compile(r"(?:/Users/|/home/[^$<\s]+|[A-Za-z]:\\Users\\)")
+PRIVATE_URL = re.compile(r"https?://[^\s)\]]*(?:localhost|127\.0\.0\.1|\.internal\b|[?&](?:token|key|secret)=)", re.IGNORECASE)
+SENSITIVE_NAMES = {".env", "credentials", "credentials.json", "secrets", "secrets.json"}
 
 
 def load_check_helpers(root: Path):
@@ -229,11 +236,48 @@ def resolve_definition(definition: Definition, root: Path) -> Preview:
                 if dependency not in preview.direct:
                     preview.dependencies.add(dependency)
 
+    selected = preview.direct | preview.dependencies
+    personal_packages = {
+        root.joinpath(*path.relative_to(root).parts[:3])
+        for path in selected
+        if len(path.relative_to(root).parts) >= 3
+        and path.relative_to(root).parts[:2] == ("Skills", "Personal")
+    }
+    for package in sorted(personal_packages):
+        license_path = next((package / name for name in ("LICENSE", "LICENSE.md") if (package / name).is_file()), None)
+        if license_path:
+            if license_path not in preview.direct:
+                preview.dependencies.add(license_path)
+        elif definition.visibility == "public":
+            preview.blocked.append(f"public Personal Skill missing license: {relative(package, root)}")
+
     if definition.visibility == "public":
+        if not definition.metadata.get("license"):
+            preview.blocked.append("public Definition missing license")
         for dependency in sorted(preview.dependencies):
             metadata = frontmatter(dependency.read_text(encoding="utf-8"))
             if metadata.get("visibility") in {"private", "trusted"}:
                 preview.blocked.append(f"private dependency: {relative(dependency, root)}")
+        for path in sorted(preview.direct | preview.dependencies):
+            rendered = relative(path, root)
+            if path.is_symlink():
+                preview.blocked.append(f"unsafe symlink: {rendered}")
+                continue
+            if path.name.casefold() in SENSITIVE_NAMES:
+                preview.blocked.append(f"sensitive file name: {rendered}")
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            metadata = frontmatter(text) if path.suffix.casefold() == ".md" else {}
+            if metadata.get("visibility") in {"private", "trusted"}:
+                preview.blocked.append(f"non-public selected content: {rendered}")
+            if SECRET.search(text):
+                preview.blocked.append(f"possible secret in {rendered}")
+            if ABSOLUTE_PRIVATE_PATH.search(text):
+                preview.blocked.append(f"absolute private path in {rendered}")
+            if PRIVATE_URL.search(text):
+                preview.blocked.append(f"private URL in {rendered}")
     return preview
 
 
@@ -303,6 +347,14 @@ def preview(args: argparse.Namespace) -> int:
         print(f"EXCLUDED {relative(path, root)}")
     for message in sorted(set(result.blocked)):
         print(f"BLOCK {message}")
+    if result.blocked:
+        print("RESOLVE sanitize, omit, or cancel")
+    destination = str(definition.metadata.get("repository") or "unconfigured")
+    print(
+        f"DISCLOSURE visibility={definition.visibility} "
+        f"license={definition.metadata.get('license') or 'missing'} destination={destination}"
+    )
+    print("REVIEW semantic content and license compatibility before publication")
     print(
         f"SUMMARY direct={len(result.direct)} dependencies={len(result.dependencies)} "
         f"excluded={len(result.excluded)} blocked={len(set(result.blocked))}"

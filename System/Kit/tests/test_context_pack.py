@@ -355,8 +355,7 @@ type: context-pack
 pack_id: growth-skill
 summary: Growth Skill Pack
 status: draft
-visibility: public
-license: MIT
+visibility: private
 created: 2026-08-07
 updated: 2026-08-07
 ---
@@ -385,6 +384,219 @@ Share one Skill.
             candidate = root / "Outputs/Context-Packs/Candidates/growth-skill"
             self.assertTrue((candidate / "skills/growth-advisor/SKILL.md").is_file())
             self.assertTrue((candidate / "skills/growth-advisor/references/guide.md").is_file())
+
+    def test_public_preview_blocks_disclosure_risks_without_echoing_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.copy_repo(Path(temporary))
+            secret_value = "super-secret-value-12345"
+            self.write_note(
+                root,
+                "Context/Projects/Unsafe.md",
+                """
+type: project
+summary: Unsafe public project
+status: active
+visibility: public
+outcome: Demonstrate blocking
+source_of_truth: synthetic
+created: 2026-08-07
+updated: 2026-08-07
+""",
+                f"# Unsafe\n\napi_key={secret_value}\n\n/Users/example/private.md\n\nhttps://admin.internal/dashboard\n",
+            )
+            self.write_note(
+                root,
+                "Context/Projects/Private-Direct.md",
+                """
+type: project
+summary: Private direct selection
+status: active
+visibility: private
+outcome: Stay private
+source_of_truth: synthetic
+created: 2026-08-07
+updated: 2026-08-07
+""",
+                "# Private\n",
+            )
+            definition = root / "Outputs/Context-Packs/unsafe.md"
+            definition.parent.mkdir(parents=True, exist_ok=True)
+            definition.write_text(
+                """---
+type: context-pack
+pack_id: unsafe
+summary: Unsafe public Pack
+status: draft
+visibility: public
+created: 2026-08-07
+updated: 2026-08-07
+---
+# Unsafe
+
+## Purpose
+
+Exercise disclosure checks.
+
+## Includes
+
+- path: Context/Projects/Unsafe.md
+- path: Context/Projects/Private-Direct.md
+
+## Excludes
+
+## Skills
+
+## Build Notes
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_pack(root, "preview", "Outputs/Context-Packs/unsafe.md")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("BLOCK public Definition missing license", result.stdout)
+            self.assertIn("BLOCK non-public selected content: Context/Projects/Private-Direct.md", result.stdout)
+            self.assertIn("BLOCK possible secret in Context/Projects/Unsafe.md", result.stdout)
+            self.assertIn("BLOCK absolute private path in Context/Projects/Unsafe.md", result.stdout)
+            self.assertIn("BLOCK private URL in Context/Projects/Unsafe.md", result.stdout)
+            self.assertIn("RESOLVE sanitize, omit, or cancel", result.stdout)
+            self.assertNotIn(secret_value, result.stdout + result.stderr)
+
+    def test_public_build_succeeds_after_unsafe_source_is_replaced_and_excluded(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.copy_repo(Path(temporary))
+            self.write_note(
+                root,
+                "Context/Projects/Private-Original.md",
+                """
+type: project
+summary: Private original
+status: active
+visibility: private
+outcome: Internal result
+source_of_truth: synthetic
+created: 2026-08-07
+updated: 2026-08-07
+""",
+                "# Private Original\n\npassword=do-not-publish-this\n",
+            )
+            self.write_note(
+                root,
+                "Outputs/Writing/Public-Sanitized.md",
+                """
+type: writing
+summary: Sanitized public result
+status: draft
+visibility: public
+sources:
+  - synthetic
+created: 2026-08-07
+updated: 2026-08-07
+""",
+                "# Sanitized Result\n\nOnly the approved reusable conclusion.\n",
+            )
+            definition = root / "Outputs/Context-Packs/sanitized.md"
+            definition.parent.mkdir(parents=True, exist_ok=True)
+            definition.write_text(
+                """---
+type: context-pack
+pack_id: sanitized
+summary: Sanitized public Pack
+status: draft
+visibility: public
+license: MIT
+created: 2026-08-07
+updated: 2026-08-07
+---
+# Sanitized
+
+## Purpose
+
+Publish only the safe replacement.
+
+## Includes
+
+- path: Context/Projects/Private-Original.md
+- path: Outputs/Writing/Public-Sanitized.md
+
+## Excludes
+
+- path: Context/Projects/Private-Original.md
+
+## Skills
+
+## Build Notes
+
+Private original replaced by the sanitized Output.
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_pack(root, "build", "Outputs/Context-Packs/sanitized.md")
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            candidate = root / "Outputs/Context-Packs/Candidates/sanitized"
+            self.assertTrue((candidate / "artifacts/Public-Sanitized.md").is_file())
+            combined = "\n".join(path.read_text(encoding="utf-8") for path in candidate.rglob("*.md"))
+            self.assertNotIn("do-not-publish-this", combined)
+            self.assertNotIn("Private original", combined)
+
+    def test_public_preview_requires_a_license_for_each_personal_skill(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.copy_repo(Path(temporary))
+            skill = root / "Skills/Personal/unlicensed"
+            (skill / "tests").mkdir(parents=True)
+            (skill / "SKILL.md").write_text(
+                """---
+name: unlicensed
+description: Synthetic unlicensed Skill.
+version: 1.0.0
+status: active
+visibility: public
+created: 2026-08-07
+updated: 2026-08-07
+---
+# Unlicensed
+""",
+                encoding="utf-8",
+            )
+            (skill / "tests/cases.md").write_text("# Cases\n", encoding="utf-8")
+            definition = root / "Outputs/Context-Packs/unlicensed.md"
+            definition.parent.mkdir(parents=True, exist_ok=True)
+            definition.write_text(
+                """---
+type: context-pack
+pack_id: unlicensed
+summary: Unlicensed Skill Pack
+status: draft
+visibility: public
+license: MIT
+created: 2026-08-07
+updated: 2026-08-07
+---
+# Unlicensed
+
+## Purpose
+
+Exercise Skill licensing.
+
+## Includes
+
+## Excludes
+
+## Skills
+
+- path: Skills/Personal/unlicensed/SKILL.md
+
+## Build Notes
+""",
+                encoding="utf-8",
+            )
+
+            result = self.run_pack(root, "preview", "Outputs/Context-Packs/unlicensed.md")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("BLOCK public Personal Skill missing license: Skills/Personal/unlicensed", result.stdout)
 
 
 if __name__ == "__main__":
