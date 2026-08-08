@@ -47,7 +47,7 @@ Private and trusted Packs remain supported, but public publication is the normal
 | Term | Meaning |
 | --- | --- |
 | LBrain | The user's private, canonical context repository. |
-| Context Intake | One manual or scheduled scan across all enabled external sources that retains only durable context and provenance pointers. |
+| Context Intake | A baseline or incremental scan across all enabled external sources that retains decision-complete durable context and provenance pointers. |
 | Pack Definition | A user-owned Markdown note that declares Pack identity, audience, selectors, exclusions, Skills, and publication configuration. |
 | Selector | A relative path or frontmatter query used to include LBrain material. |
 | Candidate | A complete local build awaiting review; it has no publication authority. |
@@ -98,6 +98,9 @@ Private and trusted Packs remain supported, but public publication is the normal
 36. As a Kit maintainer, I want all Git tests to use temporary local repositories, so that verification cannot publish or depend on network access.
 37. As a Kit maintainer, I want Kit upgrades to preserve Definitions, `.gitmodules`, and Submodule pointers, so that personal Pack configuration is never overwritten.
 38. As a Kit maintainer, I want Pack repositories excluded from parent-vault indexing and validation, so that compiled material is not mistaken for canonical LBrain content.
+39. As an LBrain owner, I want every scheduled Project to complete a historical baseline before incremental scans begin, so that older decisions are not silently omitted.
+40. As an LBrain owner, I want a decision to retain its question, evidence, alternatives, rationale, tradeoffs, status, outcome, and source pointers when available, so that another agent can evaluate the reasoning instead of receiving only a conclusion.
+41. As an LBrain owner, I want each intake run to prove source and anchor coverage, so that a connector search cannot be mistaken for a complete reading of the underlying material.
 
 ## Functional Specification
 
@@ -106,10 +109,17 @@ Private and trusted Packs remain supported, but public publication is the normal
 Context Intake is an agent workflow, not a hosted ingestion service or Kit daemon.
 
 - On first configuration, the agent inventories currently available sources and asks whether the user wants scheduled intake, which sources to enable, and at what frequency.
+- A scheduled Project keeps a compact `Intake Profile` in its existing Project note. The profile records context domains, enabled sources, stable anchors, source precedence, baseline status, and the last completeness review without storing credentials or raw connector cursors.
+- A new Project starts in baseline mode. Baseline intake inventories and reads the relevant history behind every configured anchor; a recent-window scan, search result, or message listing cannot establish historical completeness.
+- Incremental intake begins only after the baseline is complete. It uses the last successful external checkpoint with overlap and periodically revisits stable anchors to recover edits, late replies, and missed decisions.
 - A run scans all enabled sources. A named target Project controls attention and reporting, not source coverage.
+- Decision-bearing material is read at the page, topic, thread, change, or issue level before extraction. Discovery and full reading are reported separately.
 - Each durable item is routed to an existing Project or Area when one matches. Synthesized domain knowledge goes to Knowledge. Proposed personal facts or preferences go through an Identity Proposal. Created artifacts go to Outputs. Uncertain material goes to Inbox.
 - Classification such as work, life, or personal is metadata. It does not create a new `Space` entity or deeper fixed hierarchy.
 - Intake stores the smallest durable representation: decision, rationale, action, outcome, status, or reusable learning, plus a source pointer. It does not preserve an external tool's complete thread, mailbox, page tree, or repository layout by default.
+- The smallest complete decision representation retains, when present, its domain and status, date or span, question, material options or disagreements, evidence, conclusion, rationale and tradeoffs, consequences or actions, outcome or validation state, supersession or unresolved conflict, and all useful source pointers. Concision must not erase available reasoning.
+- Later evidence updates the existing durable record and marks implementation, rejection, conflict, or supersession without deleting its prior state. A current-state Project note may link one adjacent `<Project>-Decisions.md` ledger when history would otherwise overwhelm the entry point; no new fixed directory hierarchy is introduced.
+- Every run reports source and anchor status, inspected range or checkpoint, candidates found, records created or updated, duplicates and noise rejected, unresolved conflicts, changed files, and the next completeness review. Any failed, partial, stale when freshness is required, or unread required anchor makes the run partial.
 - The agent follows each destination's existing permission contract. Scheduled intake cannot confirm Identity changes, publish Outputs, publish Packs, change remotes, or push Git history.
 - Scheduling is delegated to the user's available agent automation facility. The Kit stores no scheduler, credentials, connector tokens, or background service.
 
@@ -284,7 +294,7 @@ The Core Skill remains instruction-first and is checked with trigger and safety 
 ### Required behavior coverage
 
 1. A Definition can select several paths and metadata queries, apply exclusions, and deduplicate results.
-2. Full-source intake routes synthetic durable items to the correct existing roles and sends ambiguity to Inbox.
+2. Full-source intake routes synthetic durable items to the correct existing roles, sends ambiguity to Inbox, requires a historical baseline before incremental mode, preserves complete decision reasoning, and proves source and anchor coverage.
 3. The compiler emits `PACK.md` and `SOURCES.md`, emits only non-empty semantic directories, and does not preserve the original tree.
 4. A recipient fixture can understand the Pack from `PACK.md` and resolve every included relative link without access to the source LBrain.
 5. Public build validation blocks private dependencies, secrets, private paths, unsafe links, escaping selectors, symlinks, missing licenses, and missing Skill resources.
@@ -301,6 +311,7 @@ The Core Skill remains instruction-first and is checked with trigger and safety 
 16. Parent LBrain validation skips initialized Pack Submodules and separately verifies Definitions and registrations.
 17. A formal Kit upgrade preserves user-owned Definitions, `.gitmodules`, Submodule pointers, and existing Pack repositories.
 18. All Git publication tests use temporary local repositories and cannot access a network remote.
+19. Intake cases reject a recent-window or search-only scan as a complete baseline and reject a conclusion-only record when the available source contains material reasoning.
 
 ### Existing prior art
 
