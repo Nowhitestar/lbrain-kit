@@ -179,6 +179,8 @@ kind: analysis
 summary: Growth lessons
 status: active
 visibility: public
+tags:
+  - context-pack-preview-fixture
 sources:
   - synthetic
 created: 2026-08-07
@@ -195,12 +197,30 @@ kind: analysis
 summary: Excluded analysis
 status: active
 visibility: public
+tags:
+  - context-pack-preview-fixture
 sources:
   - synthetic
 created: 2026-08-07
 updated: 2026-08-07
 """,
                 "# Excluded\n",
+            )
+            self.write_note(
+                root,
+                "Knowledge/Wiki/Analyses/Unrelated-Private.md",
+                """
+type: knowledge
+kind: analysis
+summary: Unrelated personalized analysis
+status: active
+visibility: private
+sources:
+  - synthetic
+created: 2026-08-07
+updated: 2026-08-07
+""",
+                "# Unrelated Private Analysis\n",
             )
             definition = root / "Outputs/Context-Packs/agentkey-growth.md"
             definition.parent.mkdir(parents=True, exist_ok=True)
@@ -224,7 +244,7 @@ Share reusable growth context.
 ## Includes
 
 - path: Context/Projects/AgentKey.md
-- query: type=knowledge, kind=analysis
+- query: type=knowledge, tags=context-pack-preview-fixture
 
 ## Excludes
 

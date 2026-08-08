@@ -3,6 +3,10 @@
 
 All notable Kit-owned changes are documented here. Kit releases follow semantic versioning; Personal Skills carry their own versions.
 
+## 0.2.3 — 2026-08-08
+
+- Isolated the Context Pack metadata-query fixture from personalized LBrain content, so real private analyses cannot create false test failures after migration.
+
 ## 0.2.2 — 2026-08-08
 
 - Made Context Pack side-effect tests preserve and compare an existing `.gitmodules` file, so the suite remains valid after users add public Skill or Pack submodules.

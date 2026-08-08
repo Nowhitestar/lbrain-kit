@@ -11,7 +11,7 @@ cd <your-lbrain-directory>
 git remote rename origin kit
 git remote set-url --push kit DISABLED
 git branch -m main kit-base
-git switch -c main v0.2.2
+git switch -c main v0.2.3
 ```
 
 `kit-base` follows the public Kit. `main` is the private personal context history. The disabled push URL prevents an accidental push of personal context to the public Kit.
