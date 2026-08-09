@@ -17,6 +17,7 @@ SCHEMA = "lbrain.retrieval.v1"
 COLLECTION = "brain"
 DEFAULT_INDEX = "lbrain"
 MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
+INDEX_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 IGNORED_PREFIXES = (
     "Outputs/Context-Packs/Candidates/",
     "Outputs/Context-Packs/Repos/",
@@ -25,6 +26,9 @@ IGNORED_PREFIXES = (
     "legacy/",
 )
 IGNORED_PARTS = {".git", ".obsidian", ".mcp", ".gstack", ".wiki-cache", "__pycache__"}
+QMD_EXCLUDED_PATHS = tuple(prefix.rstrip("/") for prefix in IGNORED_PREFIXES) + tuple(
+    sorted(part for part in IGNORED_PARTS if part.startswith("."))
+)
 CONTEXTS = {
     "": (
         "A private Markdown-native personal Agent Context using the LBrain seven-layer structure: "
@@ -45,6 +49,13 @@ CONTEXTS = {
 
 class AdapterError(RuntimeError):
     """Expected user-facing adapter failure."""
+
+
+def positive_integer(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
 
 
 def is_lbrain(root: Path) -> bool:
@@ -103,7 +114,14 @@ def qmd_binary(raw: str | None) -> str | None:
     return shutil.which("qmd")
 
 
+def validate_index_name(value: str) -> str:
+    if not INDEX_NAME.fullmatch(value):
+        raise AdapterError("qmd index must use 1-64 letters, numbers, underscores, or hyphens")
+    return value
+
+
 def run_qmd(binary: str, index: str, arguments: list[str]) -> subprocess.CompletedProcess[str]:
+    index = validate_index_name(index)
     return subprocess.run(
         [binary, "--index", index, *arguments],
         text=True,
@@ -125,7 +143,7 @@ def index_candidates(explicit: str | None) -> list[str]:
     result: list[str] = []
     for value in values:
         if value and value not in result:
-            result.append(value)
+            result.append(validate_index_name(value))
     return result
 
 
@@ -139,9 +157,11 @@ def matching_index(binary: str | None, root: Path, explicit: str | None) -> str 
 
 
 def is_ignored(path: Path, root: Path) -> bool:
-    relative = path.relative_to(root).as_posix()
-    return any(part in IGNORED_PARTS or part.startswith(".") for part in path.relative_to(root).parts) or any(
-        relative.startswith(prefix) for prefix in IGNORED_PREFIXES
+    relative_path = path.relative_to(root)
+    relative = relative_path.as_posix().casefold()
+    ignored_parts = {part.casefold() for part in IGNORED_PARTS}
+    return any(part.casefold() in ignored_parts or part.startswith(".") for part in relative_path.parts) or any(
+        relative.startswith(prefix.casefold()) for prefix in IGNORED_PREFIXES
     )
 
 
@@ -160,6 +180,8 @@ def safe_path(root: Path, raw: str) -> Path:
     value = raw.strip()
     if value.startswith("qmd://brain/"):
         value = value.removeprefix("qmd://brain/")
+    elif value.startswith("qmd://"):
+        raise AdapterError("qmd document path targets a different collection")
     elif value.startswith("brain/"):
         value = value.removeprefix("brain/")
     candidate = Path(value)
@@ -238,16 +260,54 @@ def qmd_config_dir() -> Path:
     return Path.home() / ".config/qmd"
 
 
+def qmd_health(binary: str, index: str, *, check_exclusions: bool = True) -> tuple[bool, dict[str, object]]:
+    status = run_qmd(binary, index, ["status"])
+    updated_match = re.search(r"^\s*Updated:\s+(.+?)\s*$", status.stdout, re.MULTILINE)
+    updated = updated_match.group(1) if updated_match else None
+    stale: bool | None = None
+    if updated:
+        age = re.fullmatch(r"(\d+)([smhdw]) ago", updated)
+        if age:
+            amount = int(age.group(1))
+            unit = age.group(2)
+            stale = unit == "w" or (unit == "d" and amount >= 1) or (unit == "h" and amount >= 24)
+
+    exclusions: dict[str, bool] = {}
+    if check_exclusions:
+        for path in QMD_EXCLUDED_PATHS:
+            result = run_qmd(binary, index, ["ls", f"{COLLECTION}/{path}"])
+            output = result.stdout.strip().casefold()
+            exclusions[path] = result.returncode == 0 and (not output or output.startswith("no files found"))
+    healthy = status.returncode == 0 and all(exclusions.values())
+    return healthy, {
+        "status_ok": status.returncode == 0,
+        "updated": updated,
+        "stale": stale,
+        "exclusions": exclusions,
+    }
+
+
+def validated_qmd_results(root: Path, output: str) -> list[dict[str, object]]:
+    try:
+        results = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise AdapterError(f"qmd returned invalid JSON: {error}") from error
+    if not isinstance(results, list):
+        raise AdapterError("qmd query result must be a JSON array")
+    for item in results:
+        if not isinstance(item, dict) or not isinstance(item.get("file"), str):
+            raise AdapterError("qmd query result is missing a document path")
+        safe_path(root, item["file"])
+    return results
+
+
 def proposed_config(root: Path) -> dict[str, object]:
     return {
         "collections": {
             COLLECTION: {
                 "path": str(root),
                 "pattern": "**/*.md",
-                "ignore": [
-                    "Outputs/Context-Packs/Candidates/**",
-                    "Outputs/Context-Packs/Repos/**",
-                ],
+                "ignore": [f"{path}/**" for path in QMD_EXCLUDED_PATHS],
                 "context": CONTEXTS,
             }
         }
@@ -257,13 +317,29 @@ def proposed_config(root: Path) -> dict[str, object]:
 def command_doctor(args: argparse.Namespace) -> int:
     root = resolve_root(args.root)
     binary = qmd_binary(args.qmd_bin)
-    index = matching_index(binary, root, args.index)
+    matched_index = matching_index(binary, root, args.index)
+    healthy = False
+    health: dict[str, object] = {
+        "status_ok": False,
+        "updated": None,
+        "stale": None,
+        "exclusions": {path: False for path in QMD_EXCLUDED_PATHS},
+    }
+    if binary and matched_index:
+        healthy, health = qmd_health(binary, matched_index)
+    index = matched_index if healthy else None
     report = {
         "schema": SCHEMA,
         "root": str(root),
         "provider": "qmd" if index else "filesystem",
         "degraded": index is None,
-        "qmd": {"binary": binary, "index": index, "collection": COLLECTION},
+        "qmd": {
+            "binary": binary,
+            "index": matched_index,
+            "collection": COLLECTION,
+            "healthy": healthy,
+            **health,
+        },
         "filesystem": {"documents": len(markdown_files(root)), "available": True},
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -288,6 +364,13 @@ def command_query(args: argparse.Namespace) -> int:
     binary = qmd_binary(args.qmd_bin) if args.provider != "filesystem" else None
     index = matching_index(binary, root, args.index)
     semantic = args.semantic or args.query
+    if index and binary:
+        healthy, _ = qmd_health(binary, index, check_exclusions=False)
+        if not healthy:
+            if args.provider == "qmd":
+                raise AdapterError("matching qmd provider failed its status or exclusion checks")
+            sys.stderr.write("qmd provider is unhealthy; using degraded filesystem retrieval\n")
+            index = None
     if index:
         document = "\n".join(
             line for line in (f"intent: {args.intent}" if args.intent else "", f"lex: {args.query}", f"vec: {semantic}") if line
@@ -297,8 +380,15 @@ def command_query(args: argparse.Namespace) -> int:
             command.append("--no-rerank")
         result = run_qmd(binary, index, command)
         if result.returncode == 0:
-            sys.stdout.write(result.stdout)
-            return 0
+            try:
+                results = validated_qmd_results(root, result.stdout)
+            except AdapterError as error:
+                if args.provider == "qmd":
+                    raise
+                sys.stderr.write(f"{error}; using degraded filesystem retrieval\n")
+            else:
+                print(json.dumps(results, ensure_ascii=False, indent=2))
+                return 0
         if args.provider == "qmd":
             sys.stderr.write(result.stderr or "qmd query failed\n")
             return result.returncode
@@ -369,8 +459,11 @@ def command_configure(args: argparse.Namespace) -> int:
     if not args.index and matching_index(binary, root, None):
         print("MATCHING QMD INDEX ALREADY CONFIGURED")
         return 0
-    index = args.index or os.environ.get("LBRAIN_QMD_INDEX") or DEFAULT_INDEX
-    destination = qmd_config_dir() / f"{index}.yml"
+    index = validate_index_name(args.index or os.environ.get("LBRAIN_QMD_INDEX") or DEFAULT_INDEX)
+    config_dir = qmd_config_dir().resolve()
+    destination = (config_dir / f"{index}.yml").resolve()
+    if destination.parent != config_dir:
+        raise AdapterError("qmd configuration destination escapes its configuration directory")
     rendered = json.dumps(proposed_config(root), ensure_ascii=False, indent=2) + "\n"
     print(f"QMD CONFIG {destination}")
     if not args.apply:
@@ -429,7 +522,7 @@ def parser() -> argparse.ArgumentParser:
     query.add_argument("query")
     query.add_argument("--semantic")
     query.add_argument("--intent")
-    query.add_argument("--limit", type=int, default=10)
+    query.add_argument("--limit", type=positive_integer, default=10)
     query.add_argument("--min-score", type=float, default=0.3)
     query.add_argument("--provider", choices=("auto", "qmd", "filesystem"), default="auto")
     query.add_argument("--no-rerank", action="store_true")
@@ -437,15 +530,15 @@ def parser() -> argparse.ArgumentParser:
     get = commands.add_parser("get")
     common(get)
     get.add_argument("file")
-    get.add_argument("--from-line", type=int, default=1)
-    get.add_argument("--max-lines", type=int, default=200)
+    get.add_argument("--from-line", type=positive_integer, default=1)
+    get.add_argument("--max-lines", type=positive_integer, default=200)
     get.add_argument("--line-numbers", action="store_true")
     get.set_defaults(handler=command_get)
     multi = commands.add_parser("multi-get")
     common(multi)
     multi.add_argument("pattern")
-    multi.add_argument("--limit", type=int, default=8)
-    multi.add_argument("--max-lines", type=int, default=200)
+    multi.add_argument("--limit", type=positive_integer, default=8)
+    multi.add_argument("--max-lines", type=positive_integer, default=200)
     multi.set_defaults(handler=command_multi_get)
     configure = commands.add_parser("configure")
     common(configure)

@@ -141,9 +141,17 @@ collections:
     ignore:
       - Outputs/Context-Packs/Candidates/**
       - Outputs/Context-Packs/Repos/**
+      - System/session_logs/**
+      - System/html-artifacts/**
+      - legacy/**
+      - .git/**
+      - .gstack/**
+      - .mcp/**
+      - .obsidian/**
+      - .wiki-cache/**
 ```
 
-The adapter reuses an existing matching qmd index when possible. A fresh installation may generate a dedicated `lbrain` index without changing another qmd index. The local root registry, qmd configuration, and SQLite files live outside Git and contain no canonical knowledge.
+The adapter reuses an existing matching qmd index when possible. `doctor` checks qmd status and confirms that excluded roots have no indexed files. Query output is path-validated before it is returned; an automatic query falls back to the filesystem when qmd fails, while explicit qmd mode fails closed. A fresh installation may generate a dedicated `lbrain` index without changing another qmd index. The local root registry, qmd configuration, and SQLite files live outside Git and contain no canonical knowledge.
 
 The minimum path contexts are the root, `Knowledge/Wiki`, `Knowledge/Sources`, `Context/Projects`, `Context/Identity`, `Outputs/Writing`, `Skills`, `System`, `Inbox`, and `Archives`. These descriptions help an agent distinguish source roles before opening documents.
 
@@ -174,7 +182,7 @@ Each extracted operation must define inputs, preconditions, idempotency, affecte
 | High-quality local retrieval | On a configured machine, `doctor` selects the qmd index whose `brain` collection resolves to this LBrain; a hybrid query returns the expected Wiki material. |
 | Arbitrary-session root discovery | The adapter resolves `--root`, `LBRAIN_ROOT`, a local root registry, a current working tree, or a canonical symlinked package without a personal path embedded in Kit files. |
 | Degraded availability | With qmd unavailable, `doctor` reports filesystem mode and a lexical query retrieves a deterministic fixture. |
-| Safe retrieval | `get` rejects absolute paths and traversal outside the LBrain; generated Pack trees and hidden/runtime state are excluded. |
+| Safe retrieval | Read bounds must be positive; `get` rejects absolute paths and traversal outside the LBrain; qmd results, generated Pack trees, and hidden/runtime state are excluded. |
 | Reproducible setup | A dry run shows the dedicated qmd configuration; apply refuses to overwrite a divergent existing config. |
 | No policy duplication | Runtime docs route MCP-capable hosts directly to qmd and other hosts to the adapter; no LBrain Policy MCP is introduced. |
 

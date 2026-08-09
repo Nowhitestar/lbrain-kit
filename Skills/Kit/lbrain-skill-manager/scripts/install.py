@@ -24,6 +24,10 @@ def ignored_copy_name(name: str) -> bool:
     return name in COPY_IGNORED_NAMES or name.endswith((".pyc", ".pyo"))
 
 
+def contains_symlink(path: Path) -> bool:
+    return path.is_symlink() or any(candidate.is_symlink() for candidate in path.rglob("*"))
+
+
 def trees_equal(left: Path, right: Path) -> bool:
     comparison = filecmp.dircmp(left, right)
     left_only = {name for name in comparison.left_only if not ignored_copy_name(name)}
@@ -50,6 +54,8 @@ def copy_ignore(_: str, names: list[str]) -> set[str]:
 
 
 def validate_package(package: Path) -> None:
+    if contains_symlink(package):
+        raise ValueError(f"Skill package must not contain symlinks: {package}")
     skill = package / "SKILL.md"
     content = skill.read_text(encoding="utf-8")
     match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
@@ -80,7 +86,18 @@ def selected_skills(root: Path, runtime: str) -> list[Path]:
         runtimes = {item.strip().casefold() for item in runtime_text.split(",")}
         if runtime not in runtimes:
             continue
-        package = root / Path(target).parent
+        target_path = Path(target)
+        if (
+            target_path.is_absolute()
+            or len(target_path.parts) != 4
+            or target_path.parts[0] != "Skills"
+            or target_path.parts[1] not in {"Kit", "Personal"}
+            or target_path.parts[3] != "SKILL"
+        ):
+            raise ValueError(f"enabled skill target must be Skills/Kit|Personal/<name>/SKILL: {target}")
+        package = root / target_path.parent
+        if not package.resolve().is_relative_to((root / "Skills").resolve()):
+            raise ValueError(f"enabled skill escapes the Skills directory: {target}")
         if not (package / "SKILL.md").is_file():
             raise ValueError(f"enabled skill is missing: {target}")
         validate_package(package)
@@ -105,7 +122,10 @@ def install(root: Path, runtime: str, target: Path, mode: str, dry_run: bool) ->
         identical = (
             mode == "symlink" and destination.is_symlink() and destination.resolve() == package
         ) or (
-            mode == "copy" and destination.is_dir() and not destination.is_symlink() and trees_equal(package, destination)
+            mode == "copy"
+            and destination.is_dir()
+            and not contains_symlink(destination)
+            and trees_equal(package, destination)
         )
         if identical:
             existing.add(destination)

@@ -90,6 +90,15 @@ TYPE_FIELDS = {
 WIKILINK = re.compile(r"(?<!!)\[\[([^\]]+)\]\]")
 RESOURCE = re.compile(r"\b((?:references|scripts|assets|examples|tests)/[A-Za-z0-9_./-]+)")
 ENABLED = re.compile(r"^\s*-\s+\[\[([^\]]+/SKILL)\]\]\s+[—-]\s+(.+?)\s*$", re.MULTILINE)
+SECRET = re.compile(
+    r"(?i)(?:\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|secret|password|private[_-]?key)\b"
+    r"(?:[\"']\s*)?[:=]\s*(?!re\.compile\b)(?:\"[^\"\n]{8,}\"|'[^'\n]{8,}'|[A-Za-z0-9_./+=-]{8,})"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
+)
+ABSOLUTE_PRIVATE_PATH = re.compile(
+    r"(?:/Users/[A-Za-z0-9._-]+/|/home/[A-Za-z0-9._-]+/|[A-Za-z]:\\Users\\[A-Za-z0-9._-]+\\)"
+)
+DISCLOSURE_SUFFIXES = {".json", ".md", ".py", ".sh", ".toml", ".txt", ".yaml", ".yml"}
 
 
 @dataclass(frozen=True)
@@ -407,11 +416,38 @@ def validate(root: Path) -> list[Finding]:
             resolved = target if target.is_absolute() else (path.parent / target).resolve()
             if target.is_absolute() or not resolved.is_relative_to(root):
                 add("ERROR", path, "symlink discloses or escapes the LBrain root")
+            if path.is_relative_to(root / "Skills"):
+                add("ERROR", path, "Skill packages must not contain symlinks")
 
-    private_path = re.compile(r"(?:/Users/|/home/[^$<\s]+|[A-Za-z]:\\Users\\)")
-    for path, text in text_by_path.items():
-        relative = path.relative_to(root).as_posix()
-        if ("<!-- ownership: kit -->" in text or meta_by_path[path].get("visibility") == "public") and private_path.search(text):
+    disclosure_paths = {
+        path
+        for path, text in text_by_path.items()
+        if "<!-- ownership: kit -->" in text or meta_by_path[path].get("visibility") == "public"
+    }
+    public_packages = {
+        skill.parent
+        for skill, _, manifest in skill_by_target.values()
+        if manifest.get("visibility") == "public"
+    }
+    disclosure_roots = [root / "Skills/Kit", root / "System/Kit", *public_packages]
+    for disclosure_root in disclosure_roots:
+        if not disclosure_root.is_dir():
+            continue
+        for path in disclosure_root.rglob("*"):
+            if not path.is_file() or path.suffix.casefold() not in DISCLOSURE_SUFFIXES:
+                continue
+            relative = path.relative_to(root)
+            if relative.parts[:3] == ("System", "Kit", "tests"):
+                continue
+            disclosure_paths.add(path)
+    for path in sorted(disclosure_paths):
+        try:
+            text = read_text(path)
+        except (OSError, UnicodeDecodeError):
+            continue
+        if SECRET.search(text):
+            add("ERROR", path, "Kit/public content contains a possible secret")
+        if ABSOLUTE_PRIVATE_PATH.search(text):
             add("ERROR", path, "Kit/public content contains an absolute private path")
 
     kit_url = git_value(root, "remote.kit.url")

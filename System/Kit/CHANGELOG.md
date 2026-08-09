@@ -9,6 +9,7 @@ All notable Kit-owned changes are documented here. Kit releases follow semantic 
 - Added a portable two-manifest Skill format: standard `SKILL.md` frontmatter plus LBrain-owned `lbrain.json` lifecycle metadata.
 - Added the `lbrain-retrieve` CLI adapter for provider diagnosis, qmd maintenance and MCP launch, bounded reads, hybrid queries, and safe degraded retrieval.
 - Added OpenClaw as a supported isolated runtime adapter and expanded compatibility validation across all enabled Skills.
+- Added positive read bounds, Skill-package and Enabled-path containment checks, qmd status/exclusion health checks, validated qmd result paths, safe index names, and disclosure scanning for public manifests.
 - Kept qmd MCP as the direct read transport and documented future atomic write extraction without introducing an LBrain Policy MCP.
 
 ## 0.2.4 — 2026-08-08

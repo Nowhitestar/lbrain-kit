@@ -6,7 +6,7 @@ Read this reference when configuring or diagnosing LBrain retrieval. The policy 
 
 1. Use an already connected qmd MCP whose `brain` collection points to the active LBrain.
 2. Otherwise use `scripts/retrieval.py`; it selects a matching qmd index when one exists.
-3. If qmd is missing, broken, or points elsewhere, the adapter falls back to bounded filesystem lexical search and marks the result as degraded.
+3. If qmd is missing, broken, points elsewhere, or returns a path outside the shared exclusion contract, the adapter falls back to bounded filesystem lexical search and marks the result as degraded. Explicit `--provider qmd` fails closed.
 
 Do not answer from search snippets alone. Open 3–8 selected files and apply the source-role rules in `SKILL.md`.
 
@@ -33,7 +33,7 @@ Registration stores only the canonical local root path and refuses to overwrite 
 
 The adapter resolves qmd from `--qmd-bin`, `LBRAIN_QMD_BIN`, or `qmd` on `PATH`. Use an absolute wrapper with `LBRAIN_QMD_BIN` when native Node modules were built for a different Node ABI.
 
-It probes `LBRAIN_QMD_INDEX`, then `lbrain`, then `index`, and accepts an index only when `qmd collection show brain` resolves to the active LBrain root. This prevents an unrelated collection with the same name from being treated as personal context.
+It probes `LBRAIN_QMD_INDEX`, then `lbrain`, then `index`, and accepts an index only when `qmd collection show brain` resolves to the active LBrain root. `doctor` also checks provider status and verifies the excluded derived/runtime roots are absent from the index. This prevents an unrelated or unsafe collection with the same name from being treated as personal context.
 
 ## Commands
 
@@ -70,7 +70,7 @@ python3 scripts/retrieval.py update --root <lbrain-root> --index lbrain
 python3 scripts/retrieval.py embed --root <lbrain-root> --index lbrain
 ```
 
-The generated `lbrain` index is stored in qmd's user configuration directory and excludes generated Context Pack Candidates and Repos. The command refuses to overwrite a different existing file.
+The generated `lbrain` index is stored in qmd's user configuration directory and shares the filesystem provider's exclusions for generated Context Packs, runtime state, hidden tooling state, and legacy content. Index names are restricted to stable identifiers, and the command refuses to escape its configuration directory or overwrite a different existing file.
 
 ## MCP-capable clients
 

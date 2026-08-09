@@ -98,6 +98,20 @@ class ToolingSmokeTest(unittest.TestCase):
             self.assertIn("non-portable SKILL.md frontmatter fields: version", result.stdout)
             self.assertIn("LBrain skill manifest is missing", result.stdout)
 
+    def test_validator_scans_public_manifests_without_echoing_sensitive_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copy = self.copy_repo(Path(temporary))
+            manifest = copy / "Skills/Kit/lbrain-capture/lbrain.json"
+            data = manifest.read_text(encoding="utf-8").rstrip()
+            sensitive_value = "fixture-secret-value-12345"
+            data = data[:-1] + f',"provenance":{{"path":"/Users/example/private/file","api_key":"{sensitive_value}"}}}}\n'
+            manifest.write_text(data, encoding="utf-8")
+            result = self.run_check(copy)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("possible secret", result.stdout)
+            self.assertIn("absolute private path", result.stdout)
+            self.assertNotIn(sensitive_value, result.stdout + result.stderr)
+
     def test_isolated_runtime_adapters_and_conflict_guard(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -208,6 +222,69 @@ class ToolingSmokeTest(unittest.TestCase):
             )
             self.assertNotEqual(rejected_openclaw_symlink.returncode, 0)
             self.assertIn("OpenClaw rejects Skill symlinks", rejected_openclaw_symlink.stderr)
+
+            leak = fixture / "Skills/Kit/lbrain-capture/private-link.md"
+            leak.symlink_to(fixture / "Context/Identity/Profile.md")
+            rejected_package_symlink = subprocess.run(
+                [
+                    sys.executable,
+                    str(INSTALL),
+                    "--root",
+                    str(fixture),
+                    "--runtime",
+                    "openclaw",
+                    "--target",
+                    str(base / "openclaw-package-symlink"),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(rejected_package_symlink.returncode, 0)
+            self.assertIn("must not contain symlinks", rejected_package_symlink.stderr)
+            self.assertFalse((base / "openclaw-package-symlink/lbrain-capture").exists())
+            validator = self.run_check(fixture)
+            self.assertNotEqual(validator.returncode, 0)
+            self.assertIn("Skill packages must not contain symlinks", validator.stdout)
+            leak.unlink()
+
+            outside = base / "outside-skill"
+            (outside / "tests").mkdir(parents=True)
+            (outside / "SKILL.md").write_text(
+                "---\nname: outside-skill\ndescription: Must not install.\n---\n# Outside\n",
+                encoding="utf-8",
+            )
+            (outside / "lbrain.json").write_text(
+                '{"schema":"lbrain.skill.v1","version":"0.1.0","status":"active",'
+                '"visibility":"private","created":"2026-08-07","updated":"2026-08-07"}\n',
+                encoding="utf-8",
+            )
+            (outside / "tests/cases.md").write_text("# Cases\n", encoding="utf-8")
+            with (fixture / "Skills/Enabled.md").open("a", encoding="utf-8") as file:
+                file.write("\n- [[../outside-skill/SKILL]] — codex\n")
+            rejected_escape = subprocess.run(
+                [
+                    sys.executable,
+                    str(INSTALL),
+                    "--root",
+                    str(fixture),
+                    "--runtime",
+                    "codex",
+                    "--target",
+                    str(base / "escaped-target"),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(rejected_escape.returncode, 0)
+            self.assertIn("enabled skill target", rejected_escape.stderr)
+            self.assertFalse((base / "escaped-target/outside-skill").exists())
+            enabled = fixture / "Skills/Enabled.md"
+            enabled.write_text(
+                enabled.read_text(encoding="utf-8").replace("\n- [[../outside-skill/SKILL]] — codex\n", "\n"),
+                encoding="utf-8",
+            )
 
             dry_target = base / "dry"
             preview = subprocess.run(
