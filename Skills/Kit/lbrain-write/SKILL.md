@@ -1,11 +1,6 @@
 ---
 name: lbrain-write
 description: Creates traceable writing from LBrain context. Use when the user asks to draft, rewrite, adapt, or publish content using their knowledge and style.
-version: 0.1.0
-status: active
-visibility: public
-created: 2026-08-07
-updated: 2026-08-07
 ---
 # LBrain Write
 

@@ -109,17 +109,16 @@ This item needs a later review.
             """---
 name: agentkey-growth-brief
 description: Summarizes the synthetic AgentKey growth context for another agent.
-version: 1.0.0
-status: active
-visibility: public
-license: MIT
-created: 2026-08-07
-updated: 2026-08-07
 ---
 # AgentKey Growth Brief
 
 Read the Pack context, preserve its limitations, and cite the Pack release. See `tests/cases.md`.
 """,
+        )
+        write(
+            lbrain / "Skills/Personal/agentkey-growth-brief/lbrain.json",
+            '{"schema":"lbrain.skill.v1","version":"1.0.0","status":"active",'
+            '"visibility":"public","license":"MIT","created":"2026-08-07","updated":"2026-08-07"}\n',
         )
         write(
             lbrain / "Skills/Personal/agentkey-growth-brief/tests/cases.md",

@@ -156,7 +156,7 @@ The Markdown body contains stable sections for purpose, includes, excludes, Skil
 
 Selection begins with every matching include selector, then applies exclusions, then follows only dependencies required to make selected material understandable.
 
-- Dependencies include explicit Wikilinks, referenced Sources, embedded local assets, and selected Skill resources.
+- Dependencies include explicit Wikilinks, referenced Sources, embedded local assets, selected Skill resources, and each selected Skill's `lbrain.json` lifecycle sidecar.
 - The preview distinguishes directly selected material from dependency material.
 - A public Pack cannot retain a dependency whose visibility or contents would disclose private or trusted information.
 - When a required dependency is unsafe, the operation pauses and offers exactly three outcomes: sanitize into portable public text, omit the dependent material, or cancel.
@@ -258,7 +258,7 @@ Automated validation hard-blocks:
 
 Automated validation cannot establish semantic safety. Before publication, the user receives the complete Candidate diff, disclosure summary, dependency resolutions, destination repository, visibility, license, and proposed version. Publication proceeds only after explicit approval of that review.
 
-The Kit's MIT License covers Kit-owned Pack tooling and templates. It does not automatically license a user's Pack, selected context, Sources, artifacts, or Personal Skills. Every public Pack declares its own license, and every included third-party or Personal Skill must be compatible with it.
+The Kit's MIT License covers Kit-owned Pack tooling and templates. It does not automatically license a user's Pack, selected context, Sources, artifacts, or Personal Skills. Every public Pack declares its own license, and every included third-party or Personal Skill must declare a compatible license in `lbrain.json`.
 
 ## Implementation Decisions
 

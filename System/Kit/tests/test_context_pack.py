@@ -500,17 +500,16 @@ Help an agent understand AgentKey growth decisions.
                 """---
 name: growth-advisor
 description: Applies a synthetic growth review.
-version: 1.0.0
-status: active
-visibility: public
-license: MIT
-created: 2026-08-07
-updated: 2026-08-07
 ---
 # Growth Advisor
 
 Read `references/guide.md` before reviewing growth.
 """,
+                encoding="utf-8",
+            )
+            (skill / "lbrain.json").write_text(
+                '{"schema":"lbrain.skill.v1","version":"1.0.0","status":"active",'
+                '"visibility":"public","license":"MIT","created":"2026-08-07","updated":"2026-08-07"}\n',
                 encoding="utf-8",
             )
             (skill / "references/guide.md").write_text("# Guide\n\nUse evidence.\n", encoding="utf-8")
@@ -553,6 +552,7 @@ Share one Skill.
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             candidate = root / "Outputs/Context-Packs/Candidates/growth-skill"
             self.assertTrue((candidate / "skills/growth-advisor/SKILL.md").is_file())
+            self.assertTrue((candidate / "skills/growth-advisor/lbrain.json").is_file())
             self.assertTrue((candidate / "skills/growth-advisor/references/guide.md").is_file())
 
     def test_public_preview_blocks_disclosure_risks_without_echoing_secrets(self) -> None:
@@ -720,15 +720,15 @@ Private original replaced by the sanitized Output.
                 """---
 name: unlicensed
 description: Synthetic unlicensed Skill.
-version: 1.0.0
-status: active
-visibility: public
-license: MIT
-created: 2026-08-07
-updated: 2026-08-07
 ---
 # Unlicensed
 """,
+                encoding="utf-8",
+            )
+            skill_manifest = skill / "lbrain.json"
+            skill_manifest.write_text(
+                '{"schema":"lbrain.skill.v1","version":"1.0.0","status":"active",'
+                '"visibility":"public","license":"MIT","created":"2026-08-07","updated":"2026-08-07"}\n',
                 encoding="utf-8",
             )
             (skill / "tests/cases.md").write_text("# Cases\n", encoding="utf-8")
@@ -769,9 +769,8 @@ Exercise Skill licensing.
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("BLOCK public Personal Skill missing license: Skills/Personal/unlicensed", result.stdout)
 
-            skill_manifest = skill / "SKILL.md"
             skill_manifest.write_text(
-                skill_manifest.read_text(encoding="utf-8").replace("license: MIT", "license: Apache-2.0"),
+                skill_manifest.read_text(encoding="utf-8").replace('"license":"MIT"', '"license":"Apache-2.0"'),
                 encoding="utf-8",
             )
             (skill / "LICENSE").write_text("Apache License\nVersion 2.0\n", encoding="utf-8")

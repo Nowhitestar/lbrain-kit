@@ -61,7 +61,7 @@ class WorkflowSmokeTest(unittest.TestCase):
             enabled.write_text(
                 enabled.read_text(encoding="utf-8")
                 .replace("All seven Core Skills", "All six Core Skills")
-                .replace("- [[Skills/Kit/lbrain-context-pack/SKILL]] — codex, claude, hermes\n", ""),
+                .replace("- [[Skills/Kit/lbrain-context-pack/SKILL]] — codex, claude, hermes, openclaw\n", ""),
                 encoding="utf-8",
             )
 
@@ -70,6 +70,8 @@ class WorkflowSmokeTest(unittest.TestCase):
             git(kit, "config", "user.email", "lbrain-test@example.invalid")
             (kit / "System/Kit/VERSION").write_text("0.1.0\n", encoding="utf-8")
             git(kit, "add", ".")
+            for manifest in sorted((kit / "Skills/Personal").glob("*/lbrain.json")):
+                git(kit, "add", "-f", manifest.relative_to(kit).as_posix())
             git(kit, "commit", "-m", "kit: release 0.1.0")
             git(kit, "tag", "v0.1.0")
 
@@ -98,7 +100,12 @@ class WorkflowSmokeTest(unittest.TestCase):
             personal_skill = personal / "Skills/Personal/personal-upgrade"
             (personal_skill / "tests").mkdir(parents=True)
             (personal_skill / "SKILL.md").write_text(
-                "---\nname: personal-upgrade\ndescription: Preserves a synthetic Personal Skill during upgrade tests.\nversion: 1.0.0\nstatus: active\nvisibility: private\ncreated: 2026-08-07\nupdated: 2026-08-07\n---\n# Personal Upgrade\n\nPreserve this skill. See `tests/cases.md`.\n",
+                "---\nname: personal-upgrade\ndescription: Preserves a synthetic Personal Skill during upgrade tests.\n---\n# Personal Upgrade\n\nPreserve this skill. See `tests/cases.md`.\n",
+                encoding="utf-8",
+            )
+            (personal_skill / "lbrain.json").write_text(
+                '{"schema":"lbrain.skill.v1","version":"1.0.0","status":"active",'
+                '"visibility":"private","created":"2026-08-07","updated":"2026-08-07"}\n',
                 encoding="utf-8",
             )
             (personal_skill / "tests/cases.md").write_text("# Cases\n\n- Preserve the package.\n", encoding="utf-8")
@@ -176,7 +183,7 @@ class WorkflowSmokeTest(unittest.TestCase):
                 .replace("All six Core Skills", "All seven Core Skills")
                 .replace(
                     "\nAdd active Personal Skills below",
-                    "\n- [[Skills/Kit/lbrain-context-pack/SKILL]] — codex, claude, hermes\n\nAdd active Personal Skills below",
+                    "\n- [[Skills/Kit/lbrain-context-pack/SKILL]] — codex, claude, hermes, openclaw\n\nAdd active Personal Skills below",
                 ),
                 encoding="utf-8",
             )

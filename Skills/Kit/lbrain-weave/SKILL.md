@@ -1,11 +1,6 @@
 ---
 name: lbrain-weave
 description: Weaves Sources into traceable LBrain Wiki knowledge. Use when the user asks to synthesize, connect, distill, or update knowledge from sources.
-version: 0.1.0
-status: active
-visibility: public
-created: 2026-08-07
-updated: 2026-08-07
 ---
 # LBrain Weave
 

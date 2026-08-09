@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -23,7 +24,13 @@ CORE_SKILLS = {
     "lbrain-skill-manager",
     "lbrain-context-pack",
 }
-RUNTIMES = {"codex", "claude", "hermes"}
+RUNTIMES = {"codex", "claude", "hermes", "openclaw"}
+SKILL_ENTRY_FIELDS = {"name", "description"}
+SKILL_MANIFEST_FIELDS = {"schema", "version", "status", "visibility", "created", "updated"}
+SKILL_MANIFEST_OPTIONAL = {"license", "provenance"}
+SKILL_STATUSES = {"draft", "active", "deprecated", "archived"}
+SEMVER = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?")
+ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 REQUIRED_DIRS = (
     "Inbox",
     "Knowledge",
@@ -319,23 +326,60 @@ def validate(root: Path) -> list[Finding]:
         add("ERROR", f"Skills/Kit/{missing}", "required Core Skill is missing")
 
     skill_entries = sorted((root / "Skills").glob("*/*/SKILL.md")) if (root / "Skills").is_dir() else []
-    skill_by_target: dict[str, tuple[Path, dict[str, object]]] = {}
+    skill_by_target: dict[str, tuple[Path, dict[str, object], dict[str, object]]] = {}
     for skill in skill_entries:
         meta = frontmatter(read_text(skill))
         relative = skill.relative_to(root).as_posix().removesuffix(".md")
-        skill_by_target[relative] = (skill, meta)
-        missing = {"name", "description", "version", "status", "visibility", "created", "updated"} - meta.keys()
+        manifest_path = skill.parent / "lbrain.json"
+        manifest: dict[str, object] = {}
+        if not manifest_path.is_file():
+            add("ERROR", manifest_path, "LBrain skill manifest is missing")
+        else:
+            try:
+                loaded = json.loads(read_text(manifest_path))
+                if isinstance(loaded, dict):
+                    manifest = loaded
+                else:
+                    add("ERROR", manifest_path, "LBrain skill manifest must be a JSON object")
+            except (OSError, json.JSONDecodeError) as error:
+                add("ERROR", manifest_path, f"invalid LBrain skill manifest: {error}")
+        skill_by_target[relative] = (skill, meta, manifest)
+        missing = SKILL_ENTRY_FIELDS - meta.keys()
         if missing:
-            add("ERROR", skill, f"skill manifest missing fields: {', '.join(sorted(missing))}")
-        if meta.get("status") == "active" and not (skill.parent / "tests/cases.md").is_file():
+            add("ERROR", skill, f"portable skill entrypoint missing fields: {', '.join(sorted(missing))}")
+        unexpected = meta.keys() - SKILL_ENTRY_FIELDS
+        if unexpected:
+            add("ERROR", skill, f"non-portable SKILL.md frontmatter fields: {', '.join(sorted(unexpected))}")
+        missing_manifest = SKILL_MANIFEST_FIELDS - manifest.keys()
+        if missing_manifest:
+            add("ERROR", manifest_path, f"LBrain skill manifest missing fields: {', '.join(sorted(missing_manifest))}")
+        unexpected_manifest = manifest.keys() - SKILL_MANIFEST_FIELDS - SKILL_MANIFEST_OPTIONAL
+        if unexpected_manifest:
+            add("ERROR", manifest_path, f"unknown LBrain skill manifest fields: {', '.join(sorted(unexpected_manifest))}")
+        if manifest.get("schema") != "lbrain.skill.v1":
+            add("ERROR", manifest_path, "LBrain skill manifest schema must be lbrain.skill.v1")
+        if not SEMVER.fullmatch(str(manifest.get("version", ""))):
+            add("ERROR", manifest_path, "LBrain skill version must be semantic versioning")
+        if manifest.get("status") not in SKILL_STATUSES:
+            add("ERROR", manifest_path, f"invalid LBrain skill status: {manifest.get('status')}")
+        if manifest.get("visibility") not in VISIBILITIES:
+            add("ERROR", manifest_path, f"invalid LBrain skill visibility: {manifest.get('visibility')}")
+        for field in ("created", "updated"):
+            if not ISO_DATE.fullmatch(str(manifest.get(field, ""))):
+                add("ERROR", manifest_path, f"LBrain skill {field} must be YYYY-MM-DD")
+        if "provenance" in manifest and not isinstance(manifest["provenance"], dict):
+            add("ERROR", manifest_path, "LBrain skill provenance must be a JSON object")
+        if manifest.get("status") == "active" and not (skill.parent / "tests/cases.md").is_file():
             add("ERROR", skill, "active skill is missing tests/cases.md")
         for resource in RESOURCE.findall(read_text(skill)):
             candidate = resource.rstrip(".,;:)")
             if not (skill.parent / candidate).exists():
                 add("ERROR", skill, f"referenced skill resource is missing: {candidate}")
-        if "Skills/Personal/" in skill.relative_to(root).as_posix() and meta.get("visibility") == "public":
+        if "Skills/Personal/" in skill.relative_to(root).as_posix() and manifest.get("visibility") == "public":
             if not any((skill.parent / name).is_file() for name in ("LICENSE", "LICENSE.md")):
                 add("ERROR", skill, "public Personal Skill requires its own license")
+            if not manifest.get("license"):
+                add("ERROR", manifest_path, "public Personal Skill requires a declared license")
 
     enabled_path = root / "Skills/Enabled.md"
     enabled_text = read_text(enabled_path) if enabled_path.is_file() else ""

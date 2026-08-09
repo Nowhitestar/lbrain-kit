@@ -3,14 +3,15 @@
 
 LBrain Kit is a Git-versioned, Markdown-native personal context system for people and their agents. It keeps raw sources, synthesized knowledge, personal context, executable skills, and created outputs separate while remaining usable in Obsidian and any text editor. Selected context can be compiled into independently versioned Context Packs for another person or agent without sharing the private LBrain.
 
-The Kit is private by default. It does not include cloud sync, a database, a custom updater, or a hosted service.
+The Kit is private by default. Markdown remains canonical. The optional qmd adapter builds a disposable local search index; the Kit does not require cloud sync, a canonical database, a custom updater, or a hosted service.
 
 ## Start here
 
 1. Read [[HOME]].
 2. Follow [[System/Kit/SETUP]].
-3. Capture uncertain material in [[Inbox/README|Inbox]].
-4. Run `python3 System/Kit/check.py` before committing significant changes.
+3. Read [[System/Kit/AGENT-RUNTIME]] when connecting an agent or retrieval provider.
+4. Capture uncertain material in [[Inbox/README|Inbox]].
+5. Run `python3 System/Kit/check.py` before committing significant changes.
 
 All internal links use Obsidian-compatible Wikilinks such as `[[Knowledge/Wiki/Index]]`. Markdown readers that do not resolve Wikilinks can still browse the directory tree.
 

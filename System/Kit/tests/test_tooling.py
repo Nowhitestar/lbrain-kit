@@ -84,11 +84,29 @@ class ToolingSmokeTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertNotIn("not-an-lbrain-link", result.stdout)
 
+    def test_validator_rejects_nonportable_skill_frontmatter_and_missing_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copy = self.copy_repo(Path(temporary))
+            skill = copy / "Skills/Kit/lbrain-capture/SKILL.md"
+            skill.write_text(
+                skill.read_text(encoding="utf-8").replace("description:", "version: 1.0.0\ndescription:", 1),
+                encoding="utf-8",
+            )
+            (copy / "Skills/Kit/lbrain-capture/lbrain.json").unlink()
+            result = self.run_check(copy)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("non-portable SKILL.md frontmatter fields: version", result.stdout)
+            self.assertIn("LBrain skill manifest is missing", result.stdout)
+
     def test_isolated_runtime_adapters_and_conflict_guard(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             fixture = self.copy_repo(base)
-            for runtime in ("codex", "claude", "hermes"):
+            ignored = fixture / "Skills/Kit/lbrain-capture/__pycache__"
+            ignored.mkdir()
+            (ignored / "cache.pyc").write_bytes(b"generated")
+            (fixture / "Skills/Kit/lbrain-capture/.git").write_text("runtime-irrelevant\n", encoding="utf-8")
+            for runtime in ("codex", "claude", "hermes", "openclaw"):
                 target = base / runtime
                 result = subprocess.run(
                     [sys.executable, str(INSTALL), "--root", str(fixture), "--runtime", runtime, "--target", str(target)],
@@ -101,7 +119,13 @@ class ToolingSmokeTest(unittest.TestCase):
                 installed_names = {path.parent.name for path in installed}
                 self.assertTrue(CORE_SKILLS <= installed_names)
                 self.assertEqual(result.stdout.count("INSTALLED "), len(installed))
-                self.assertTrue(all(path.parent.is_symlink() for path in installed))
+                if runtime == "openclaw":
+                    self.assertTrue(all(not path.parent.is_symlink() for path in installed))
+                    self.assertFalse((target / "lbrain-capture/.git").exists())
+                    self.assertFalse((target / "lbrain-capture/__pycache__").exists())
+                else:
+                    self.assertTrue(all(path.parent.is_symlink() for path in installed))
+                self.assertTrue(all((path.parent / "lbrain.json").is_file() for path in installed))
 
                 conflict = subprocess.run(
                     [sys.executable, str(INSTALL), "--root", str(fixture), "--runtime", runtime, "--target", str(target)],
@@ -114,7 +138,15 @@ class ToolingSmokeTest(unittest.TestCase):
 
             personal = fixture / "Skills/Personal/incremental-skill"
             (personal / "tests").mkdir(parents=True)
-            (personal / "SKILL.md").write_text("---\nname: incremental-skill\ndescription: Tests incremental installation.\nversion: 0.1.0\nstatus: active\nvisibility: private\ncreated: 2026-08-07\nupdated: 2026-08-07\n---\n# Incremental\n", encoding="utf-8")
+            (personal / "SKILL.md").write_text(
+                "---\nname: incremental-skill\ndescription: Tests incremental installation.\n---\n# Incremental\n",
+                encoding="utf-8",
+            )
+            (personal / "lbrain.json").write_text(
+                '{"schema":"lbrain.skill.v1","version":"0.1.0","status":"active",'
+                '"visibility":"private","created":"2026-08-07","updated":"2026-08-07"}\n',
+                encoding="utf-8",
+            )
             (personal / "tests/cases.md").write_text("# Cases\n", encoding="utf-8")
             with (fixture / "Skills/Enabled.md").open("a", encoding="utf-8") as file:
                 file.write("\n- [[Skills/Personal/incremental-skill/SKILL]] — codex\n")
@@ -156,6 +188,26 @@ class ToolingSmokeTest(unittest.TestCase):
             )
             self.assertEqual(copied_again.returncode, 0, copied_again.stdout + copied_again.stderr)
             self.assertIn("ALREADY INSTALLED", copied_again.stdout)
+
+            rejected_openclaw_symlink = subprocess.run(
+                [
+                    sys.executable,
+                    str(INSTALL),
+                    "--root",
+                    str(fixture),
+                    "--runtime",
+                    "openclaw",
+                    "--target",
+                    str(base / "openclaw-symlink"),
+                    "--mode",
+                    "symlink",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(rejected_openclaw_symlink.returncode, 0)
+            self.assertIn("OpenClaw rejects Skill symlinks", rejected_openclaw_symlink.stderr)
 
             dry_target = base / "dry"
             preview = subprocess.run(

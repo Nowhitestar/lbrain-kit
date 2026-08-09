@@ -1,11 +1,6 @@
 ---
 name: lbrain-capture
 description: Captures new material into the correct LBrain intake path. Use when the user asks to save, capture, collect, or remember information.
-version: 0.3.0
-status: active
-visibility: public
-created: 2026-08-07
-updated: 2026-08-08
 ---
 # LBrain Capture
 

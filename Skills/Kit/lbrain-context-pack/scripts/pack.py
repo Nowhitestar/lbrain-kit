@@ -211,6 +211,19 @@ def license_matches(declared_license: str, license_text: str) -> bool:
     return spdx in "\n".join(text.splitlines()[:5])
 
 
+def load_skill_manifest(package: Path) -> tuple[dict[str, object], str | None]:
+    path = package / "lbrain.json"
+    if not path.is_file():
+        return {}, f"Personal Skill missing LBrain manifest: {path.name}"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        return {}, f"invalid Personal Skill LBrain manifest: {error}"
+    if not isinstance(value, dict):
+        return {}, "Personal Skill LBrain manifest must be a JSON object"
+    return value, None
+
+
 def source_markdown(root: Path) -> list[Path]:
     managed = root / "Outputs/Context-Packs"
     result = []
@@ -351,6 +364,11 @@ def resolve_definition(definition: Definition, root: Path) -> Preview:
             elif dependency:
                 add_dependency(dependency)
         if source.name == "SKILL.md":
+            manifest = source.parent / "lbrain.json"
+            if not manifest.is_file():
+                preview.blocked.append(f"missing Skill resource: {relative(manifest, root)}")
+            else:
+                add_dependency(manifest)
             for resource in resource_pattern.findall(text):
                 dependency = source.parent / resource.rstrip(".,;:")
                 if uses_symlink(dependency, root):
@@ -370,8 +388,9 @@ def resolve_definition(definition: Definition, root: Path) -> Preview:
     }
     for package in sorted(personal_packages):
         license_path = next((package / name for name in ("LICENSE", "LICENSE.md") if (package / name).is_file()), None)
-        skill_path = package / "SKILL.md"
-        skill_metadata = frontmatter(skill_path.read_text(encoding="utf-8")) if skill_path.is_file() else {}
+        skill_metadata, manifest_error = load_skill_manifest(package)
+        if manifest_error:
+            preview.blocked.append(f"{manifest_error}: {relative(package, root)}")
         declared_license = str(skill_metadata.get("license") or "")
         if license_path:
             if license_path not in preview.direct:
@@ -379,6 +398,8 @@ def resolve_definition(definition: Definition, root: Path) -> Preview:
         elif definition.visibility == "public":
             preview.blocked.append(f"public Personal Skill missing license: {relative(package, root)}")
         if definition.visibility == "public":
+            if skill_metadata.get("visibility") != "public":
+                preview.blocked.append(f"non-public Personal Skill: {relative(package, root)}")
             if not declared_license:
                 preview.blocked.append(f"public Personal Skill missing declared license: {relative(package, root)}")
             elif license_id(declared_license) != license_id(str(definition.metadata.get("license", ""))):

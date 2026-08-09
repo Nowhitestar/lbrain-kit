@@ -1,11 +1,6 @@
 ---
 name: lbrain-review
 description: Reviews LBrain queues, stale notes, and proposals. Use when the user asks for inbox processing, maintenance, cleanup, or a context health review.
-version: 0.1.0
-status: active
-visibility: public
-created: 2026-08-07
-updated: 2026-08-07
 ---
 # LBrain Review
 

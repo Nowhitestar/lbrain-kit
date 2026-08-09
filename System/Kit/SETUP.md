@@ -11,7 +11,7 @@ cd <your-lbrain-directory>
 git remote rename origin kit
 git remote set-url --push kit DISABLED
 git branch -m main kit-base
-git switch -c main v0.2.4
+git switch -c main v0.3.0
 ```
 
 `kit-base` follows the public Kit. `main` is the private personal context history. The disabled push URL prevents an accidental push of personal context to the public Kit.
@@ -44,6 +44,40 @@ python3 Skills/Kit/lbrain-skill-manager/scripts/install.py --runtime codex --tar
 
 Rerunning the installer is safe: unchanged installed packages are skipped and newly enabled Skills are added. A divergent existing package stops the entire install before any write. Symlink installs follow canonical LBrain updates automatically; copy installs must be reviewed and replaced explicitly when their canonical package changes.
 
+## Configure retrieval
+
+Install qmd separately when hybrid local retrieval is desired. qmd is the recommended provider, not the source of truth. The filesystem fallback remains available without qmd.
+
+Check the current provider from any directory:
+
+```sh
+python3 <installed-lbrain-retrieve>/scripts/retrieval.py register --root <your-lbrain-directory>
+python3 <installed-lbrain-retrieve>/scripts/retrieval.py register --root <your-lbrain-directory> --apply
+python3 <installed-lbrain-retrieve>/scripts/retrieval.py doctor --root <your-lbrain-directory>
+```
+
+The local root registry makes copy-installed runtimes such as OpenClaw independent of their starting directory. It contains only the canonical LBrain path and refuses to overwrite a different registration.
+
+If no matching qmd index exists, preview and create a dedicated `lbrain` index configuration:
+
+```sh
+python3 <installed-lbrain-retrieve>/scripts/retrieval.py configure --root <your-lbrain-directory>
+python3 <installed-lbrain-retrieve>/scripts/retrieval.py configure --root <your-lbrain-directory> --apply
+python3 <installed-lbrain-retrieve>/scripts/retrieval.py update --root <your-lbrain-directory>
+python3 <installed-lbrain-retrieve>/scripts/retrieval.py embed --root <your-lbrain-directory>
+```
+
+`configure` refuses to overwrite a divergent qmd configuration. Set `LBRAIN_QMD_BIN` to an absolute qmd wrapper when the default `qmd` executable uses an incompatible Node runtime. Set `LBRAIN_ROOT` for copy-mode installations used outside the LBrain tree.
+
+MCP-capable runtimes should launch qmd through the adapter so the same index-selection and root checks apply:
+
+```text
+command: python3
+args: [<installed-lbrain-retrieve>/scripts/retrieval.py, mcp, --root, <your-lbrain-directory>]
+```
+
+Exact client configuration examples and fallback behavior live in `Skills/Kit/lbrain-retrieve/references/providers.md`.
+
 ## Upgrade
 
 Merge only formal Kit release tags into personal `main`:
@@ -74,7 +108,7 @@ Before merging, read `CHANGELOG.md` and the release file under `MIGRATIONS/`. Re
 - preserve User-owned files;
 - preserve personalized Seeded files and apply any suggested seeded change manually.
 
-The 0.2.0 migration requires preserving `Skills/Enabled.md` personalization while adding the seventh mandatory Core Skill entry. Later migrations state their own exact Seeded reconciliation, if any.
+The 0.2.0 migration requires preserving `Skills/Enabled.md` personalization while adding the seventh mandatory Core Skill entry. The 0.3.0 migration moves Skill lifecycle metadata into `lbrain.json` and optionally adds OpenClaw to personalized runtime selections. Later migrations state their own exact Seeded reconciliation, if any.
 
 Do not push an upgrade until validation passes and the personal content diff is reviewed.
 

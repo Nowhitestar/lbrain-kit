@@ -1,11 +1,6 @@
 ---
 name: lbrain-context-pack
 description: Creates, previews, builds, verifies, publishes, updates, revokes, and forks portable Context Packs from canonical LBrain material. Use when the user asks to package or share selected context with another agent.
-version: 0.1.0
-status: active
-visibility: public
-created: 2026-08-07
-updated: 2026-08-07
 ---
 # LBrain Context Pack
 

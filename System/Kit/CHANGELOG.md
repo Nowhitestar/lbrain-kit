@@ -3,6 +3,14 @@
 
 All notable Kit-owned changes are documented here. Kit releases follow semantic versioning; Personal Skills carry their own versions.
 
+## 0.3.0 — 2026-08-09
+
+- Added the Agent Runtime and Retrieval Contract, with qmd as the default derived retrieval provider and a deterministic filesystem fallback.
+- Added a portable two-manifest Skill format: standard `SKILL.md` frontmatter plus LBrain-owned `lbrain.json` lifecycle metadata.
+- Added the `lbrain-retrieve` CLI adapter for provider diagnosis, qmd maintenance and MCP launch, bounded reads, hybrid queries, and safe degraded retrieval.
+- Added OpenClaw as a supported isolated runtime adapter and expanded compatibility validation across all enabled Skills.
+- Kept qmd MCP as the direct read transport and documented future atomic write extraction without introducing an LBrain Policy MCP.
+
 ## 0.2.4 — 2026-08-08
 
 - Added Project Intake Profiles, required historical baselines, checkpointed incremental scans, anchor-level coverage reports, and explicit partial-run semantics.
