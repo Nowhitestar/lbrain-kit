@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,7 @@ from typing import Any
 
 PROFILE_START = "<!-- lbrain:intake-profile:v1:start -->"
 PROFILE_END = "<!-- lbrain:intake-profile:end -->"
+SOURCE_STATUSES = {"scanned", "no_durable_change", "partial", "failed", "stale", "no_match"}
 
 
 class OperationError(ValueError):
@@ -176,9 +178,151 @@ def project_configure(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def one_line(value: object, key: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise OperationError(f"{key} must be non-empty text")
+    return " ".join(value.split()).replace("|", "\\|")
+
+
+def checkpoint_block(payload: dict[str, Any]) -> tuple[str, bool]:
+    run_id = payload.get("run_id")
+    if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", run_id):
+        raise OperationError("run_id must use 1-80 letters, numbers, dots, underscores, or hyphens")
+    inspected_range = one_line(payload.get("range"), "range")
+    sources = payload.get("sources")
+    if not isinstance(sources, list) or not sources:
+        raise OperationError("sources must be a non-empty list")
+
+    rows: list[tuple[str, str, str, bool]] = []
+    incomplete = False
+    for index, source in enumerate(sources):
+        if not isinstance(source, dict):
+            raise OperationError(f"sources[{index}] must be an object")
+        name = one_line(source.get("name"), f"sources[{index}].name")
+        scope = one_line(source.get("scope"), f"sources[{index}].scope")
+        status = source.get("status")
+        if status not in SOURCE_STATUSES:
+            raise OperationError(f"sources[{index}].status is invalid")
+        required = source.get("required", True)
+        if not isinstance(required, bool):
+            raise OperationError(f"sources[{index}].required must be boolean")
+        if required and status in {"partial", "failed", "stale"}:
+            incomplete = True
+        rows.append((name, status, scope, required))
+
+    def count(key: str) -> int:
+        value = payload.get(key, 0)
+        if not isinstance(value, int) or value < 0:
+            raise OperationError(f"{key} must be a non-negative integer")
+        return value
+
+    def items(key: str) -> list[str]:
+        value = payload.get(key, [])
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise OperationError(f"{key} must be a list of text values")
+        return [" ".join(item.split()) for item in value if item.strip()]
+
+    candidates = count("candidates")
+    full_reads = count("full_reads")
+    changes = items("changes")
+    conflicts = items("conflicts")
+    next_review = one_line(payload.get("next_review"), "next_review")
+    status = "partial" if incomplete else "complete"
+    source_rows = "\n".join(
+        f"| {name} | {source_status} | {scope} | {'yes' if required else 'no'} |"
+        for name, source_status, scope, required in rows
+    )
+    changes_text = ", ".join(changes) if changes else "none"
+    conflicts_text = ", ".join(conflicts) if conflicts else "none"
+    block = (
+        f"<!-- lbrain:intake-checkpoint:{run_id}:start -->\n"
+        f"### Intake Checkpoint {run_id}\n\n"
+        f"- Status: {status}\n"
+        f"- Inspected range: {inspected_range}\n"
+        f"- Candidates: {candidates}\n"
+        f"- Full reads: {full_reads}\n"
+        f"- Changes: {changes_text}\n"
+        f"- Conflicts: {conflicts_text}\n"
+        f"- Next review: {next_review}\n\n"
+        "| Source | Status | Scope | Required |\n"
+        "| --- | --- | --- | --- |\n"
+        f"{source_rows}\n"
+        "<!-- lbrain:intake-checkpoint:end -->"
+    )
+    return block, not incomplete
+
+
+def append_checkpoint(existing: str, block: str, run_id: str) -> tuple[str, bool]:
+    start_marker = f"<!-- lbrain:intake-checkpoint:{run_id}:start -->"
+    start = existing.find(start_marker)
+    if start >= 0:
+        end_marker = "<!-- lbrain:intake-checkpoint:end -->"
+        end = existing.find(end_marker, start)
+        if end < 0:
+            raise OperationError("existing Intake Checkpoint is missing its end marker")
+        existing_block = existing[start : end + len(end_marker)]
+        if existing_block != block:
+            raise OperationError("run_id already exists with different checkpoint content")
+        return existing, True
+
+    heading = "## Context Intake Checkpoints"
+    if heading not in existing:
+        return existing.rstrip() + f"\n\n{heading}\n\n{block}\n", False
+    return existing.rstrip() + f"\n\n{block}\n", False
+
+
+def project_checkpoint(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    mode = payload.get("mode")
+    if mode not in {"preview", "apply"}:
+        raise OperationError("mode must be preview or apply")
+    if "cursor" in payload or "raw_cursor" in payload:
+        raise OperationError("raw connector cursors must stay outside LBrain")
+
+    relative = relative_project_path(payload.get("project_path"))
+    path = root.joinpath(*relative.parts)
+    if not path.is_file():
+        raise OperationError("target Project does not exist")
+    before = path.read_text(encoding="utf-8")
+    before_hash = digest(before)
+    block, complete = checkpoint_block(payload)
+    run_id = str(payload["run_id"])
+    after, duplicate = append_checkpoint(before, block, run_id)
+    after_hash = digest(after)
+    status = "noop" if duplicate else ("applied" if complete else "partial")
+    result = {
+        "operation": "project.checkpoint",
+        "operation_id": operation_id("project.checkpoint", relative.as_posix(), block),
+        "mode": mode,
+        "status": status,
+        "target": relative.as_posix(),
+        "affected_paths": [] if duplicate else [relative.as_posix()],
+        "before_hash": before_hash,
+        "after_hash": after_hash,
+        "complete_checkpoint_advanced": complete and not duplicate and mode == "apply",
+        "validation": {"ok": True, "message": "not run for preview"},
+        "rollback": None,
+    }
+    if mode == "preview" or duplicate:
+        return result
+    if "expected_hash" not in payload or payload.get("expected_hash") != before_hash:
+        raise OperationError("Project changed after preview; generate a new checkpoint preview")
+
+    atomic_write(path, after)
+    valid, message = validate(root)
+    if not valid:
+        atomic_write(path, before)
+        result["status"] = "failed"
+        result["complete_checkpoint_advanced"] = False
+        result["validation"] = {"ok": False, "message": message}
+        result["rollback"] = {"performed": True, "ok": True}
+        return result
+    result["validation"] = {"ok": True, "message": message or "Kit validation passed"}
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("operation", choices=("project.configure",))
+    parser.add_argument("operation", choices=("project.configure", "project.checkpoint"))
     parser.add_argument("--root", required=True, type=Path)
     args = parser.parse_args()
 
@@ -189,7 +333,10 @@ def main() -> int:
         root = args.root.resolve()
         if not (root / "System/Kit/check.py").is_file():
             raise OperationError("root is not an LBrain Kit")
-        result = project_configure(root, payload)
+        if args.operation == "project.configure":
+            result = project_configure(root, payload)
+        else:
+            result = project_checkpoint(root, payload)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0 if result["status"] != "failed" else 1
     except (OSError, json.JSONDecodeError, OperationError) as error:

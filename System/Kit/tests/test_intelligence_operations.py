@@ -167,6 +167,95 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(escaped["status"], "failed")
             self.assertFalse((root.parent / "outside.md").exists())
 
+    def test_project_checkpoint_preserves_partial_state_and_advances_only_when_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.copy_repo(Path(temporary))
+            project = root / "Context/Projects/Research.md"
+            configure: dict[str, object] = {
+                "mode": "preview",
+                "project_path": "Context/Projects/Research.md",
+                "title": "Research",
+                "summary": "Synthetic checkpoint fixture.",
+                "outcome": "Reach an evidence-backed conclusion.",
+                "profile_markdown": (
+                    "## Context Intake Profile\n\n"
+                    "- Sources: web, notes\n"
+                    "- Baseline: baseline_pending\n"
+                ),
+            }
+            _, preview = self.run_capture_operation(root, "project.configure", configure)
+            configure.update(mode="apply", expected_hash=preview["before_hash"])
+            configured_result, configured = self.run_capture_operation(root, "project.configure", configure)
+            self.assertEqual(configured_result.returncode, 0, configured_result.stderr)
+
+            partial_payload: dict[str, object] = {
+                "mode": "preview",
+                "project_path": "Context/Projects/Research.md",
+                "run_id": "2026-08-10-baseline",
+                "range": "historical baseline",
+                "sources": [
+                    {"name": "web", "status": "scanned", "scope": "saved reading list", "required": True},
+                    {"name": "notes", "status": "failed", "scope": "research folder", "required": True},
+                ],
+                "candidates": 3,
+                "full_reads": 2,
+                "changes": [],
+                "conflicts": ["notes unavailable"],
+                "next_review": "after connector recovery",
+            }
+            partial_preview_result, partial_preview = self.run_capture_operation(
+                root, "project.checkpoint", partial_payload
+            )
+            self.assertEqual(partial_preview_result.returncode, 0, partial_preview_result.stderr)
+            self.assertEqual(partial_preview["status"], "partial")
+            self.assertFalse(partial_preview["complete_checkpoint_advanced"])
+            self.assertNotIn("2026-08-10-baseline", project.read_text(encoding="utf-8"))
+
+            partial_payload.update(mode="apply", expected_hash=partial_preview["before_hash"])
+            partial_apply_result, partial = self.run_capture_operation(root, "project.checkpoint", partial_payload)
+            self.assertEqual(partial_apply_result.returncode, 0, partial_apply_result.stderr)
+            self.assertEqual(partial["status"], "partial")
+            self.assertFalse(partial["complete_checkpoint_advanced"])
+            self.assertIn("Status: partial", project.read_text(encoding="utf-8"))
+
+            partial_payload["expected_hash"] = partial["after_hash"]
+            repeat_result, repeated = self.run_capture_operation(root, "project.checkpoint", partial_payload)
+            self.assertEqual(repeat_result.returncode, 0, repeat_result.stderr)
+            self.assertEqual(repeated["status"], "noop")
+
+            complete_payload: dict[str, object] = {
+                **partial_payload,
+                "mode": "preview",
+                "run_id": "2026-08-11-baseline",
+                "sources": [
+                    {"name": "web", "status": "scanned", "scope": "saved reading list", "required": True},
+                    {"name": "notes", "status": "no_durable_change", "scope": "research folder", "required": True},
+                ],
+                "conflicts": [],
+            }
+            complete_preview_result, complete_preview = self.run_capture_operation(
+                root, "project.checkpoint", complete_payload
+            )
+            self.assertEqual(complete_preview_result.returncode, 0, complete_preview_result.stderr)
+            self.assertEqual(complete_preview["status"], "applied")
+            self.assertFalse(complete_preview["complete_checkpoint_advanced"])
+
+            complete_payload.update(mode="apply", expected_hash=complete_preview["before_hash"])
+            complete_result, complete = self.run_capture_operation(root, "project.checkpoint", complete_payload)
+            self.assertEqual(complete_result.returncode, 0, complete_result.stderr)
+            self.assertEqual(complete["status"], "applied")
+            self.assertTrue(complete["complete_checkpoint_advanced"])
+            project_text = project.read_text(encoding="utf-8")
+            self.assertIn("Status: complete", project_text)
+            self.assertEqual(project_text.count("2026-08-10-baseline"), 2)
+            self.assertEqual(project_text.count("2026-08-11-baseline"), 2)
+
+            cursor_payload = {**complete_payload, "run_id": "cursor-leak", "raw_cursor": "secret-runtime-state"}
+            cursor_result, cursor = self.run_capture_operation(root, "project.checkpoint", cursor_payload)
+            self.assertNotEqual(cursor_result.returncode, 0)
+            self.assertEqual(cursor["status"], "failed")
+            self.assertNotIn("secret-runtime-state", project.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()
