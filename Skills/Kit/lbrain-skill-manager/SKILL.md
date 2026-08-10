@@ -18,6 +18,16 @@ Treat `Skills/` as canonical and runtime directories as replaceable installation
 
 Only the user may make a skill public or publish it. Public and published are separate states; distributed Personal Skills need their own license.
 
+## Explicit Skill improvement
+
+1. Start from an active user request or a pending Skill Improvement Proposal. Read the evidence and canonical enabled Personal Skill; never target a Core, disabled, or deprecated Skill through this flow.
+2. Prepare the complete proposed `SKILL.md`, behavior-case changes, and only the resources those instructions require. Classify the behavioral change as patch, minor, or major.
+3. Use `scripts/operations.py` operation `skill.preview`. It validates the proposed package in isolation, recommends the next semantic version, writes the exact diff and preview hash to the Proposal, and does not modify the canonical Skill. Never ask the user to run the script or a CLI.
+4. Show the exact Change Preview, including tests and version rationale. Ask for one explicit approval of that immutable preview. Any preview or Skill-baseline change invalidates the approval.
+5. After approval, use operation `skill.apply`; never reproduce the diff manually or edit a runtime copy as the source of truth.
+
+Patch fixes or clarifies compatible behavior, minor adds compatible behavior or triggers, and major breaks an existing behavior contract. Rejected and no-op changes do not bump the version.
+
 ## Runtime installation
 
 Read `references/runtimes.md`, preview with `scripts/install.py --dry-run`, then use an explicit target. The installer defaults to symlinks for Codex, Claude Code, and Hermes, and to copies for OpenClaw because OpenClaw rejects links that escape its configured Skill root. Reruns skip identical packages and add newly enabled Skills. Never overwrite a divergent existing target without an explicit user decision.

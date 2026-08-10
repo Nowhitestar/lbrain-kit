@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 CAPTURE_OPERATIONS = ROOT / "Skills/Kit/lbrain-capture/scripts/operations.py"
 WEAVE_OPERATIONS = ROOT / "Skills/Kit/lbrain-weave/scripts/operations.py"
+SKILL_OPERATIONS = ROOT / "Skills/Kit/lbrain-skill-manager/scripts/operations.py"
 
 
 class IntelligenceOperationTest(unittest.TestCase):
@@ -45,6 +46,22 @@ class IntelligenceOperationTest(unittest.TestCase):
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
         result = subprocess.run(
             [sys.executable, str(WEAVE_OPERATIONS), operation, "--root", str(root)],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        output = json.loads(result.stdout) if result.stdout else {}
+        return result, output
+
+    def run_skill_operation(
+        self,
+        root: Path,
+        operation: str,
+        payload: dict[str, object],
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        result = subprocess.run(
+            [sys.executable, str(SKILL_OPERATIONS), operation, "--root", str(root)],
             input=json.dumps(payload),
             text=True,
             capture_output=True,
@@ -473,6 +490,117 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertNotEqual(untestable_result.returncode, 0)
             self.assertEqual(untestable["status"], "failed")
             self.assertFalse(list((root / "System/Proposals").glob("*do-not-create*.md")))
+
+    def test_skill_preview_is_validated_immutable_and_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.copy_repo(Path(temporary))
+            skill = self.add_enabled_personal_skill(root)
+            source = root / "Knowledge/Sources/Preview-Evidence.md"
+            source.write_text(
+                "---\ntype: source\nsummary: preview evidence\nstatus: active\nvisibility: private\n"
+                "origin: synthetic://preview-evidence\ncapture: full\nweaving: pending\n"
+                "created: 2026-08-10\nupdated: 2026-08-10\n---\n# Preview Evidence\n",
+                encoding="utf-8",
+            )
+            proposal_result, proposal = self.run_weave_operation(
+                root,
+                "proposal.create",
+                {
+                    "title": "Improve preview writing",
+                    "summary": "Add a specific-opening rule.",
+                    "skill_name": "synthetic-writing",
+                    "evidence": ["Knowledge/Sources/Preview-Evidence.md"],
+                    "rationale": "The evidence supplies a testable rule.",
+                    "behavior_delta": "Require one concrete claim in the opening.",
+                    "expected_diff": "Update instructions and behavior cases.",
+                    "test_changes": ["Reject an abstract opening."],
+                },
+            )
+            self.assertEqual(proposal_result.returncode, 0, proposal_result.stderr)
+            before_skill = (skill / "SKILL.md").read_text(encoding="utf-8")
+            before_cases = (skill / "tests/cases.md").read_text(encoding="utf-8")
+            before_manifest = (skill / "lbrain.json").read_text(encoding="utf-8")
+            payload: dict[str, object] = {
+                "proposal_path": proposal["target"],
+                "change_level": "minor",
+                "rationale": "Adds a compatible opening check.",
+                "changes": {
+                    "SKILL.md": before_skill.replace(
+                        "Use concrete verbs.",
+                        "Use concrete verbs. Require one concrete claim in the opening.",
+                    ),
+                    "tests/cases.md": before_cases + "- Reject an abstract opening.\n",
+                },
+            }
+
+            preview_result, previewed = self.run_skill_operation(root, "skill.preview", payload)
+            self.assertEqual(preview_result.returncode, 0, preview_result.stderr)
+            self.assertEqual(previewed["status"], "applied")
+            preview = previewed["preview"]
+            self.assertEqual(preview["base_version"], "1.0.0")
+            self.assertEqual(preview["proposed_version"], "1.1.0")
+            self.assertTrue(preview["preview_hash"])
+            self.assertIn("lbrain.json", preview["files"])
+            self.assertEqual((skill / "SKILL.md").read_text(encoding="utf-8"), before_skill)
+            self.assertEqual((skill / "tests/cases.md").read_text(encoding="utf-8"), before_cases)
+            self.assertEqual((skill / "lbrain.json").read_text(encoding="utf-8"), before_manifest)
+            proposal_text = (root / str(proposal["target"])).read_text(encoding="utf-8")
+            self.assertIn("## Change Preview", proposal_text)
+            self.assertIn(str(preview["preview_hash"]), proposal_text)
+            self.assertIn("Proposed version: 1.1.0", proposal_text)
+
+            repeat_result, repeated = self.run_skill_operation(root, "skill.preview", payload)
+            self.assertEqual(repeat_result.returncode, 0, repeat_result.stderr)
+            self.assertEqual(repeated["status"], "noop")
+            self.assertEqual(repeated["preview"]["preview_hash"], preview["preview_hash"])
+
+    def test_skill_preview_rejects_an_invalid_proposed_package(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.copy_repo(Path(temporary))
+            skill = self.add_enabled_personal_skill(root)
+            source = root / "Knowledge/Sources/Invalid-Preview-Evidence.md"
+            source.write_text(
+                "---\ntype: source\nsummary: invalid preview evidence\nstatus: active\nvisibility: private\n"
+                "origin: synthetic://invalid-preview\ncapture: full\nweaving: pending\n"
+                "created: 2026-08-10\nupdated: 2026-08-10\n---\n# Invalid Preview Evidence\n",
+                encoding="utf-8",
+            )
+            _, proposal = self.run_weave_operation(
+                root,
+                "proposal.create",
+                {
+                    "title": "Reject invalid preview",
+                    "summary": "Validation fixture.",
+                    "skill_name": "synthetic-writing",
+                    "evidence": ["Knowledge/Sources/Invalid-Preview-Evidence.md"],
+                    "rationale": "Exercise preview validation.",
+                    "behavior_delta": "Add a validated instruction.",
+                    "expected_diff": "Update instructions and cases.",
+                    "test_changes": ["Add one validated case."],
+                },
+            )
+            original = (skill / "SKILL.md").read_text(encoding="utf-8")
+            result, rejected = self.run_skill_operation(
+                root,
+                "skill.preview",
+                {
+                    "proposal_path": proposal["target"],
+                    "change_level": "patch",
+                    "rationale": "Must fail before preview is recorded.",
+                    "changes": {
+                        "SKILL.md": original.replace(
+                            "description:", "version: 1.0.1\ndescription:", 1
+                        ),
+                        "tests/cases.md": "# Cases\n\n- A changed case.\n",
+                    },
+                },
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(rejected["status"], "failed")
+            self.assertIn("does not validate", rejected["error"])
+            self.assertEqual((skill / "SKILL.md").read_text(encoding="utf-8"), original)
+            proposal_text = (root / str(proposal["target"])).read_text(encoding="utf-8")
+            self.assertNotIn("## Change Preview", proposal_text)
 
 
 if __name__ == "__main__":
