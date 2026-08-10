@@ -155,21 +155,34 @@ The adapter reuses an existing matching qmd index when possible. `doctor` checks
 
 The minimum path contexts are the root, `Knowledge/Wiki`, `Knowledge/Sources`, `Context/Projects`, `Context/Identity`, `Outputs/Writing`, `Skills`, `System`, `Inbox`, and `Archives`. These descriptions help an agent distinguish source roles before opening documents.
 
+## Personal Intelligence write operations
+
+Kit v0.4.0 exposes six deterministic operations through the Core Skill scripts. They are internal Agent entrypoints that read one JSON object from standard input and return one JSON result; they do not introduce a user-facing CLI or a Policy MCP.
+
+| Operation | Contract |
+| --- | --- |
+| `project.configure` | Preview or apply one human-readable v1 Context Intake Profile while preserving an existing legacy Profile body. |
+| `project.checkpoint` | Append one idempotent complete or partial Intake run and advance the complete checkpoint only when every required source succeeds. |
+| `capture.create` | Save or reuse one private Source/Inbox item with provenance, extraction state, validation, and rollback. |
+| `proposal.create` | Create one evidence-linked Skill Improvement Proposal for an enabled active Personal Skill. |
+| `skill.preview` | Validate and persist one immutable exact diff, semantic version change, base hash, proposed hash, and preview hash. |
+| `skill.apply` | Apply only the approved exact preview, refresh declared runtimes, validate, roll back on failure, and make a replay a no-op. |
+
+Successful results identify the operation, stable operation ID, status, target, affected paths, validation outcome, and rollback outcome. Rejected inputs fail closed before mutation. Core Skills retain semantic decisions such as what to collect, how to weave knowledge, whether a Skill is relevant, and when the user has approved a preview.
+
 ## Future atomic write operations
 
 The current Core Skills remain the policy layer. Promote a write to deterministic code only after the same operation is needed by multiple runtimes or free-form execution has produced repeatable errors.
 
-Likely candidates, in extraction order:
+Remaining candidates, in extraction order:
 
-1. `capture.create`: create an idempotent Inbox item with validated metadata and source provenance.
-2. `project.checkpoint`: append a dated project checkpoint with explicit coverage and live-source boundaries.
-3. `wiki.create` and `wiki.update`: write source-linked synthesis without modifying imported Source bodies.
-4. `note.move`: move or rename a note while updating resolvable Wikilinks.
-5. `archive.propose` and `archive.apply`: preserve role and history instead of hard deletion.
-6. `identity.propose` and `identity.apply`: keep proposal and explicit acceptance as separate transactions.
-7. `skill.enable`, `skill.disable`, and `skill.install`: extend the existing Skill Manager transaction surface.
-8. `context-pack.preview`, `build`, `publish`, `update`, `verify`, and `revoke`: continue using the existing deterministic Pack implementation.
-9. `validate` and `commit`: validate the exact authorized diff and create a local, scoped commit.
+1. `wiki.create` and `wiki.update`: write source-linked synthesis without modifying imported Source bodies.
+2. `note.move`: move or rename a note while updating resolvable Wikilinks.
+3. `archive.propose` and `archive.apply`: preserve role and history instead of hard deletion.
+4. `identity.propose` and `identity.apply`: keep proposal and explicit acceptance as separate transactions.
+5. `skill.enable`, `skill.disable`, and `skill.install`: extend the existing Skill Manager transaction surface.
+6. `context-pack.preview`, `build`, `publish`, `update`, `verify`, and `revoke`: continue using the existing deterministic Pack implementation.
+7. `validate` and `commit`: validate the exact authorized diff and create a local, scoped commit.
 
 Each extracted operation must define inputs, preconditions, idempotency, affected paths, dry-run output, validation, rollback, and a stable machine-readable result before it is exposed through MCP.
 
@@ -191,5 +204,7 @@ Each extracted operation must define inputs, preconditions, idempotency, affecte
 - bundling qmd binaries, models, embeddings, or SQLite databases in Git;
 - guaranteeing access from machines or sandboxes that do not contain LBrain;
 - making qmd the source of truth;
-- introducing a general write MCP before atomic write contracts exist;
+- introducing a general write MCP around the six local operations;
+- shipping a browser/mobile collector, cloud sync, encryption, or fine-grained access control;
+- making autonomous Identity or Skill changes without an explicit review boundary;
 - silently editing runtime MCP configuration or overwriting an existing qmd index.

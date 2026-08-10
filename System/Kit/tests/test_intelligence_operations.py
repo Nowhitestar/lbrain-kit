@@ -353,6 +353,42 @@ class IntelligenceOperationTest(unittest.TestCase):
             matching = list((root / "Knowledge/Sources").glob("*Synthetic-Writing-Guide*.md"))
             self.assertEqual(matching, [source])
 
+    def test_capture_create_reuses_a_matching_source_in_a_category(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.copy_repo(Path(temporary))
+            payload: dict[str, object] = {
+                "destination": "source",
+                "title": "Categorized Writing Guide",
+                "summary": "A previously categorized source.",
+                "origin": "https://example.invalid/categorized-writing-guide",
+                "capture": "full",
+                "content": "Write to discover new ideas.",
+                "extraction_status": "complete",
+            }
+            first_result, first = self.run_capture_operation(root, "capture.create", payload)
+            self.assertEqual(first_result.returncode, 0, first_result.stderr)
+            existing = root / "Knowledge/Sources/Methodology/Categorized-Writing-Guide.md"
+            existing.parent.mkdir(parents=True, exist_ok=True)
+            created = root / str(first["target"])
+            created.write_text(
+                "\n".join(
+                    line for line in created.read_text(encoding="utf-8").splitlines()
+                    if not line.startswith("capture_id:")
+                ) + "\n",
+                encoding="utf-8",
+            )
+            created.rename(existing)
+
+            result, captured = self.run_capture_operation(root, "capture.create", payload)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(captured["status"], "noop")
+            self.assertEqual(
+                captured["target"],
+                "Knowledge/Sources/Methodology/Categorized-Writing-Guide.md",
+            )
+            self.assertFalse(list((root / "Knowledge/Sources").glob("*Categorized-Writing-Guide*.md")))
+
     def test_capture_create_preserves_failed_extraction_and_rejects_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = self.copy_repo(Path(temporary))

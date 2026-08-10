@@ -334,15 +334,31 @@ def capture_slug(title: str, key: str) -> str:
     return f"{slug or 'Capture'}-{key[:8]}"
 
 
-def existing_capture(root: Path, key: str) -> Path | None:
+def frontmatter_text(lines: list[str], key: str) -> str:
+    marker = f"{key}:"
+    for line in lines:
+        if not line.startswith(marker):
+            continue
+        raw = line.split(":", 1)[1].strip()
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            value = raw.strip("\"'")
+        return value if isinstance(value, str) else ""
+    return ""
+
+
+def existing_capture(root: Path, key: str, origin: str) -> Path | None:
     marker = f"capture_id: {key}"
     for directory in (root / "Inbox", root / "Knowledge/Sources"):
-        for path in sorted(directory.glob("*.md")):
+        for path in sorted(directory.rglob("*.md")):
             try:
                 head = path.read_text(encoding="utf-8").split("---", 2)[1]
             except (IndexError, OSError, UnicodeError):
                 continue
-            if marker in head.splitlines():
+            lines = head.splitlines()
+            legacy_origin = frontmatter_text(lines, "origin").strip().rstrip("/")
+            if marker in lines or (origin and legacy_origin == origin.strip().rstrip("/")):
                 return path
     return None
 
@@ -378,7 +394,7 @@ def capture_create(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
         capture = "reference" if not content else capture
 
     key = capture_key(origin, content)
-    duplicate = existing_capture(root, key)
+    duplicate = existing_capture(root, key, origin)
     if duplicate is not None:
         relative_duplicate = duplicate.relative_to(root).as_posix()
         return {
