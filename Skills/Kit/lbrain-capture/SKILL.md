@@ -7,12 +7,13 @@ description: Captures new material into the correct LBrain intake path. Use when
 Capture information without prematurely turning it into truth.
 
 1. Confirm the active LBrain root and read the nearest directory `README.md`.
-2. Check whether the material already exists before creating a duplicate.
-3. Put uncertain or unclassified material in `Inbox/`.
-4. Create a Source directly when origin and durable value are clear. Copy `System/Templates/Core/source.md`, record provenance, and capture only the lawful amount needed.
-5. Default to `visibility: private`. Never store credentials or secrets.
-6. Preserve quoted or imported source text; add interpretation elsewhere.
-7. Run `python3 System/Kit/check.py` and commit an authorized capture locally with `capture:`. Do not push.
+2. Decide the explicit destination before writing: uncertain or unclassified material goes to Inbox; material with clear origin and durable value goes to Source.
+3. Use `scripts/operations.py` operation `capture.create` for the write. Supply the URL or origin, title, optional selection or content, optional user note, capture extent, and extraction status. Never ask the user to run the script or a CLI.
+4. Let the operation deduplicate by stable capture identity, validate the new note, and return the existing capture on an idempotent retry.
+5. When extraction fails, retain the origin, user note, and failure state as a reference capture; never fabricate missing article text.
+6. Default to `visibility: private`. Never store credentials or secrets.
+7. Preserve quoted or imported source text; add interpretation elsewhere.
+8. Commit an authorized capture locally with `capture:` after the operation validates it. Do not push.
 
 Do not use this skill for source synthesis; use `lbrain-weave` after capture.
 

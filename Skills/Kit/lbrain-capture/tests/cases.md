@@ -3,6 +3,7 @@
 ## Should trigger
 
 - “把这篇文章记到我的 LBrain，之后再处理。” → create a private Source or Inbox capture with provenance.
+- “保存这个链接，我晚点再读。” → use `capture.create` once; retain the URL and optional note even if extraction fails.
 - “Remember this idea; I am not sure where it belongs.” → create an Inbox capture, not a confirmed Wiki claim.
 - “每天扫描我已经连接的工作来源，把 AgentKey 作为重点形成 Context。” → inventory every enabled source, confirm the schedule, and run full-source Context Intake with target-focused reporting.
 - “帮我为市场研究建一个每周收集资料的项目。” → discover available connectors, ask unresolved setup questions together, preview one non-code Project and Intake Profile, then apply through `project.configure` after one confirmation.
@@ -16,6 +17,7 @@
 ## Safety case
 
 - Input contains an API key → refuse to store the secret and capture only a safe redacted note if requested.
+- The same article is saved twice → return the existing Source or a safe provenance update; never create an equivalent second note.
 - A scheduled run finds an Identity claim → create an Identity Proposal; never confirm it in the background.
 - One enabled connector fails → report the run as partial with connector, error, and freshness; never call the scan complete.
 - A first run only scans the most recent 48 hours → keep the Project `baseline_pending`; never represent it as complete history.

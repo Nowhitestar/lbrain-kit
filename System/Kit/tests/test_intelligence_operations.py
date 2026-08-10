@@ -256,6 +256,83 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(cursor["status"], "failed")
             self.assertNotIn("secret-runtime-state", project.read_text(encoding="utf-8"))
 
+    def test_capture_create_saves_one_source_and_deduplicates_retries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.copy_repo(Path(temporary))
+            payload: dict[str, object] = {
+                "destination": "source",
+                "title": "Synthetic Writing Guide",
+                "summary": "A source about concrete writing behavior.",
+                "origin": "https://example.invalid/writing-guide",
+                "capture": "full",
+                "content": "Prefer concrete verbs and test the revised opening.",
+                "note": "Consider this for my writing Skill.",
+                "extraction_status": "complete",
+            }
+
+            result, captured = self.run_capture_operation(root, "capture.create", payload)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(captured["status"], "applied")
+            self.assertEqual(len(captured["affected_paths"]), 1)
+            relative = str(captured["affected_paths"][0])
+            self.assertTrue(relative.startswith("Knowledge/Sources/"))
+            source = root / relative
+            source_text = source.read_text(encoding="utf-8")
+            self.assertIn("type: source", source_text)
+            self.assertIn("weaving: pending", source_text)
+            self.assertIn("https://example.invalid/writing-guide", source_text)
+            self.assertIn("Prefer concrete verbs", source_text)
+            self.assertIn("Consider this for my writing Skill.", source_text)
+
+            repeat_result, repeated = self.run_capture_operation(root, "capture.create", payload)
+            self.assertEqual(repeat_result.returncode, 0, repeat_result.stderr)
+            self.assertEqual(repeated["status"], "noop")
+            self.assertEqual(repeated["target"], relative)
+            matching = list((root / "Knowledge/Sources").glob("*Synthetic-Writing-Guide*.md"))
+            self.assertEqual(matching, [source])
+
+    def test_capture_create_preserves_failed_extraction_and_rejects_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.copy_repo(Path(temporary))
+            failed_result, failed = self.run_capture_operation(
+                root,
+                "capture.create",
+                {
+                    "destination": "source",
+                    "title": "Unavailable Article",
+                    "summary": "A reference retained after extraction failure.",
+                    "origin": "https://example.invalid/unavailable",
+                    "capture": "full",
+                    "content": "",
+                    "note": "Retry this source later.",
+                    "extraction_status": "failed",
+                },
+            )
+            self.assertEqual(failed_result.returncode, 0, failed_result.stderr)
+            self.assertEqual(failed["status"], "partial")
+            source = root / str(failed["target"])
+            source_text = source.read_text(encoding="utf-8")
+            self.assertIn("capture: reference", source_text)
+            self.assertIn("extraction_status: failed", source_text)
+            self.assertIn("Original content was not available", source_text)
+            self.assertIn("Retry this source later.", source_text)
+
+            sensitive = "fixture-secret-value-12345"
+            secret_result, secret = self.run_capture_operation(
+                root,
+                "capture.create",
+                {
+                    "destination": "inbox",
+                    "title": "Unsafe Capture",
+                    "summary": "Must be rejected.",
+                    "content": f"api_key={sensitive}",
+                },
+            )
+            self.assertNotEqual(secret_result.returncode, 0)
+            self.assertEqual(secret["status"], "failed")
+            self.assertNotIn(sensitive, secret_result.stdout + secret_result.stderr)
+            self.assertFalse(list((root / "Inbox").glob("*Unsafe-Capture*.md")))
+
 
 if __name__ == "__main__":
     unittest.main()

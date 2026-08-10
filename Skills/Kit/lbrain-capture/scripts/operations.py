@@ -19,6 +19,10 @@ from typing import Any
 PROFILE_START = "<!-- lbrain:intake-profile:v1:start -->"
 PROFILE_END = "<!-- lbrain:intake-profile:end -->"
 SOURCE_STATUSES = {"scanned", "no_durable_change", "partial", "failed", "stale", "no_match"}
+SECRET = re.compile(
+    r"(?i)\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password|private[_-]?key)\b"
+    r"\s*[:=]\s*\S{8,}"
+)
 
 
 class OperationError(ValueError):
@@ -320,9 +324,127 @@ def project_checkpoint(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def capture_key(origin: str, content: str) -> str:
+    identity = f"origin:{origin.strip().rstrip('/')}" if origin.strip() else f"content:{content.strip()}"
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def capture_slug(title: str, key: str) -> str:
+    slug = re.sub(r"[^\w-]+", "-", title, flags=re.UNICODE).strip("-_")
+    return f"{slug or 'Capture'}-{key[:8]}"
+
+
+def existing_capture(root: Path, key: str) -> Path | None:
+    marker = f"capture_id: {key}"
+    for directory in (root / "Inbox", root / "Knowledge/Sources"):
+        for path in sorted(directory.glob("*.md")):
+            try:
+                head = path.read_text(encoding="utf-8").split("---", 2)[1]
+            except (IndexError, OSError, UnicodeError):
+                continue
+            if marker in head.splitlines():
+                return path
+    return None
+
+
+def capture_create(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    destination = payload.get("destination")
+    if destination not in {"source", "inbox"}:
+        raise OperationError("destination must be source or inbox")
+    title = required_text(payload, "title")
+    summary = required_text(payload, "summary")
+    origin_value = payload.get("origin", "")
+    content_value = payload.get("content", "")
+    note_value = payload.get("note", "")
+    if not isinstance(origin_value, str) or not isinstance(content_value, str) or not isinstance(note_value, str):
+        raise OperationError("origin, content, and note must be text")
+    origin = origin_value.strip()
+    content = content_value.strip()
+    note = note_value.strip()
+    if not origin and not content:
+        raise OperationError("capture requires an origin or content")
+    if any(SECRET.search(value) for value in (title, summary, origin, content, note)):
+        raise OperationError("capture contains a possible secret; remove or redact it")
+
+    extraction_status = payload.get("extraction_status", "complete")
+    if extraction_status not in {"complete", "partial", "failed"}:
+        raise OperationError("extraction_status must be complete, partial, or failed")
+    capture = payload.get("capture", "reference")
+    if capture not in {"reference", "excerpt", "full"}:
+        raise OperationError("capture must be reference, excerpt, or full")
+    if capture in {"excerpt", "full"} and not content and extraction_status == "complete":
+        raise OperationError("complete excerpt or full capture requires content")
+    if extraction_status != "complete":
+        capture = "reference" if not content else capture
+
+    key = capture_key(origin, content)
+    duplicate = existing_capture(root, key)
+    if duplicate is not None:
+        relative_duplicate = duplicate.relative_to(root).as_posix()
+        return {
+            "operation": "capture.create",
+            "operation_id": operation_id("capture.create", relative_duplicate, key),
+            "mode": "apply",
+            "status": "noop",
+            "target": relative_duplicate,
+            "affected_paths": [],
+            "capture_id": key,
+            "validation": {"ok": True, "message": "existing capture reused"},
+            "rollback": None,
+        }
+
+    folder = "Knowledge/Sources" if destination == "source" else "Inbox"
+    relative = PurePosixPath(folder) / f"{capture_slug(title, key)}.md"
+    path = root.joinpath(*relative.parts)
+    today = date.today().isoformat()
+    base = (
+        "---\n"
+        f"type: {'source' if destination == 'source' else 'note'}\n"
+        f"summary: {yaml_string(summary)}\n"
+        "status: active\n"
+        "visibility: private\n"
+        f"origin: {yaml_string(origin or 'user-provided')}\n"
+        f"capture_id: {key}\n"
+        f"extraction_status: {extraction_status}\n"
+    )
+    if destination == "source":
+        base += f"capture: {capture}\nweaving: pending\n"
+    body = (
+        f"created: {today}\nupdated: {today}\n---\n"
+        f"# {title}\n\n"
+        "## Capture\n\n"
+        f"{content or 'Original content was not available at capture time.'}\n\n"
+        "## Provenance notes\n\n"
+        f"- Origin: {origin or 'user-provided'}\n"
+        f"- Extraction: {extraction_status}\n"
+    )
+    if note:
+        body += f"- User note: {note}\n"
+    rendered = base + body
+    atomic_write(path, rendered)
+    valid, message = validate(root)
+    status = "applied" if extraction_status == "complete" else "partial"
+    result = {
+        "operation": "capture.create",
+        "operation_id": operation_id("capture.create", relative.as_posix(), key),
+        "mode": "apply",
+        "status": status,
+        "target": relative.as_posix(),
+        "affected_paths": [relative.as_posix()],
+        "capture_id": key,
+        "validation": {"ok": valid, "message": message or "Kit validation passed"},
+        "rollback": None,
+    }
+    if not valid:
+        path.unlink(missing_ok=True)
+        result["status"] = "failed"
+        result["rollback"] = {"performed": True, "ok": True}
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("operation", choices=("project.configure", "project.checkpoint"))
+    parser.add_argument("operation", choices=("project.configure", "project.checkpoint", "capture.create"))
     parser.add_argument("--root", required=True, type=Path)
     args = parser.parse_args()
 
@@ -335,8 +457,10 @@ def main() -> int:
             raise OperationError("root is not an LBrain Kit")
         if args.operation == "project.configure":
             result = project_configure(root, payload)
-        else:
+        elif args.operation == "project.checkpoint":
             result = project_checkpoint(root, payload)
+        else:
+            result = capture_create(root, payload)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0 if result["status"] != "failed" else 1
     except (OSError, json.JSONDecodeError, OperationError) as error:
