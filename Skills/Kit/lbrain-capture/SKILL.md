@@ -22,9 +22,12 @@ Context Intake is the batch and scheduled form of Capture. It uses the same prov
 
 ### Configure a Project
 
-1. Inventory every source connector currently available to the agent. Ask which sources to enable, whether intake should be scheduled, and at what frequency. Use the agent runtime's automation facility; do not store credentials or create a Kit daemon.
-2. Add a compact `Intake Profile` section to the target Project note. Record the enabled sources, project-specific anchors such as repositories, pages, streams, topics, dashboards, and issue projects, the context domains to retain, source precedence, baseline status, and last completeness review. Keep connector credentials and raw cursors outside LBrain.
-3. Treat a newly configured Project as `baseline_pending`. Do not represent a recent-window scan as complete historical coverage.
+1. Read an existing Project when present and inventory every source connector currently available to the agent before asking the user anything. Do not assume the work is a code repository.
+2. Ask all independent missing questions together: Project outcome when new, enabled sources and anchors, retained domains, source precedence, schedule, and frequency. Use the agent runtime's automation facility; do not store credentials or create a Kit daemon.
+3. Render one complete Project and Intake Profile preview. The Profile remains human-readable Markdown inside the Project note and records sources, anchors, retained domains, precedence, baseline status, cadence, and completeness review.
+4. Use `scripts/operations.py` operation `project.configure` first in preview mode, then apply only after one explicit confirmation using the returned prior-state hash. Never ask the user to run the script or a CLI.
+5. Let the operation add versioned boundaries around the Profile. An existing unmarked Profile migrates lazily through the same content-preserving preview; never bulk-rewrite personal Projects during a Kit upgrade.
+6. Treat a newly configured Project as `baseline_pending`. Do not represent a recent-window scan as complete historical coverage. Keep connector credentials and raw cursors outside LBrain.
 
 ### Run Intake
 

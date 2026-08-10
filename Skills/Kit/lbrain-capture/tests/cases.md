@@ -5,6 +5,7 @@
 - “把这篇文章记到我的 LBrain，之后再处理。” → create a private Source or Inbox capture with provenance.
 - “Remember this idea; I am not sure where it belongs.” → create an Inbox capture, not a confirmed Wiki claim.
 - “每天扫描我已经连接的工作来源，把 AgentKey 作为重点形成 Context。” → inventory every enabled source, confirm the schedule, and run full-source Context Intake with target-focused reporting.
+- “帮我为市场研究建一个每周收集资料的项目。” → discover available connectors, ask unresolved setup questions together, preview one non-code Project and Intake Profile, then apply through `project.configure` after one confirmation.
 
 ## Should not trigger
 
@@ -44,6 +45,18 @@ Given a new Project with Notion pages, chat streams, a repository, an issue trac
 - keep the baseline pending while any required source or anchor is failed, partial, or unread;
 - after completion, use the last successful checkpoint plus overlap and periodically revisit stable anchors; and
 - keep connector credentials and raw cursors outside LBrain.
+
+## Project Setup case
+
+Given a user requests Context Intake for work that has no code repository:
+
+- reuse an existing Project's outcome and configuration when present;
+- discover available connectors before asking questions;
+- group independent missing questions into one round;
+- show one exact human-readable Project and Intake Profile preview;
+- use one confirmation and the preview's prior-state hash to apply;
+- keep exactly one version-bounded Intake Profile after idempotent reruns; and
+- migrate an unmarked Profile only through a content-preserving preview.
 
 ## Decision completeness case
 
