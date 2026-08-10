@@ -188,6 +188,9 @@ def main() -> int:
 
         before_skill = (skill / "SKILL.md").read_text(encoding="utf-8")
         before_cases = (skill / "tests/cases.md").read_text(encoding="utf-8")
+        codex_root = base / "codex"
+        openclaw_root = base / "openclaw"
+        shutil.copytree(skill, openclaw_root / skill.name)
         preview_payload: dict[str, object] = {
             "proposal_path": proposed["target"],
             "change_level": "minor",
@@ -199,6 +202,10 @@ def main() -> int:
                 ),
                 "tests/cases.md": before_cases + "- Reject a context-first abstract opening.\n",
             },
+            "runtime_targets": [
+                {"runtime": "codex", "target": str(codex_root)},
+                {"runtime": "openclaw", "target": str(openclaw_root)},
+            ],
         }
         previewed = operation(skill_operations, "skill.preview", root, preview_payload)
         preview = previewed["preview"]
@@ -207,17 +214,10 @@ def main() -> int:
         print(f"SKILL PREVIEW status={previewed['status']} version={preview['proposed_version']}")
         accept_skill_preview(root, proposed["target"], preview["preview_hash"])
 
-        codex_root = base / "codex"
-        openclaw_root = base / "openclaw"
-        shutil.copytree(skill, openclaw_root / skill.name)
         apply_payload: dict[str, object] = {
             "proposal_path": proposed["target"],
             "approved_preview_hash": preview["preview_hash"],
             "preview": preview,
-            "runtime_targets": [
-                {"runtime": "codex", "target": str(codex_root)},
-                {"runtime": "openclaw", "target": str(openclaw_root)},
-            ],
         }
         applied = operation(skill_operations, "skill.apply", root, apply_payload)
         print(f"SKILL APPLY status={applied['status']}")

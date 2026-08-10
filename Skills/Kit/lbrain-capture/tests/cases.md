@@ -18,6 +18,8 @@
 
 - Input contains an API key → refuse to store the secret and capture only a safe redacted note if requested.
 - The same article is saved twice → return the existing Source or a safe provenance update; never create an equivalent second note.
+- A failed managed extraction later succeeds → recover the same capture only when its exact prior hash still matches; preserve unrecognized metadata, user-authored sections, and concurrent edits instead of overwriting them.
+- Another write operation holds the LBrain transaction lock → fail closed without changing any canonical note.
 - A scheduled run finds an Identity claim → create an Identity Proposal; never confirm it in the background.
 - One enabled connector fails → report the run as partial with connector, error, and freshness; never call the scan complete.
 - A first run only scans the most recent 48 hours → keep the Project `baseline_pending`; never represent it as complete history.
@@ -76,4 +78,4 @@ A one-line conclusion is insufficient when the source contains the reasoning. A 
 
 ## Coverage report case
 
-Every run reports the inspected scope, candidate count, full-read count, created or updated records, duplicates and noise rejected, unresolved conflicts, changed files, and next completeness review. It previews and records that report through `project.checkpoint`. It may report complete coverage only when every enabled source and required anchor is accounted for; omitting a canonical `- source: anchor` row fails before write, while partial or failed runs retain the last complete checkpoint and idempotent retries do not duplicate a run. Raw connector cursors never enter the checkpoint.
+Every run reports the inspected scope, candidate count, full-read count, created or updated records, duplicates and noise rejected, unresolved conflicts, changed files, and next completeness review. It previews and records that report through `project.checkpoint`. It may report complete coverage only when every enabled source and required anchor is accounted for; omitting a canonical `- source: anchor` row fails before write, while partial or failed runs retain the last complete checkpoint and idempotent retries do not duplicate a run. A checkpoint section before another level-two section keeps new runs inside the checkpoint section. Raw connector cursors and cursor-like text assignments never enter the checkpoint.

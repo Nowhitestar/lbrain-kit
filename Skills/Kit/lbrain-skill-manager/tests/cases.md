@@ -21,3 +21,6 @@
 - The user approves a summary but has not seen the exact diff, tests, and version → do not apply the change.
 - Runtime refresh fails after the canonical write begins → restore the Skill package, version, tests, and every already-refreshed runtime; keep the Proposal accepted but not applied.
 - A pending Proposal is passed directly to `skill.apply` → reject it without accepting or applying anything.
+- A runtime target is inside the canonical LBrain, duplicated, or added only at apply time → reject before mutation.
+- An installer or Skill apply already holds the canonical/runtime transaction lock → reject the competing mutation without creating or replacing a runtime package.
+- Proposal notes follow an existing Change Preview → regenerate only the bounded preview section and preserve the later notes.

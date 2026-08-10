@@ -165,10 +165,10 @@ Kit v0.4.0 exposes six deterministic operations through the Core Skill scripts. 
 | `project.checkpoint` | Reconcile the canonical `source: anchor` rows, append one idempotent complete or partial Intake run, and advance the complete checkpoint only when every required row succeeds. |
 | `capture.create` | Save or reuse one private Source/Inbox item with provenance, extraction state, validation, and rollback. |
 | `proposal.create` | Create one evidence-linked Skill Improvement Proposal for an enabled active Personal Skill. |
-| `skill.preview` | Validate and persist one immutable exact diff, semantic version change, base hash, proposed hash, and preview hash. |
-| `skill.apply` | Apply only an already accepted Proposal containing the approved exact preview hash, refresh declared runtimes, validate, roll back on failure, and make a replay a no-op. |
+| `skill.preview` | Validate and persist one immutable exact diff, semantic version change, base hash, proposed hash, approved runtime plan, and preview hash. |
+| `skill.apply` | Apply only an already accepted Proposal containing the approved exact preview hash, refresh only the runtime destinations bound into that preview, validate, roll back on failure, and make a replay a no-op. |
 
-Successful results identify the operation, stable operation ID, status, target, affected paths, validation outcome, and rollback outcome. Rejected inputs fail closed before mutation. Core Skills retain semantic decisions such as what to collect, how to weave knowledge, whether a Skill is relevant, and when the user has approved a preview.
+Successful results identify the operation, stable operation ID, status, target, affected paths, validation outcome, and rollback outcome. Shared disclosure checks reject secret-like inputs, and root- plus runtime-scoped transaction locks serialize canonical writes through validation and rollback. Rejected inputs fail closed before mutation. Core Skills retain semantic decisions such as what to collect, how to weave knowledge, whether a Skill is relevant, and when the user has approved a preview.
 
 ## Future atomic write operations
 

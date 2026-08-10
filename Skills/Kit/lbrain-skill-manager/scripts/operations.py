@@ -12,13 +12,54 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Iterator
+
+
+UNCHANGED = object()
+CODE_SUFFIXES = {".bash", ".cjs", ".js", ".jsx", ".mjs", ".py", ".sh", ".ts", ".tsx", ".zsh"}
+SHELL_SUFFIXES = {".bash", ".sh", ".zsh"}
 
 
 class OperationError(ValueError):
     pass
+
+
+def load_kit_helper(root: Path, module: str, name: str) -> Any:
+    kit = str(root / "System/Kit")
+    if kit not in sys.path:
+        sys.path.insert(0, kit)
+    return getattr(__import__(module, fromlist=[name]), name)
+
+
+@contextmanager
+def operation_locks(root: Path, paths: list[Path] | None = None) -> Iterator[None]:
+    mutation_locks = load_kit_helper(root, "transaction", "mutation_locks")
+    transaction_error = load_kit_helper(root, "transaction", "TransactionError")
+    try:
+        with mutation_locks(paths if paths is not None else [root]):
+            yield
+    except transaction_error as error:
+        raise OperationError(str(error)) from error
+
+
+def reject_secrets(root: Path, *values: str, code_suffix: str = "") -> None:
+    if code_suffix:
+        secret_check = load_kit_helper(root, "disclosure", "contains_code_secret")
+        runtime_state_check = load_kit_helper(root, "disclosure", "contains_code_runtime_state")
+        shell = code_suffix in SHELL_SUFFIXES
+        python = code_suffix == ".py"
+        unsafe = secret_check(*values, shell=shell, python=python) or runtime_state_check(
+            *values, shell=shell, python=python
+        )
+    else:
+        secret_check = load_kit_helper(root, "disclosure", "contains_document_secret")
+        runtime_state_check = load_kit_helper(root, "disclosure", "contains_document_runtime_state")
+        unsafe = secret_check(*values) or runtime_state_check(*values)
+    if unsafe:
+        raise OperationError("Skill change contains possible credentials or runtime state; remove or redact them")
 
 
 def digest_bytes(value: bytes) -> str:
@@ -236,14 +277,20 @@ def replace_preview(proposal: str, preview_block: str) -> str:
     start = proposal.find(heading)
     if start < 0:
         return proposal.rstrip() + f"\n\n{preview_block}\n"
-    return proposal[:start] + preview_block + "\n"
+    next_heading = proposal.find("\n## ", start + len(heading))
+    end = len(proposal) if next_heading < 0 else next_heading
+    return proposal[:start] + preview_block + "\n" + proposal[end:]
 
 
-def atomic_write(path: Path, content: str) -> None:
+def atomic_write(path: Path, content: str, expected: object = UNCHANGED) -> None:
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as file:
             file.write(content)
+        if expected is not UNCHANGED:
+            current = path.read_text(encoding="utf-8") if path.is_file() else None
+            if current != expected:
+                raise OperationError("target changed during operation")
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
@@ -269,7 +316,13 @@ def skill_preview(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     skill, target = target_skill(root, metadata)
     rationale = required_text(payload, "rationale")
     files, base_version, proposed_version = proposed_files(skill, payload)
+    reject_secrets(root, rationale)
+    for relative, content in files.items():
+        suffix = PurePosixPath(relative).suffix.casefold()
+        reject_secrets(root, content, code_suffix=suffix if suffix in CODE_SUFFIXES else "")
     base_hash = package_hash(skill)
+    plan = runtime_plan(root, skill, base_hash, payload.get("runtime_targets", []))
+    runtime_targets = runtime_identity(plan)
     valid, message = validate_proposed(root, skill, files)
     if not valid:
         raise OperationError(f"proposed Skill does not validate: {message}")
@@ -286,6 +339,7 @@ def skill_preview(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
         "change_level": payload.get("change_level"),
         "files": files,
         "proposed_hash": package_hash_with_changes(skill, files),
+        "runtime_targets": runtime_targets,
     }
     preview_hash = digest_text(
         json.dumps(preview_identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -297,6 +351,10 @@ def skill_preview(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
         "rationale": rationale,
         "diff": diff,
     }
+    runtime_lines = "\n".join(
+        f"- Runtime target: {item['runtime']} -> `{item['target']}` ({item['action']})"
+        for item in runtime_targets
+    ) or "- Runtime targets: none"
     block = (
         "## Change Preview\n\n"
         f"- Preview hash: `{preview_hash}`\n"
@@ -304,7 +362,8 @@ def skill_preview(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
         f"- Base version: {base_version}\n"
         f"- Proposed version: {proposed_version}\n"
         f"- Change level: {payload.get('change_level')}\n"
-        f"- Rationale: {rationale}\n\n"
+        f"- Rationale: {rationale}\n"
+        f"{runtime_lines}\n\n"
         "```diff\n"
         f"{diff.rstrip()}\n"
         "```"
@@ -326,10 +385,10 @@ def skill_preview(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     if duplicate:
         return result
 
-    atomic_write(path, after_proposal)
+    atomic_write(path, after_proposal, before_proposal)
     root_valid, root_message = validate_root(root)
     if not root_valid:
-        atomic_write(path, before_proposal)
+        atomic_write(path, before_proposal, after_proposal)
         result["status"] = "failed"
         result["validation"] = {"ok": False, "message": root_message}
         result["rollback"] = {"performed": True, "ok": True}
@@ -346,6 +405,7 @@ def preview_identity(preview: dict[str, Any]) -> dict[str, Any]:
         "change_level",
         "files",
         "proposed_hash",
+        "runtime_targets",
     )
     missing = [key for key in keys if key not in preview]
     if missing:
@@ -437,6 +497,7 @@ def runtime_plan(
     if not isinstance(values, list):
         raise OperationError("runtime_targets must be a list")
     plan: list[tuple[str, Path, str]] = []
+    destinations: set[Path] = set()
     skill_name = skill.name
     for index, item in enumerate(values):
         if not isinstance(item, dict):
@@ -447,10 +508,15 @@ def runtime_plan(
             raise OperationError(f"runtime_targets[{index}].runtime is invalid")
         if not isinstance(target, str) or not Path(target).is_absolute():
             raise OperationError(f"runtime_targets[{index}].target must be an explicit absolute directory")
-        target_root = Path(target).resolve()
-        if target_root == root or len(target_root.parts) < 3:
+        target_root = Path(target).expanduser().resolve()
+        if target_root == root or target_root.is_relative_to(root):
+            raise OperationError("runtime target must be outside the canonical LBrain")
+        if len(target_root.parts) < 3:
             raise OperationError("runtime target is too broad")
         package = target_root / skill_name
+        if package in destinations:
+            raise OperationError("runtime_targets contain a duplicate package destination")
+        destinations.add(package)
         if package.is_symlink():
             if runtime == "openclaw":
                 raise OperationError("OpenClaw requires a copied Skill package and rejects symlinks")
@@ -466,6 +532,31 @@ def runtime_plan(
         else:
             plan.append((str(runtime), package, "create"))
     return plan
+
+
+def runtime_identity(plan: list[tuple[str, Path, str]]) -> list[dict[str, str]]:
+    return [
+        {
+            "runtime": runtime,
+            "target": str(package.parent),
+            "package": str(package),
+            "action": action,
+        }
+        for runtime, package, action in plan
+    ]
+
+
+def runtime_lock_paths(values: object) -> list[Path]:
+    if not isinstance(values, list):
+        return []
+    paths: list[Path] = []
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        target = item.get("target")
+        if isinstance(target, str) and Path(target).is_absolute():
+            paths.append(Path(target).expanduser().resolve())
+    return paths
 
 
 def refresh_runtimes(
@@ -484,8 +575,9 @@ def refresh_runtimes(
         if action == "replace":
             backup = backup_root / str(index)
             shutil.copytree(package, backup, symlinks=True)
-            remove_runtime_package(package)
         rollback.append((package, backup))
+        if action == "replace":
+            remove_runtime_package(package)
         if runtime == "openclaw":
             shutil.copytree(
                 skill,
@@ -497,11 +589,19 @@ def refresh_runtimes(
         affected.append(f"runtime:{runtime}/{skill.name}")
 
 
-def rollback_runtimes(entries: list[tuple[Path, Path | None]]) -> None:
+def rollback_runtimes(entries: list[tuple[Path, Path | None]]) -> tuple[bool, list[Path]]:
+    ok = True
+    recovery_paths: list[Path] = []
     for package, backup in reversed(entries):
-        remove_runtime_package(package)
-        if backup is not None:
-            shutil.copytree(backup, package, symlinks=True)
+        try:
+            remove_runtime_package(package)
+            if backup is not None:
+                shutil.copytree(backup, package, symlinks=True)
+        except OSError:
+            ok = False
+            if backup is not None and backup.exists():
+                recovery_paths.append(backup)
+    return ok, recovery_paths
 
 
 def skill_apply(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -513,6 +613,8 @@ def skill_apply(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(preview_value, dict):
         raise OperationError("preview must be the exact skill.preview result payload")
     preview = preview_value
+    if "runtime_targets" in payload:
+        raise OperationError("runtime_targets must be declared and approved during skill.preview")
     approved_hash = payload.get("approved_preview_hash")
     if not isinstance(approved_hash, str) or approved_hash != preview.get("preview_hash"):
         raise OperationError("approved preview hash does not match the supplied preview")
@@ -553,10 +655,15 @@ def skill_apply(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     accepted_text = before_proposal
 
     try:
-        plan = runtime_plan(root, skill, current_hash, payload.get("runtime_targets", []))
+        approved_targets = preview.get("runtime_targets")
+        if not isinstance(approved_targets, list):
+            raise OperationError("preview runtime targets are missing")
+        plan = runtime_plan(root, skill, current_hash, approved_targets)
+        if runtime_identity(plan) != approved_targets:
+            raise OperationError("runtime target state changed after preview; generate and approve a new preview")
     except OperationError as error:
         failure = approved_proposal(accepted_text, approved_hash, f"Application failed before mutation: {error}.")
-        atomic_write(path, failure)
+        atomic_write(path, failure, accepted_text)
         return {
             "operation": "skill.apply",
             "operation_id": approved_hash[:20],
@@ -568,27 +675,30 @@ def skill_apply(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
             "rollback": {"performed": False, "ok": True},
         }
 
-    snapshots: dict[str, bytes | None] = {}
+    snapshots: dict[str, str | None] = {}
     for relative in files:
         target_path = skill.joinpath(*PurePosixPath(relative).parts)
-        snapshots[relative] = target_path.read_bytes() if target_path.is_file() else None
+        snapshots[relative] = target_path.read_text(encoding="utf-8") if target_path.is_file() else None
     runtime_rollback: list[tuple[Path, Path | None]] = []
     runtime_affected: list[str] = []
-    runtime_backup = tempfile.TemporaryDirectory()
+    runtime_backup = Path(tempfile.mkdtemp(prefix="lbrain-runtime-rollback-"))
+    keep_runtime_backup = False
+    proposal_written = False
     affected = [path.relative_to(root).as_posix()]
     affected.extend((skill / relative).relative_to(root).as_posix() for relative in sorted(files))
     try:
         for relative, content in files.items():
             target_path = skill.joinpath(*PurePosixPath(relative).parts)
             target_path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write(target_path, content)
+            atomic_write(target_path, content, snapshots[relative])
         valid, message = validate_root(root)
         if not valid:
             raise OperationError(f"canonical Skill validation failed: {message}")
-        refresh_runtimes(skill, plan, Path(runtime_backup.name), runtime_rollback, runtime_affected)
+        refresh_runtimes(skill, plan, runtime_backup, runtime_rollback, runtime_affected)
         affected.extend(runtime_affected)
         after_proposal = applied_proposal(accepted_text, approved_hash, len(plan))
-        atomic_write(path, after_proposal)
+        atomic_write(path, after_proposal, accepted_text)
+        proposal_written = True
         valid, message = validate_root(root)
         if not valid:
             raise OperationError(f"applied Proposal validation failed: {message}")
@@ -603,23 +713,25 @@ def skill_apply(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
             "rollback": None,
         }
     except (OSError, OperationError) as error:
-        rollback_runtimes(runtime_rollback)
+        rollback_ok, recovery_paths = rollback_runtimes(runtime_rollback)
+        keep_runtime_backup = bool(recovery_paths)
         for relative, content in snapshots.items():
             target_path = skill.joinpath(*PurePosixPath(relative).parts)
-            if content is None:
-                target_path.unlink(missing_ok=True)
-            else:
-                target_path.parent.mkdir(parents=True, exist_ok=True)
-                descriptor, temporary = tempfile.mkstemp(prefix=f".{target_path.name}.", dir=target_path.parent)
-                try:
-                    with os.fdopen(descriptor, "wb") as file:
-                        file.write(content)
-                    os.replace(temporary, target_path)
-                finally:
-                    if os.path.exists(temporary):
-                        os.unlink(temporary)
+            try:
+                if content is None:
+                    current = target_path.read_text(encoding="utf-8") if target_path.is_file() else None
+                    if current != files[relative]:
+                        raise OperationError("target changed during rollback")
+                    target_path.unlink()
+                else:
+                    atomic_write(target_path, content, files[relative])
+            except (OSError, OperationError):
+                rollback_ok = False
         failure = approved_proposal(accepted_text, approved_hash, f"Application failed and rolled back: {error}.")
-        atomic_write(path, failure)
+        try:
+            atomic_write(path, failure, after_proposal if proposal_written else accepted_text)
+        except (OSError, OperationError):
+            rollback_ok = False
         return {
             "operation": "skill.apply",
             "operation_id": approved_hash[:20],
@@ -628,10 +740,15 @@ def skill_apply(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
             "target": target,
             "affected_paths": affected,
             "validation": {"ok": False, "message": str(error)},
-            "rollback": {"performed": True, "ok": True},
+            "rollback": {
+                "performed": True,
+                "ok": rollback_ok,
+                **({"recovery_paths": [str(path) for path in recovery_paths]} if recovery_paths else {}),
+            },
         }
     finally:
-        runtime_backup.cleanup()
+        if not keep_runtime_backup:
+            shutil.rmtree(runtime_backup, ignore_errors=True)
 
 
 def main() -> int:
@@ -640,6 +757,7 @@ def main() -> int:
     parser.add_argument("--root", required=True, type=Path)
     args = parser.parse_args()
     payload: dict[str, Any] = {}
+    root: Path | None = None
     try:
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
@@ -647,15 +765,29 @@ def main() -> int:
         root = args.root.resolve()
         if not (root / "System/Kit/check.py").is_file():
             raise OperationError("root is not an LBrain Kit")
+        contains_key = load_kit_helper(root, "disclosure", "contains_key")
+        if contains_key(payload, {"cursor", "raw_cursor"}):
+            raise OperationError("raw connector cursors must stay outside LBrain")
         if args.operation == "skill.preview":
-            result = skill_preview(root, payload)
+            runtime_values = payload.get("runtime_targets", [])
         else:
-            result = skill_apply(root, payload)
+            preview_value = payload.get("preview")
+            runtime_values = preview_value.get("runtime_targets", []) if isinstance(preview_value, dict) else []
+        with operation_locks(root):
+            with operation_locks(root, runtime_lock_paths(runtime_values)):
+                if args.operation == "skill.preview":
+                    result = skill_preview(root, payload)
+                else:
+                    result = skill_apply(root, payload)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0 if result["status"] != "failed" else 1
     except (OSError, json.JSONDecodeError, OperationError) as error:
-        target = payload.get("proposal_path", "")
-        target = target if isinstance(target, str) else ""
+        target = ""
+        if root is not None:
+            try:
+                target = proposal_path(root, payload.get("proposal_path")).relative_to(root).as_posix()
+            except OperationError:
+                pass
         identity = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
         print(
             json.dumps(

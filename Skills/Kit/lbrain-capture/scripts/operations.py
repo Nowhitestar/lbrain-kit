@@ -11,22 +11,45 @@ import re
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Iterator
 
 
 PROFILE_START = "<!-- lbrain:intake-profile:v1:start -->"
 PROFILE_END = "<!-- lbrain:intake-profile:end -->"
 SOURCE_STATUSES = {"scanned", "no_durable_change", "partial", "failed", "stale", "no_match"}
-SECRET = re.compile(
-    r"(?i)\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password|private[_-]?key)\b"
-    r"\s*[:=]\s*\S{8,}"
-)
+UNCHANGED = object()
 
 
 class OperationError(ValueError):
     pass
+
+
+def load_kit_helper(root: Path, module: str, name: str) -> Any:
+    kit = str(root / "System/Kit")
+    if kit not in sys.path:
+        sys.path.insert(0, kit)
+    return getattr(__import__(module, fromlist=[name]), name)
+
+
+@contextmanager
+def operation_lock(root: Path) -> Iterator[None]:
+    mutation_locks = load_kit_helper(root, "transaction", "mutation_locks")
+    transaction_error = load_kit_helper(root, "transaction", "TransactionError")
+    try:
+        with mutation_locks([root]):
+            yield
+    except transaction_error as error:
+        raise OperationError(str(error)) from error
+
+
+def reject_secrets(root: Path, *values: str) -> None:
+    secret_check = load_kit_helper(root, "disclosure", "contains_document_secret")
+    runtime_state_check = load_kit_helper(root, "disclosure", "contains_document_runtime_state")
+    if secret_check(*values) or runtime_state_check(*values):
+        raise OperationError("operation contains possible credentials or runtime state; remove or redact them")
 
 
 def digest(content: str) -> str:
@@ -137,16 +160,27 @@ def replace_profile(existing: str, profile: str) -> str:
     return existing[:start] + profile + "\n" + existing[next_heading:]
 
 
-def atomic_write(path: Path, content: str) -> None:
+def atomic_write(path: Path, content: str, expected: object = UNCHANGED) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as file:
             file.write(content)
+        if expected is not UNCHANGED:
+            current = path.read_text(encoding="utf-8") if path.is_file() else None
+            if current != expected:
+                raise OperationError("target changed during operation")
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def atomic_unlink(path: Path, expected: str) -> None:
+    current = path.read_text(encoding="utf-8") if path.is_file() else None
+    if current != expected:
+        raise OperationError("target changed during operation")
+    path.unlink()
 
 
 def validate(root: Path) -> tuple[bool, str]:
@@ -205,6 +239,9 @@ def project_configure(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     before = path.read_text(encoding="utf-8") if path.is_file() else None
     before_hash = digest(before) if before is not None else None
     profile = managed_profile(payload.get("profile_markdown"))
+    supplied = [profile]
+    supplied.extend(str(payload[key]) for key in ("title", "summary", "outcome") if key in payload)
+    reject_secrets(root, *supplied)
     legacy_migration = before is not None and PROFILE_START not in before and "## Context Intake Profile" in before
     if not legacy_migration:
         profile_requirements(profile)
@@ -273,10 +310,10 @@ def project_configure(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
             return result
         if status != "accepted":
             raise OperationError("Project configuration Proposal must be explicitly accepted")
-        atomic_write(proposal_path, applied_proposal)
+        atomic_write(proposal_path, applied_proposal, proposal_before)
         valid, message = validate(root)
         if not valid:
-            atomic_write(proposal_path, proposal_before)
+            atomic_write(proposal_path, proposal_before, applied_proposal)
             raise OperationError("Project configuration Proposal could not be finalized")
         result["status"] = "applied"
         result["affected_paths"] = [proposal_relative.as_posix()]
@@ -285,24 +322,46 @@ def project_configure(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     if status != "accepted":
         raise OperationError("project.configure apply requires the explicitly accepted Proposal")
 
-    atomic_write(path, after)
-    valid, message = validate(root)
-    if valid:
-        atomic_write(proposal_path, applied_proposal)
+    atomic_write(path, after, before)
+    proposal_written = False
+    try:
         valid, message = validate(root)
-    if not valid:
-        if before is None:
-            path.unlink(missing_ok=True)
-        else:
-            atomic_write(path, before)
+        if not valid:
+            raise OperationError(message or "Project validation failed")
+        atomic_write(proposal_path, applied_proposal, proposal_before)
+        proposal_written = True
+        valid, message = validate(root)
+        if not valid:
+            raise OperationError(message or "Project and Proposal validation failed")
+    except (OSError, OperationError) as error:
+        rollback_ok = True
+        if proposal_written:
+            try:
+                atomic_write(proposal_path, proposal_before, applied_proposal)
+            except (OSError, OperationError):
+                rollback_ok = False
+        try:
+            if before is None:
+                atomic_unlink(path, after)
+            else:
+                atomic_write(path, before, after)
+        except (OSError, OperationError):
+            rollback_ok = False
         failed_proposal = accepted_proposal.replace(
             "Application pending.", "Application failed validation; the accepted Proposal remains retryable."
         )
-        atomic_write(proposal_path, failed_proposal)
+        proposal_current = proposal_path.read_text(encoding="utf-8") if proposal_path.is_file() else None
+        failure_recorded = False
+        if proposal_current == proposal_before:
+            try:
+                atomic_write(proposal_path, failed_proposal, proposal_before)
+                failure_recorded = True
+            except (OSError, OperationError):
+                pass
         result["status"] = "failed"
-        result["affected_paths"] = [proposal_relative.as_posix()]
-        result["validation"] = {"ok": False, "message": message}
-        result["rollback"] = {"performed": True, "ok": True}
+        result["affected_paths"] = [proposal_relative.as_posix()] if failure_recorded else []
+        result["validation"] = {"ok": False, "message": str(error)}
+        result["rollback"] = {"performed": True, "ok": rollback_ok}
         return result
 
     result["validation"] = {"ok": True, "message": message or "Kit validation passed"}
@@ -414,14 +473,19 @@ def append_checkpoint(existing: str, block: str, run_id: str) -> tuple[str, bool
     heading = "## Context Intake Checkpoints"
     if heading not in existing:
         return existing.rstrip() + f"\n\n{heading}\n\n{block}\n", False
-    return existing.rstrip() + f"\n\n{block}\n", False
+    heading_start = existing.find(heading)
+    next_heading = existing.find("\n## ", heading_start + len(heading))
+    if next_heading < 0:
+        return existing.rstrip() + f"\n\n{block}\n", False
+    return existing[:next_heading].rstrip() + f"\n\n{block}\n" + existing[next_heading:], False
 
 
 def project_checkpoint(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     mode = payload.get("mode")
     if mode not in {"preview", "apply"}:
         raise OperationError("mode must be preview or apply")
-    if "cursor" in payload or "raw_cursor" in payload:
+    contains_key = load_kit_helper(root, "disclosure", "contains_key")
+    if contains_key(payload, {"cursor", "raw_cursor"}):
         raise OperationError("raw connector cursors must stay outside LBrain")
 
     relative = relative_project_path(payload.get("project_path"))
@@ -431,6 +495,7 @@ def project_checkpoint(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     before = path.read_text(encoding="utf-8")
     before_hash = digest(before)
     block, complete = checkpoint_block(payload, profile_requirements(before))
+    reject_secrets(root, block)
     run_id = str(payload["run_id"])
     after, duplicate = append_checkpoint(before, block, run_id)
     after_hash = digest(after)
@@ -453,10 +518,10 @@ def project_checkpoint(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     if "expected_hash" not in payload or payload.get("expected_hash") != before_hash:
         raise OperationError("Project changed after preview; generate a new checkpoint preview")
 
-    atomic_write(path, after)
+    atomic_write(path, after, before)
     valid, message = validate(root)
     if not valid:
-        atomic_write(path, before)
+        atomic_write(path, before, after)
         result["status"] = "failed"
         result["complete_checkpoint_advanced"] = False
         result["validation"] = {"ok": False, "message": message}
@@ -505,6 +570,123 @@ def existing_capture(root: Path, key: str, origin: str) -> Path | None:
     return None
 
 
+def capture_frontmatter(path: Path) -> list[str]:
+    try:
+        return path.read_text(encoding="utf-8").split("---", 2)[1].splitlines()
+    except (IndexError, OSError, UnicodeError) as error:
+        raise OperationError("existing capture is malformed") from error
+
+
+def render_capture(
+    destination: str,
+    title: str,
+    summary: str,
+    origin: str,
+    content: str,
+    note: str,
+    extraction_status: str,
+    capture: str,
+    key: str,
+    created: str,
+) -> str:
+    base = (
+        "---\n"
+        f"type: {'source' if destination == 'source' else 'note'}\n"
+        f"summary: {yaml_string(summary)}\n"
+        "status: active\n"
+        "visibility: private\n"
+        f"origin: {yaml_string(origin or 'user-provided')}\n"
+        f"capture_id: {key}\n"
+        f"extraction_status: {extraction_status}\n"
+    )
+    if destination == "source":
+        base += f"capture: {capture}\nweaving: pending\n"
+    body = (
+        f"created: {created}\nupdated: {date.today().isoformat()}\n---\n"
+        f"# {title}\n\n"
+        "## Capture\n\n"
+        f"{content or 'Original content was not available at capture time.'}\n\n"
+        "## Provenance notes\n\n"
+        f"- Origin: {origin or 'user-provided'}\n"
+        f"- Extraction: {extraction_status}\n"
+    )
+    if note:
+        body += f"- User note: {note}\n"
+    return base + body
+
+
+def recover_capture(
+    existing: str,
+    title: str,
+    summary: str,
+    origin: str,
+    content: str,
+    note: str,
+    extraction_status: str,
+    capture: str,
+) -> str:
+    try:
+        _, header, body = existing.split("---", 2)
+    except ValueError as error:
+        raise OperationError("existing capture is malformed") from error
+    lines = header.strip("\n").splitlines()
+    updates = {
+        "summary": yaml_string(summary),
+        "origin": yaml_string(origin or "user-provided"),
+        "extraction_status": extraction_status,
+        "updated": date.today().isoformat(),
+    }
+    if any(line.startswith("capture:") for line in lines):
+        updates["capture"] = capture
+    for key, value in updates.items():
+        marker = f"{key}:"
+        for index, line in enumerate(lines):
+            if line.startswith(marker):
+                lines[index] = f"{marker} {value}"
+                break
+        else:
+            lines.append(f"{marker} {value}")
+    recovered = "---\n" + "\n".join(lines) + "\n---" + body
+    recovered = re.sub(r"(?m)^# .*$", lambda _: f"# {title}", recovered, count=1)
+
+    capture_heading = "## Capture"
+    capture_start = recovered.find(capture_heading)
+    if capture_start < 0:
+        raise OperationError("existing capture is missing its Capture section")
+    capture_end = recovered.find("\n## ", capture_start + len(capture_heading))
+    if capture_end < 0:
+        capture_end = len(recovered)
+    recovered = (
+        recovered[:capture_start]
+        + f"{capture_heading}\n\n{content}\n"
+        + recovered[capture_end:]
+    )
+
+    provenance_heading = "## Provenance notes"
+    provenance_start = recovered.find(provenance_heading)
+    if provenance_start < 0:
+        raise OperationError("existing capture is missing its Provenance notes section")
+    provenance_end = recovered.find("\n## ", provenance_start + len(provenance_heading))
+    if provenance_end < 0:
+        provenance_end = len(recovered)
+    provenance = recovered[provenance_start:provenance_end].splitlines()
+    desired = {
+        "- Origin:": origin or "user-provided",
+        "- Extraction:": extraction_status,
+    }
+    if note:
+        desired["- User note:"] = note
+    found: set[str] = set()
+    for index, line in enumerate(provenance):
+        for marker, value in desired.items():
+            if line.startswith(marker):
+                provenance[index] = f"{marker} {value}"
+                found.add(marker)
+                break
+    provenance.extend(f"{marker} {value}" for marker, value in desired.items() if marker not in found)
+    return recovered[:provenance_start] + "\n".join(provenance).rstrip() + "\n" + recovered[provenance_end:]
+
+
 def capture_create(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     destination = payload.get("destination")
     if destination not in {"source", "inbox"}:
@@ -521,8 +703,7 @@ def capture_create(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     note = note_value.strip()
     if not origin and not content:
         raise OperationError("capture requires an origin or content")
-    if any(SECRET.search(value) for value in (title, summary, origin, content, note)):
-        raise OperationError("capture contains a possible secret; remove or redact it")
+    reject_secrets(root, title, summary, origin, content, note)
 
     extraction_status = payload.get("extraction_status", "complete")
     if extraction_status not in {"complete", "partial", "failed"}:
@@ -538,6 +719,53 @@ def capture_create(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     key = capture_key(origin, content)
     duplicate = existing_capture(root, key, origin)
     if duplicate is not None:
+        existing = duplicate.read_text(encoding="utf-8")
+        head = capture_frontmatter(duplicate)
+        existing_status = frontmatter_text(head, "extraction_status")
+        managed = frontmatter_text(head, "capture_id") == key
+        if extraction_status == "complete" and existing_status in {"failed", "partial"} and managed:
+            before_hash = digest(existing)
+            if payload.get("expected_hash") != before_hash:
+                raise OperationError("incomplete capture changed before recovery; supply its exact expected_hash")
+            rendered = recover_capture(
+                existing,
+                title,
+                summary,
+                origin,
+                content,
+                note,
+                extraction_status,
+                capture,
+            )
+            atomic_write(duplicate, rendered, existing)
+            valid, message = validate(root)
+            if not valid:
+                atomic_write(duplicate, existing, rendered)
+                return {
+                    "operation": "capture.create",
+                    "operation_id": operation_id("capture.create", duplicate.relative_to(root).as_posix(), key),
+                    "mode": "apply",
+                    "status": "failed",
+                    "target": duplicate.relative_to(root).as_posix(),
+                    "affected_paths": [],
+                    "capture_id": key,
+                    "validation": {"ok": False, "message": message},
+                    "rollback": {"performed": True, "ok": True},
+                }
+            relative_duplicate = duplicate.relative_to(root).as_posix()
+            return {
+                "operation": "capture.create",
+                "operation_id": operation_id("capture.create", relative_duplicate, key),
+                "mode": "apply",
+                "status": "applied",
+                "target": relative_duplicate,
+                "affected_paths": [relative_duplicate],
+                "capture_id": key,
+                "before_hash": before_hash,
+                "after_hash": digest(rendered),
+                "validation": {"ok": True, "message": message or "Kit validation passed"},
+                "rollback": None,
+            }
         relative_duplicate = duplicate.relative_to(root).as_posix()
         return {
             "operation": "capture.create",
@@ -554,32 +782,20 @@ def capture_create(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     folder = "Knowledge/Sources" if destination == "source" else "Inbox"
     relative = PurePosixPath(folder) / f"{capture_slug(title, key)}.md"
     path = root.joinpath(*relative.parts)
-    today = date.today().isoformat()
-    base = (
-        "---\n"
-        f"type: {'source' if destination == 'source' else 'note'}\n"
-        f"summary: {yaml_string(summary)}\n"
-        "status: active\n"
-        "visibility: private\n"
-        f"origin: {yaml_string(origin or 'user-provided')}\n"
-        f"capture_id: {key}\n"
-        f"extraction_status: {extraction_status}\n"
+    rendered = render_capture(
+        destination,
+        title,
+        summary,
+        origin,
+        content,
+        note,
+        extraction_status,
+        capture,
+        key,
+        date.today().isoformat(),
     )
-    if destination == "source":
-        base += f"capture: {capture}\nweaving: pending\n"
-    body = (
-        f"created: {today}\nupdated: {today}\n---\n"
-        f"# {title}\n\n"
-        "## Capture\n\n"
-        f"{content or 'Original content was not available at capture time.'}\n\n"
-        "## Provenance notes\n\n"
-        f"- Origin: {origin or 'user-provided'}\n"
-        f"- Extraction: {extraction_status}\n"
-    )
-    if note:
-        body += f"- User note: {note}\n"
-    rendered = base + body
-    atomic_write(path, rendered)
+    reject_secrets(root, rendered)
+    atomic_write(path, rendered, None)
     valid, message = validate(root)
     status = "applied" if extraction_status == "complete" else "partial"
     result = {
@@ -594,7 +810,7 @@ def capture_create(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
         "rollback": None,
     }
     if not valid:
-        path.unlink(missing_ok=True)
+        atomic_unlink(path, rendered)
         result["status"] = "failed"
         result["rollback"] = {"performed": True, "ok": True}
     return result
@@ -607,6 +823,7 @@ def main() -> int:
     args = parser.parse_args()
 
     payload: dict[str, Any] = {}
+    root: Path | None = None
     try:
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
@@ -614,27 +831,33 @@ def main() -> int:
         root = args.root.resolve()
         if not (root / "System/Kit/check.py").is_file():
             raise OperationError("root is not an LBrain Kit")
-        if args.operation == "project.configure":
-            result = project_configure(root, payload)
-        elif args.operation == "project.checkpoint":
-            result = project_checkpoint(root, payload)
-        else:
-            result = capture_create(root, payload)
+        with operation_lock(root):
+            if args.operation == "project.configure":
+                result = project_configure(root, payload)
+            elif args.operation == "project.checkpoint":
+                result = project_checkpoint(root, payload)
+            else:
+                result = capture_create(root, payload)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0 if result["status"] != "failed" else 1
     except (OSError, json.JSONDecodeError, OperationError) as error:
-        if args.operation.startswith("project."):
-            target = payload.get("project_path", "")
-        else:
-            target = payload.get("title") or payload.get("origin", "")
-        target = target if isinstance(target, str) else ""
+        target = ""
+        if root is not None and args.operation.startswith("project."):
+            try:
+                candidate = relative_project_path(payload.get("project_path")).as_posix()
+                secret_check = load_kit_helper(root, "disclosure", "contains_secret")
+                runtime_state_check = load_kit_helper(root, "disclosure", "contains_runtime_state")
+                if not secret_check(candidate) and not runtime_state_check(candidate):
+                    target = candidate
+            except OperationError:
+                pass
         identity = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
         print(
             json.dumps(
                 {
                     "operation": args.operation,
                     "operation_id": operation_id(args.operation, target, identity),
-                    "mode": payload.get("mode", "apply"),
+                    "mode": payload.get("mode") if payload.get("mode") in {"preview", "apply"} else "apply",
                     "status": "failed",
                     "target": target,
                     "error": str(error),

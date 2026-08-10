@@ -107,11 +107,13 @@ def selected_skills(root: Path, runtime: str) -> list[Path]:
     return selected
 
 
-def install(root: Path, runtime: str, target: Path, mode: str, dry_run: bool) -> tuple[list[Path], set[Path]]:
-    root = root.resolve()
-    target = target.expanduser().resolve()
-    if target == root or target.is_relative_to(root):
-        raise ValueError("runtime target must be outside the canonical LBrain")
+def install_unlocked(
+    root: Path,
+    runtime: str,
+    target: Path,
+    mode: str,
+    dry_run: bool,
+) -> tuple[list[Path], set[Path]]:
     packages = selected_skills(root, runtime)
     destinations = [target / package.name for package in packages]
     existing: set[Path] = set()
@@ -155,6 +157,22 @@ def install(root: Path, runtime: str, target: Path, mode: str, dry_run: bool) ->
                 shutil.rmtree(path)
         raise
     return destinations, existing
+
+
+def install(root: Path, runtime: str, target: Path, mode: str, dry_run: bool) -> tuple[list[Path], set[Path]]:
+    root = root.resolve()
+    target = target.expanduser().resolve()
+    if target == root or target.is_relative_to(root):
+        raise ValueError("runtime target must be outside the canonical LBrain")
+    kit = str(root / "System/Kit")
+    if kit not in sys.path:
+        sys.path.insert(0, kit)
+    transaction = __import__("transaction", fromlist=["TransactionError", "mutation_locks"])
+    try:
+        with transaction.mutation_locks([root, target]):
+            return install_unlocked(root, runtime, target, mode, dry_run)
+    except transaction.TransactionError as error:
+        raise ValueError(str(error)) from error
 
 
 def main() -> int:

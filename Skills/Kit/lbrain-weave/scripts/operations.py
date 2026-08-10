@@ -11,13 +11,35 @@ import re
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Iterator
+
+
+UNCHANGED = object()
 
 
 class OperationError(ValueError):
     pass
+
+
+def load_kit_helper(root: Path, module: str, name: str) -> Any:
+    kit = str(root / "System/Kit")
+    if kit not in sys.path:
+        sys.path.insert(0, kit)
+    return getattr(__import__(module, fromlist=[name]), name)
+
+
+@contextmanager
+def operation_lock(root: Path) -> Iterator[None]:
+    mutation_locks = load_kit_helper(root, "transaction", "mutation_locks")
+    transaction_error = load_kit_helper(root, "transaction", "TransactionError")
+    try:
+        with mutation_locks([root]):
+            yield
+    except transaction_error as error:
+        raise OperationError(str(error)) from error
 
 
 def required_text(payload: dict[str, Any], key: str) -> str:
@@ -35,12 +57,16 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def atomic_write(path: Path, content: str) -> None:
+def atomic_write(path: Path, content: str, expected: object = UNCHANGED) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as file:
             file.write(content)
+        if expected is not UNCHANGED:
+            current = path.read_text(encoding="utf-8") if path.is_file() else None
+            if current != expected:
+                raise OperationError("target changed during operation")
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
@@ -182,7 +208,11 @@ def proposal_create(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
         f"## Test changes\n\n{tests}\n\n"
         "## Decision\n\nPending user review.\n"
     )
-    atomic_write(path, content)
+    secret_check = load_kit_helper(root, "disclosure", "contains_document_secret")
+    runtime_state_check = load_kit_helper(root, "disclosure", "contains_document_runtime_state")
+    if secret_check(content) or runtime_state_check(content):
+        raise OperationError("Proposal contains possible credentials or runtime state; remove or redact them")
+    atomic_write(path, content, None)
     valid, message = validate(root)
     result = {
         "operation": "proposal.create",
@@ -196,7 +226,10 @@ def proposal_create(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
         "rollback": None,
     }
     if not valid:
-        path.unlink(missing_ok=True)
+        current = path.read_text(encoding="utf-8") if path.is_file() else None
+        if current != content:
+            raise OperationError("target changed during operation")
+        path.unlink()
         result["rollback"] = {"performed": True, "ok": True}
     return result
 
@@ -207,6 +240,7 @@ def main() -> int:
     parser.add_argument("--root", required=True, type=Path)
     args = parser.parse_args()
     payload: dict[str, Any] = {}
+    root: Path | None = None
     try:
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
@@ -214,12 +248,21 @@ def main() -> int:
         root = args.root.resolve()
         if not (root / "System/Kit/check.py").is_file():
             raise OperationError("root is not an LBrain Kit")
-        result = proposal_create(root, payload)
+        contains_key = load_kit_helper(root, "disclosure", "contains_key")
+        if contains_key(payload, {"cursor", "raw_cursor"}):
+            raise OperationError("raw connector cursors must stay outside LBrain")
+        with operation_lock(root):
+            result = proposal_create(root, payload)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0 if result["status"] != "failed" else 1
     except (OSError, json.JSONDecodeError, OperationError) as error:
-        target = payload.get("skill_name", "")
-        target = target if isinstance(target, str) else ""
+        target = ""
+        if root is not None:
+            try:
+                skill, _ = enabled_personal_skill(root, payload.get("skill_name"))
+                target = skill.name
+            except OperationError:
+                pass
         identity = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
         print(
             json.dumps(

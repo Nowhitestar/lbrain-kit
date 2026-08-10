@@ -21,7 +21,7 @@ from urllib.parse import quote, unquote
 PACK_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 MANAGED_PARTS = {"Candidates", "Repos"}
 SECTION = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
-SECRET = re.compile(
+SENSITIVE_VALUE_PATTERN = re.compile(
     r"(?i)(?:\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|secret|password|private[_-]?key)\b"
     r"\s*[:=]\s*(?:\"[^\"\n]{8,}\"|'[^'\n]{8,}'|[^\s`]{8,})|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
 )
@@ -437,7 +437,7 @@ def resolve_definition(definition: Definition, root: Path) -> Preview:
             metadata = frontmatter(text) if path.suffix.casefold() == ".md" else {}
             if metadata.get("visibility") in {"private", "trusted"}:
                 preview.blocked.append(f"non-public selected content: {rendered}")
-            if SECRET.search(text):
+            if SENSITIVE_VALUE_PATTERN.search(text):
                 preview.blocked.append(f"possible secret in {rendered}")
             if ABSOLUTE_PRIVATE_PATH.search(text):
                 preview.blocked.append(f"absolute private path in {rendered}")
@@ -716,7 +716,7 @@ def sources_document(paths: set[Path], root: Path) -> str:
                     str(metadata[key])
                     for key in ("origin", "source_of_truth")
                     if metadata.get(key)
-                    and not SECRET.search(str(metadata[key]))
+                    and not SENSITIVE_VALUE_PATTERN.search(str(metadata[key]))
                     and not ABSOLUTE_PRIVATE_PATH.search(str(metadata[key]))
                     and not PRIVATE_URL.search(str(metadata[key]))
                 ),
@@ -811,7 +811,7 @@ def review_text(data: bytes) -> list[str] | None:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         return None
-    text = SECRET.sub("<redacted-secret>", text)
+    text = SENSITIVE_VALUE_PATTERN.sub("<redacted-secret>", text)
     text = re.sub(r"(?:/Users/|/home/)[^\s)\]}`]+", "<private-path>", text)
     text = re.sub(r"[A-Za-z]:\\Users\\[^\s)\]}`]+", "<private-path>", text)
     text = PRIVATE_URL.sub("<private-url>", text)
@@ -1453,7 +1453,7 @@ def revoke(args: argparse.Namespace) -> int:
     submodule_path = str(definition.metadata.get("submodule_path") or "")
     if not remote or not submodule_path:
         raise ValueError("revocation requires a published Pack Definition")
-    if "\n" in args.reason or SECRET.search(args.reason) or ABSOLUTE_PRIVATE_PATH.search(args.reason):
+    if "\n" in args.reason or SENSITIVE_VALUE_PATTERN.search(args.reason) or ABSOLUTE_PRIVATE_PATH.search(args.reason):
         raise ValueError("revocation reason contains unsafe content")
     if args.replacement and not re.fullmatch(r"https?://[^\s]+", args.replacement):
         raise ValueError("replacement must be an HTTP or HTTPS URL")

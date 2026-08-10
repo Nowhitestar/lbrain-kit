@@ -87,8 +87,11 @@ git switch kit-base
 git fetch kit --tags
 git merge --ff-only kit/main
 git switch main
-git merge --no-ff v<release> -m "kit: upgrade to v<release>"
+git merge --no-ff --no-commit v<release>
 python3 System/Kit/check.py
+git diff --cached --check
+git diff --cached --name-status
+git commit -m "kit: upgrade to v<release>"
 ```
 
 If the selected personal release already registers Context Pack Submodules, restore them after the merge:
@@ -110,7 +113,7 @@ Before merging, read `CHANGELOG.md` and the release file under `MIGRATIONS/`. Re
 
 The 0.2.0 migration requires preserving `Skills/Enabled.md` personalization while adding the seventh mandatory Core Skill entry. The 0.3.0 migration moves Skill lifecycle metadata into `lbrain.json` and optionally adds OpenClaw to personalized runtime selections. The 0.4.0 migration adds deterministic Personal Intelligence writes without requiring a bulk rewrite of existing Projects, Sources, Proposals, or Personal Skills. Later migrations state their own exact Seeded reconciliation, if any.
 
-Do not push an upgrade until validation passes and the personal content diff is reviewed.
+Do not commit or push an upgrade until validation passes and the staged change list confirms that no Seeded or User-owned content was unintentionally replaced. After committing, `git diff HEAD^1..HEAD -- <path>` remains available for a targeted ownership review.
 
 ## Agent commit policy
 

@@ -9,6 +9,8 @@ All notable Kit-owned changes are documented here. Kit releases follow semantic 
 - Added idempotent Source capture with provenance, failed-extraction preservation, secret rejection, legacy-origin reuse, validation, and rollback.
 - Integrated passive Skill Improvement detection into Weave: only enabled active Personal Skills receive evidence-linked Proposals with a behavior delta and required behavior-case changes.
 - Added immutable Skill Change Preview and exact-hash Skill Apply with semantic versioning, stale-preview rejection, validation, multi-runtime refresh, rollback, and idempotent replay.
+- Bound runtime destinations and their state into the approved Skill preview, serialized write operations and runtime installation across processes, broadened credential and cursor rejection, and made rollback preserve conflicting concurrent edits.
+- Made incomplete captures recoverable with an exact prior hash without deleting user metadata or sections, preserved Proposal sections during re-preview, and kept checkpoints inside an existing mid-document checkpoint section.
 - Replaced the synthetic read-only tracer with a complete Personal Intelligence trace across Project, Knowledge, and Skill pipelines; retained four-runtime and v0.3 upgrade regressions.
 - Deliberately did not add a user-facing CLI, general write MCP, browser/mobile collector, cloud sync, encryption, access control, or autonomous Identity/Skill mutation.
 

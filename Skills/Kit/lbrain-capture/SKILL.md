@@ -10,8 +10,8 @@ Capture information without prematurely turning it into truth.
 2. Decide the explicit destination before writing: uncertain or unclassified material goes to Inbox; material with clear origin and durable value goes to Source.
 3. Use `scripts/operations.py` operation `capture.create` for the write. Supply the URL or origin, title, optional selection or content, optional user note, capture extent, and extraction status. Never ask the user to run the script or a CLI.
 4. Let the operation deduplicate by stable capture identity, validate the new note, and return the existing capture on an idempotent retry.
-5. When extraction fails, retain the origin, user note, and failure state as a reference capture; never fabricate missing article text.
-6. Default to `visibility: private`. Never store credentials or secrets.
+5. When extraction fails, retain the origin, user note, and failure state as a reference capture; never fabricate missing article text. A later complete retry may recover that managed capture in place only with its exact prior hash, while preserving unrecognized metadata and user-authored sections.
+6. Default to `visibility: private`. The shared disclosure gate rejects secret-like material before any Project, checkpoint, or capture write.
 7. Preserve quoted or imported source text; add interpretation elsewhere.
 8. Commit an authorized capture locally with `capture:` after the operation validates it. Do not push.
 
@@ -41,6 +41,6 @@ Context Intake is the batch and scheduled form of Capture. It uses the same prov
 7. Deduplicate the same durable event across sources. Update the existing record when later evidence implements, rejects, or supersedes it; retain the historical state and all useful source pointers.
 8. Route verified Project and Area context to the matching existing note. Keep the Project note as the current-state entry point; when decision history would overwhelm it, use one adjacent `<Project>-Decisions.md` ledger before adding directories or domain-specific files. Send reusable cross-project synthesis to `lbrain-weave`, Identity claims to a Proposal, created artifacts to Outputs, and ambiguity to Inbox. Keep work, life, personal, and cross-project relationships in metadata rather than a new directory entity.
 9. End every run with a coverage report: enabled source and anchor statuses, time range, durable candidates found, full reads, records created or updated, duplicates and noise rejected, unresolved conflicts, files changed, and next completeness review. A run is complete only when every enabled source and required anchor is accounted for.
-10. Use `scripts/operations.py` operation `project.checkpoint` to preview and then record the run. Pass only safe inspected scope, coverage, counts, changes, and conflicts; keep raw connector cursors outside LBrain. A partial or failed required source must not advance a complete checkpoint. Never ask the user to run the script.
+10. Use `scripts/operations.py` operation `project.checkpoint` to preview and then record the run. Pass only safe inspected scope, coverage, counts, changes, and conflicts; keep raw connector cursors outside LBrain. A partial or failed required source must not advance a complete checkpoint. Serialized apply rejects a stale Project instead of overwriting a concurrent edit. Never ask the user to run the script.
 11. Apply the most restrictive destination permission. A scheduled run cannot confirm Identity, publish an Output or Pack, change a remote, move a Submodule pointer, or push Git history.
 12. A configured background workflow may hand updated canonical context to `lbrain-context-pack` for preview or Candidate build only. Publication still requires a separate explicit approval.

@@ -9,6 +9,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "System/Kit"))
+
+from transaction import mutation_locks  # noqa: E402
+
+
 CHECK = ROOT / "System/Kit/check.py"
 INSTALL = ROOT / "Skills/Kit/lbrain-skill-manager/scripts/install.py"
 CORE_SKILLS = {
@@ -112,6 +117,120 @@ class ToolingSmokeTest(unittest.TestCase):
             self.assertIn("absolute private path", result.stdout)
             self.assertNotIn(sensitive_value, result.stdout + result.stderr)
 
+            manifest.write_text(
+                data[: data.index(',"provenance"')]
+                + ',"next_cursor":"opaque-runtime-state-12345"}\n',
+                encoding="utf-8",
+            )
+            runtime_state = self.run_check(copy)
+            self.assertNotEqual(runtime_state.returncode, 0)
+            self.assertIn("possible connector runtime state", runtime_state.stdout)
+
+            manifest.write_text(data[: data.index(',"provenance"')] + "}\n", encoding="utf-8")
+            disguised_secret = "api_key=response.real-" + "secret-token-12345"
+            leak = copy / "System/Kit/leak.txt"
+            leak.write_text(disguised_secret + "\n", encoding="utf-8")
+            disguised = self.run_check(copy)
+            self.assertNotEqual(disguised.returncode, 0)
+            self.assertIn("possible secret", disguised.stdout)
+            self.assertNotIn(disguised_secret, disguised.stdout + disguised.stderr)
+
+            leak.unlink()
+            (copy / "System/Kit/reference.py").write_text(
+                'api_key = os.getenv("API_KEY")\n'
+                'api_key = config.get("api_key")\n'
+                'OPENAI_API_KEY: str = config.get("api_key")\n'
+                'config["api_key"] = settings.api_key\n'
+                "cursor = response.get_cursor(page)\n"
+                "cursor==response.next_cursor\n",
+                encoding="utf-8",
+            )
+            code_reference = self.run_check(copy)
+            self.assertEqual(code_reference.returncode, 0, code_reference.stdout + code_reference.stderr)
+
+            (copy / "System/Kit/reference.py").write_text(
+                "# don't hardcode credentials\n"
+                'config["auth"].api_key = rf"""\nfixture-generic-secret-12345\n"""\n'
+                'cursor = str("opaque-real-cursor-12345")\n',
+                encoding="utf-8",
+            )
+            hardcoded = self.run_check(copy)
+            self.assertNotEqual(hardcoded.returncode, 0)
+            self.assertIn("possible secret", hardcoded.stdout)
+            self.assertIn("possible connector runtime state", hardcoded.stdout)
+
+            (copy / "System/Kit/reference.py").unlink()
+            concrete = "ghp_" + "abcdefghijklmnopqrstuvwxyz123456"
+            (copy / "System/Kit/reference.ts").write_text(
+                f'const apiKey = "{concrete}";\n',
+                encoding="utf-8",
+            )
+            typescript = self.run_check(copy)
+            self.assertNotEqual(typescript.returncode, 0)
+            self.assertIn("possible secret", typescript.stdout)
+            self.assertNotIn(concrete, typescript.stdout + typescript.stderr)
+
+            (copy / "System/Kit/reference.ts").write_text(
+                "const openaiApiKey: string = `\nfixture-generic-secret-12345\n`;\n"
+                "let nextCursor: string = `\nopaque-real-cursor-12345\n`;\n",
+                encoding="utf-8",
+            )
+            multiline_typescript = self.run_check(copy)
+            self.assertNotEqual(multiline_typescript.returncode, 0)
+            self.assertIn("possible secret", multiline_typescript.stdout)
+            self.assertIn("possible connector runtime state", multiline_typescript.stdout)
+
+            (copy / "System/Kit/reference.ts").write_text(
+                "const apiKey = this.#secret;\n"
+                "client.setApiKey(config.apiKey);\n",
+                encoding="utf-8",
+            )
+            safe_typescript = self.run_check(copy)
+            self.assertEqual(
+                safe_typescript.returncode,
+                0,
+                safe_typescript.stdout + safe_typescript.stderr,
+            )
+            (copy / "System/Kit/reference.ts").write_text(
+                'const apiKey = this.#secret || "fixture-secret-value-12345";\n'
+                'client.setAccessToken("fixture-secret-value-12345");\n',
+                encoding="utf-8",
+            )
+            unsafe_typescript = self.run_check(copy)
+            self.assertNotEqual(unsafe_typescript.returncode, 0)
+            self.assertIn("possible secret", unsafe_typescript.stdout)
+
+            (copy / "System/Kit/reference.ts").unlink()
+            shell = copy / "System/Kit/reference.sh"
+            shell.write_text("API_KEY=$API_KEY command\n", encoding="utf-8")
+            safe_shell = self.run_check(copy)
+            self.assertEqual(safe_shell.returncode, 0, safe_shell.stdout + safe_shell.stderr)
+            shell.write_text(
+                "API_KEY=$API_KEY#fixture-secret-value-12345\n",
+                encoding="utf-8",
+            )
+            unsafe_shell = self.run_check(copy)
+            self.assertNotEqual(unsafe_shell.returncode, 0)
+            self.assertIn("possible secret", unsafe_shell.stdout)
+
+            shell.unlink()
+            module = copy / "System/Kit/reference.mjs"
+            module.write_text("const apiKey = config.apiKey;\n", encoding="utf-8")
+            safe_module = self.run_check(copy)
+            self.assertEqual(safe_module.returncode, 0, safe_module.stdout + safe_module.stderr)
+            module.write_text(
+                'updateApiKey("fixture-secret-value-12345");\n',
+                encoding="utf-8",
+            )
+            (copy / "System/Kit/connector.cfg").write_text(
+                "next_cursor=opaque-runtime-state-12345\n",
+                encoding="utf-8",
+            )
+            extra_suffixes = self.run_check(copy)
+            self.assertNotEqual(extra_suffixes.returncode, 0)
+            self.assertIn("possible secret", extra_suffixes.stdout)
+            self.assertIn("possible connector runtime state", extra_suffixes.stdout)
+
     def test_isolated_runtime_adapters_and_conflict_guard(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -120,6 +239,27 @@ class ToolingSmokeTest(unittest.TestCase):
             ignored.mkdir()
             (ignored / "cache.pyc").write_bytes(b"generated")
             (fixture / "Skills/Kit/lbrain-capture/.git").write_text("runtime-irrelevant\n", encoding="utf-8")
+            locked_target = base / "locked"
+            with mutation_locks([locked_target]):
+                locked = subprocess.run(
+                    [
+                        sys.executable,
+                        str(INSTALL),
+                        "--root",
+                        str(fixture),
+                        "--runtime",
+                        "codex",
+                        "--target",
+                        str(locked_target),
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+            self.assertNotEqual(locked.returncode, 0)
+            self.assertIn("another LBrain mutation", locked.stderr)
+            self.assertFalse(locked_target.exists())
+
             for runtime in ("codex", "claude", "hermes", "openclaw"):
                 target = base / runtime
                 result = subprocess.run(

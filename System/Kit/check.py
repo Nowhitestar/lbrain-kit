@@ -12,6 +12,15 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from disclosure import (
+    contains_code_runtime_state,
+    contains_code_secret,
+    contains_document_runtime_state,
+    contains_document_secret,
+    contains_runtime_state,
+    contains_secret,
+)
+
 
 BASE_FIELDS = {"type", "summary", "status", "visibility", "created", "updated"}
 VISIBILITIES = {"private", "trusted", "public"}
@@ -90,15 +99,13 @@ TYPE_FIELDS = {
 WIKILINK = re.compile(r"(?<!!)\[\[([^\]]+)\]\]")
 RESOURCE = re.compile(r"\b((?:references|scripts|assets|examples|tests)/[A-Za-z0-9_./-]+)")
 ENABLED = re.compile(r"^\s*-\s+\[\[([^\]]+/SKILL)\]\]\s+[—-]\s+(.+?)\s*$", re.MULTILINE)
-SECRET = re.compile(
-    r"(?i)(?:\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|secret|password|private[_-]?key)\b"
-    r"(?:[\"']\s*)?[:=]\s*(?!re\.compile\b)(?:\"[^\"\n]{8,}\"|'[^'\n]{8,}'|[A-Za-z0-9_./+=-]{8,})"
-    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
-)
 ABSOLUTE_PRIVATE_PATH = re.compile(
     r"(?:/Users/[A-Za-z0-9._-]+/|/home/[A-Za-z0-9._-]+/|[A-Za-z]:\\Users\\[A-Za-z0-9._-]+\\)"
 )
-DISCLOSURE_SUFFIXES = {".json", ".md", ".py", ".sh", ".toml", ".txt", ".yaml", ".yml"}
+CODE_DISCLOSURE_SUFFIXES = {
+    ".bash", ".cjs", ".js", ".jsx", ".mjs", ".py", ".sh", ".ts", ".tsx", ".zsh"
+}
+SHELL_DISCLOSURE_SUFFIXES = {".bash", ".sh", ".zsh"}
 
 
 @dataclass(frozen=True)
@@ -434,7 +441,7 @@ def validate(root: Path) -> list[Finding]:
         if not disclosure_root.is_dir():
             continue
         for path in disclosure_root.rglob("*"):
-            if not path.is_file() or path.suffix.casefold() not in DISCLOSURE_SUFFIXES:
+            if not path.is_file():
                 continue
             relative = path.relative_to(root)
             if relative.parts[:3] == ("System", "Kit", "tests"):
@@ -445,8 +452,22 @@ def validate(root: Path) -> list[Finding]:
             text = read_text(path)
         except (OSError, UnicodeDecodeError):
             continue
-        if SECRET.search(text):
+        suffix = path.suffix.casefold()
+        if suffix in CODE_DISCLOSURE_SUFFIXES:
+            shell = suffix in SHELL_DISCLOSURE_SUFFIXES
+            python = suffix == ".py"
+            secret_found = contains_code_secret(text, shell=shell, python=python)
+            runtime_state_found = contains_code_runtime_state(text, shell=shell, python=python)
+        elif suffix == ".md":
+            secret_found = contains_document_secret(text)
+            runtime_state_found = contains_document_runtime_state(text)
+        else:
+            secret_found = contains_secret(text)
+            runtime_state_found = contains_runtime_state(text)
+        if secret_found:
             add("ERROR", path, "Kit/public content contains a possible secret")
+        if runtime_state_found:
+            add("ERROR", path, "Kit/public content contains possible connector runtime state")
         if ABSOLUTE_PRIVATE_PATH.search(text):
             add("ERROR", path, "Kit/public content contains an absolute private path")
 
