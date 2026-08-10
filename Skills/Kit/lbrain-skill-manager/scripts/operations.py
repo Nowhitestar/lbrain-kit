@@ -392,7 +392,8 @@ def applied_proposal(proposal: str, preview_hash: str, runtime_count: int) -> st
     return replace_decision(
         applied,
         (
-            f"Approved and applied exact Change Preview `{preview_hash}` on {date.today().isoformat()}. "
+            f"Accepted exact Change Preview `{preview_hash}` after explicit approval. "
+            f"Applied exact Change Preview `{preview_hash}` on {date.today().isoformat()}. "
             f"Validation passed; {runtime_count} runtime target(s) were checked or refreshed."
         ),
     )
@@ -451,6 +452,8 @@ def runtime_plan(
             raise OperationError("runtime target is too broad")
         package = target_root / skill_name
         if package.is_symlink():
+            if runtime == "openclaw":
+                raise OperationError("OpenClaw requires a copied Skill package and rejects symlinks")
             if package.resolve() != skill.resolve():
                 raise OperationError("runtime target contains a divergent Skill symlink")
             plan.append((str(runtime), package, "linked"))
@@ -546,10 +549,34 @@ def skill_apply(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     if current_hash != preview.get("base_hash"):
         raise OperationError("Personal Skill changed after preview; generate and approve a new preview")
 
+    accepted_text = approved_proposal(
+        before_proposal,
+        approved_hash,
+        "Application is pending validation and runtime refresh.",
+    )
+    if status == "pending":
+        atomic_write(path, accepted_text)
+        valid, message = validate_root(root)
+        if not valid:
+            return {
+                "operation": "skill.apply",
+                "operation_id": approved_hash[:20],
+                "mode": "apply",
+                "status": "failed",
+                "target": target,
+                "affected_paths": [path.relative_to(root).as_posix()],
+                "validation": {"ok": False, "message": message},
+                "rollback": {"performed": False, "ok": True},
+            }
+    elif f"Approved exact Change Preview `{approved_hash}`" not in before_proposal:
+        raise OperationError("accepted Proposal does not record approval of this Change Preview")
+    else:
+        accepted_text = before_proposal
+
     try:
         plan = runtime_plan(root, skill, current_hash, payload.get("runtime_targets", []))
     except OperationError as error:
-        failure = approved_proposal(before_proposal, approved_hash, f"Application failed before mutation: {error}.")
+        failure = approved_proposal(accepted_text, approved_hash, f"Application failed before mutation: {error}.")
         atomic_write(path, failure)
         return {
             "operation": "skill.apply",
@@ -581,7 +608,7 @@ def skill_apply(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
             raise OperationError(f"canonical Skill validation failed: {message}")
         refresh_runtimes(skill, plan, Path(runtime_backup.name), runtime_rollback, runtime_affected)
         affected.extend(runtime_affected)
-        after_proposal = applied_proposal(before_proposal, approved_hash, len(plan))
+        after_proposal = applied_proposal(accepted_text, approved_hash, len(plan))
         atomic_write(path, after_proposal)
         valid, message = validate_root(root)
         if not valid:
@@ -612,7 +639,7 @@ def skill_apply(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
                 finally:
                     if os.path.exists(temporary):
                         os.unlink(temporary)
-        failure = approved_proposal(before_proposal, approved_hash, f"Application failed and rolled back: {error}.")
+        failure = approved_proposal(accepted_text, approved_hash, f"Application failed and rolled back: {error}.")
         atomic_write(path, failure)
         return {
             "operation": "skill.apply",
@@ -633,6 +660,7 @@ def main() -> int:
     parser.add_argument("operation", choices=("skill.preview", "skill.apply"))
     parser.add_argument("--root", required=True, type=Path)
     args = parser.parse_args()
+    payload: dict[str, Any] = {}
     try:
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
@@ -647,11 +675,17 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0 if result["status"] != "failed" else 1
     except (OSError, json.JSONDecodeError, OperationError) as error:
+        target = payload.get("proposal_path", "")
+        target = target if isinstance(target, str) else ""
+        identity = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
         print(
             json.dumps(
                 {
                     "operation": args.operation,
+                    "operation_id": digest_text(f"{args.operation}\0{target}\0{identity}")[:20],
+                    "mode": "apply",
                     "status": "failed",
+                    "target": target,
                     "error": str(error),
                     "affected_paths": [],
                     "validation": {"ok": False, "message": "operation rejected"},

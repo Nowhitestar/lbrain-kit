@@ -206,6 +206,7 @@ def main() -> int:
     parser.add_argument("operation", choices=("proposal.create",))
     parser.add_argument("--root", required=True, type=Path)
     args = parser.parse_args()
+    payload: dict[str, Any] = {}
     try:
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
@@ -217,11 +218,17 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0 if result["status"] != "failed" else 1
     except (OSError, json.JSONDecodeError, OperationError) as error:
+        target = payload.get("skill_name", "")
+        target = target if isinstance(target, str) else ""
+        identity = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
         print(
             json.dumps(
                 {
                     "operation": args.operation,
+                    "operation_id": digest(f"{args.operation}\0{target}\0{identity}")[:20],
+                    "mode": "apply",
                     "status": "failed",
+                    "target": target,
                     "error": str(error),
                     "affected_paths": [],
                     "validation": {"ok": False, "message": "operation rejected"},

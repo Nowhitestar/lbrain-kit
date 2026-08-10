@@ -71,6 +71,30 @@ def managed_profile(value: object) -> str:
     return f"{PROFILE_START}\n{profile}\n{PROFILE_END}"
 
 
+def profile_requirements(content: str) -> list[tuple[str, str]]:
+    in_sources = False
+    requirements: list[tuple[str, str]] = []
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped == "### Sources and anchors":
+            in_sources = True
+            continue
+        if in_sources and stripped.startswith("### "):
+            break
+        if not in_sources or not stripped.startswith("- "):
+            continue
+        value = stripped[2:]
+        if ":" not in value:
+            raise OperationError("each Intake Profile source must use '- source: anchor'")
+        source, anchor = (" ".join(part.split()).casefold() for part in value.split(":", 1))
+        if not source or not anchor:
+            raise OperationError("each Intake Profile source must name a source and anchor")
+        requirements.append((source, anchor))
+    if not requirements:
+        raise OperationError("Intake Profile must contain a '### Sources and anchors' contract")
+    return requirements
+
+
 def new_project(payload: dict[str, Any], profile: str) -> str:
     today = date.today().isoformat()
     title = required_text(payload, "title")
@@ -136,6 +160,41 @@ def validate(root: Path) -> tuple[bool, str]:
     return result.returncode == 0, output
 
 
+def project_proposal(
+    relative: PurePosixPath,
+    before_hash: str | None,
+    after_hash: str,
+    identifier: str,
+    status: str,
+    outcome: str,
+) -> tuple[PurePosixPath, str]:
+    today = date.today().isoformat()
+    proposal_id = digest(f"project.configure\0{relative.as_posix()}\0{after_hash}")
+    proposal = PurePosixPath("System/Proposals") / f"project-configure-{identifier}.md"
+    action = "create" if before_hash is None else "update"
+    content = (
+        "---\n"
+        "type: proposal\n"
+        'summary: "Configure one Project and its Context Intake Profile."\n'
+        f"status: {status}\n"
+        "visibility: private\n"
+        f"target: {yaml_string(relative.as_posix())}\n"
+        f"action: {action}\n"
+        "proposal_kind: project_configuration\n"
+        f"proposal_id: {proposal_id}\n"
+        f"created: {today}\nupdated: {today}\n"
+        "---\n"
+        "# Configure Project Context Intake\n\n"
+        "## Rationale\n\nProject outcome or collection scope requires an explicit Proposal.\n\n"
+        "## Evidence\n\n"
+        f"- Prior Project hash: `{before_hash or 'new'}`\n"
+        f"- Previewed Project hash: `{after_hash}`\n\n"
+        "## Expected diff\n\nCreate or update the named Project and its bounded v1 Intake Profile.\n\n"
+        f"## Decision\n\n{outcome}\n"
+    )
+    return proposal, content
+
+
 def project_configure(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     mode = payload.get("mode")
     if mode not in {"preview", "apply"}:
@@ -146,15 +205,39 @@ def project_configure(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     before = path.read_text(encoding="utf-8") if path.is_file() else None
     before_hash = digest(before) if before is not None else None
     profile = managed_profile(payload.get("profile_markdown"))
+    legacy_migration = before is not None and PROFILE_START not in before and "## Context Intake Profile" in before
+    if not legacy_migration:
+        profile_requirements(profile)
     after = replace_profile(before, profile) if before is not None else new_project(payload, profile)
     after_hash = digest(after)
+    identifier = operation_id("project.configure", relative.as_posix(), after)
+    proposal_relative, accepted_proposal = project_proposal(
+        relative,
+        before_hash,
+        after_hash,
+        identifier,
+        "accepted",
+        f"Accepted exact Project configuration `{identifier}` after explicit confirmation. Application pending.",
+    )
+    _, applied_proposal = project_proposal(
+        relative,
+        before_hash,
+        after_hash,
+        identifier,
+        "applied",
+        (
+            f"Accepted exact Project configuration `{identifier}` after explicit confirmation. "
+            f"Applied exact Project configuration `{identifier}` after validation."
+        ),
+    )
+    proposal_path = root.joinpath(*proposal_relative.parts)
     result = {
         "operation": "project.configure",
-        "operation_id": operation_id("project.configure", relative.as_posix(), after),
+        "operation_id": identifier,
         "mode": mode,
         "status": "noop" if before == after else "applied",
         "target": relative.as_posix(),
-        "affected_paths": [] if before == after else [relative.as_posix()],
+        "affected_paths": [] if before == after else [relative.as_posix(), proposal_relative.as_posix()],
         "before_hash": before_hash,
         "after_hash": after_hash,
         "validation": {"ok": True, "message": "not run for preview"},
@@ -166,14 +249,28 @@ def project_configure(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     if "expected_hash" not in payload or payload.get("expected_hash") != before_hash:
         raise OperationError("project changed after preview; generate a new preview")
 
+    if proposal_path.exists() and proposal_path.read_text(encoding="utf-8") not in {
+        accepted_proposal,
+        applied_proposal,
+    }:
+        raise OperationError("Project configuration Proposal conflicts with the approved preview")
+    atomic_write(proposal_path, accepted_proposal)
     atomic_write(path, after)
     valid, message = validate(root)
+    if valid:
+        atomic_write(proposal_path, applied_proposal)
+        valid, message = validate(root)
     if not valid:
         if before is None:
             path.unlink(missing_ok=True)
         else:
             atomic_write(path, before)
+        failed_proposal = accepted_proposal.replace(
+            "Application pending.", "Application failed validation; the accepted Proposal remains retryable."
+        )
+        atomic_write(proposal_path, failed_proposal)
         result["status"] = "failed"
+        result["affected_paths"] = [proposal_relative.as_posix()]
         result["validation"] = {"ok": False, "message": message}
         result["rollback"] = {"performed": True, "ok": True}
         return result
@@ -188,7 +285,10 @@ def one_line(value: object, key: str) -> str:
     return " ".join(value.split()).replace("|", "\\|")
 
 
-def checkpoint_block(payload: dict[str, Any]) -> tuple[str, bool]:
+def checkpoint_block(
+    payload: dict[str, Any],
+    requirements: list[tuple[str, str]],
+) -> tuple[str, bool]:
     run_id = payload.get("run_id")
     if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", run_id):
         raise OperationError("run_id must use 1-80 letters, numbers, dots, underscores, or hyphens")
@@ -210,9 +310,21 @@ def checkpoint_block(payload: dict[str, Any]) -> tuple[str, bool]:
         required = source.get("required", True)
         if not isinstance(required, bool):
             raise OperationError(f"sources[{index}].required must be boolean")
-        if required and status in {"partial", "failed", "stale"}:
+        if required and status in {"partial", "failed", "stale", "no_match"}:
             incomplete = True
         rows.append((name, status, scope, required))
+
+    normalized_rows = {
+        (" ".join(name.split()).casefold(), " ".join(scope.split()).casefold()): required
+        for name, _, scope, required in rows
+    }
+    for requirement in requirements:
+        if requirement not in normalized_rows:
+            raise OperationError(
+                f"checkpoint does not account for configured source and anchor: {requirement[0]}: {requirement[1]}"
+            )
+        if not normalized_rows[requirement]:
+            raise OperationError("configured Intake Profile coverage cannot be marked optional")
 
     def count(key: str) -> int:
         value = payload.get(key, 0)
@@ -288,7 +400,7 @@ def project_checkpoint(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
         raise OperationError("target Project does not exist")
     before = path.read_text(encoding="utf-8")
     before_hash = digest(before)
-    block, complete = checkpoint_block(payload)
+    block, complete = checkpoint_block(payload, profile_requirements(before))
     run_id = str(payload["run_id"])
     after, duplicate = append_checkpoint(before, block, run_id)
     after_hash = digest(after)
@@ -464,6 +576,7 @@ def main() -> int:
     parser.add_argument("--root", required=True, type=Path)
     args = parser.parse_args()
 
+    payload: dict[str, Any] = {}
     try:
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
@@ -480,11 +593,20 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0 if result["status"] != "failed" else 1
     except (OSError, json.JSONDecodeError, OperationError) as error:
+        if args.operation.startswith("project."):
+            target = payload.get("project_path", "")
+        else:
+            target = payload.get("title") or payload.get("origin", "")
+        target = target if isinstance(target, str) else ""
+        identity = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
         print(
             json.dumps(
                 {
                     "operation": args.operation,
+                    "operation_id": operation_id(args.operation, target, identity),
+                    "mode": payload.get("mode", "apply"),
                     "status": "failed",
+                    "target": target,
                     "error": str(error),
                     "affected_paths": [],
                     "validation": {"ok": False, "message": "operation rejected"},

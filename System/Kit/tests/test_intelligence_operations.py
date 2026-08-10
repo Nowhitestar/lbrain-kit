@@ -70,6 +70,14 @@ class IntelligenceOperationTest(unittest.TestCase):
         output = json.loads(result.stdout) if result.stdout else {}
         return result, output
 
+    def assert_failed_operation(self, output: dict[str, object], operation: str, target: str) -> None:
+        self.assertEqual(output["operation"], operation)
+        self.assertEqual(output["status"], "failed")
+        self.assertEqual(output["target"], target)
+        self.assertRegex(str(output["operation_id"]), r"^[0-9a-f]{20}$")
+        self.assertEqual(output["affected_paths"], [])
+        self.assertFalse(dict(output["validation"])["ok"])
+
     def add_enabled_personal_skill(
         self,
         root: Path,
@@ -133,7 +141,15 @@ class IntelligenceOperationTest(unittest.TestCase):
             apply_result, applied = self.run_capture_operation(root, "project.configure", payload)
             self.assertEqual(apply_result.returncode, 0, apply_result.stderr)
             self.assertEqual(applied["status"], "applied")
-            self.assertEqual(applied["affected_paths"], ["Context/Projects/Synthetic-Research.md"])
+            self.assertIn("Context/Projects/Synthetic-Research.md", applied["affected_paths"])
+            proposal_paths = [
+                path for path in applied["affected_paths"] if str(path).startswith("System/Proposals/")
+            ]
+            self.assertEqual(len(proposal_paths), 1)
+            proposal_text = (root / str(proposal_paths[0])).read_text(encoding="utf-8")
+            self.assertIn("status: applied", proposal_text)
+            self.assertIn("Accepted exact Project configuration", proposal_text)
+            self.assertIn("Applied exact Project configuration", proposal_text)
             project_text = project.read_text(encoding="utf-8")
             self.assertEqual(project_text.count("## Context Intake Profile"), 1)
             self.assertIn("<!-- lbrain:intake-profile:v1:start -->", project_text)
@@ -199,7 +215,12 @@ class IntelligenceOperationTest(unittest.TestCase):
                 encoding="utf-8",
             )
             original = project.read_text(encoding="utf-8")
-            profile = "## Context Intake Profile\n\n- Baseline: baseline_pending\n"
+            profile = (
+                "## Context Intake Profile\n\n"
+                "### Sources and anchors\n\n- Web: saved reading list\n\n"
+                "### Schedule\n\n"
+                "- Baseline: baseline_pending\n"
+            )
 
             stale_result, stale = self.run_capture_operation(
                 root,
@@ -212,7 +233,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                 },
             )
             self.assertNotEqual(stale_result.returncode, 0)
-            self.assertEqual(stale["status"], "failed")
+            self.assert_failed_operation(stale, "project.configure", "Context/Projects/Existing.md")
             self.assertIn("changed after preview", stale["error"])
             self.assertEqual(project.read_text(encoding="utf-8"), original)
 
@@ -226,7 +247,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                 },
             )
             self.assertNotEqual(escaped_result.returncode, 0)
-            self.assertEqual(escaped["status"], "failed")
+            self.assert_failed_operation(escaped, "project.configure", "../outside.md")
             self.assertFalse((root.parent / "outside.md").exists())
 
     def test_project_checkpoint_preserves_partial_state_and_advances_only_when_complete(self) -> None:
@@ -241,7 +262,10 @@ class IntelligenceOperationTest(unittest.TestCase):
                 "outcome": "Reach an evidence-backed conclusion.",
                 "profile_markdown": (
                     "## Context Intake Profile\n\n"
-                    "- Sources: web, notes\n"
+                    "### Sources and anchors\n\n"
+                    "- web: saved reading list\n"
+                    "- notes: research folder\n\n"
+                    "### Schedule\n\n"
                     "- Baseline: baseline_pending\n"
                 ),
             }
@@ -265,6 +289,34 @@ class IntelligenceOperationTest(unittest.TestCase):
                 "conflicts": ["notes unavailable"],
                 "next_review": "after connector recovery",
             }
+            missing_result, missing = self.run_capture_operation(
+                root,
+                "project.checkpoint",
+                {**partial_payload, "sources": [partial_payload["sources"][0]]},
+            )
+            self.assertNotEqual(missing_result.returncode, 0)
+            self.assert_failed_operation(missing, "project.checkpoint", "Context/Projects/Research.md")
+            self.assertIn("does not account for", missing["error"])
+
+            no_match_result, no_match = self.run_capture_operation(
+                root,
+                "project.checkpoint",
+                {
+                    **partial_payload,
+                    "sources": [
+                        partial_payload["sources"][0],
+                        {
+                            "name": "notes",
+                            "status": "no_match",
+                            "scope": "research folder",
+                            "required": True,
+                        },
+                    ],
+                },
+            )
+            self.assertEqual(no_match_result.returncode, 0, no_match_result.stderr)
+            self.assertEqual(no_match["status"], "partial")
+
             partial_preview_result, partial_preview = self.run_capture_operation(
                 root, "project.checkpoint", partial_payload
             )
@@ -427,7 +479,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                 },
             )
             self.assertNotEqual(secret_result.returncode, 0)
-            self.assertEqual(secret["status"], "failed")
+            self.assert_failed_operation(secret, "capture.create", "Unsafe Capture")
             self.assertNotIn(sensitive, secret_result.stdout + secret_result.stderr)
             self.assertFalse(list((root / "Inbox").glob("*Unsafe-Capture*.md")))
 
@@ -507,7 +559,7 @@ class IntelligenceOperationTest(unittest.TestCase):
 
             disabled_result, disabled = self.run_weave_operation(root, "proposal.create", base)
             self.assertNotEqual(disabled_result.returncode, 0)
-            self.assertEqual(disabled["status"], "failed")
+            self.assert_failed_operation(disabled, "proposal.create", "disabled-writing")
             self.assertIn("must be enabled", disabled["error"])
 
             core_result, core = self.run_weave_operation(
@@ -644,7 +696,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                 },
             )
             self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(rejected["status"], "failed")
+            self.assert_failed_operation(rejected, "skill.preview", str(proposal["target"]))
             self.assertIn("does not validate", rejected["error"])
             self.assertEqual((skill / "SKILL.md").read_text(encoding="utf-8"), original)
             proposal_text = (root / str(proposal["target"])).read_text(encoding="utf-8")
@@ -698,6 +750,26 @@ class IntelligenceOperationTest(unittest.TestCase):
                 },
             )
             preview = previewed["preview"]
+            escaped_openclaw = base / "openclaw-symlink"
+            escaped_openclaw.mkdir()
+            (escaped_openclaw / skill.name).symlink_to(skill, target_is_directory=True)
+            rejected_result, rejected = self.run_skill_operation(
+                root,
+                "skill.apply",
+                {
+                    "proposal_path": proposal["target"],
+                    "approved_preview_hash": preview["preview_hash"],
+                    "preview": preview,
+                    "runtime_targets": [
+                        {"runtime": "openclaw", "target": str(escaped_openclaw)},
+                    ],
+                },
+            )
+            self.assertNotEqual(rejected_result.returncode, 0)
+            self.assertEqual(rejected["status"], "failed")
+            self.assertIn("OpenClaw requires a copied Skill package", rejected["validation"]["message"])
+            self.assertEqual((skill / "SKILL.md").read_text(encoding="utf-8"), before_skill)
+
             payload: dict[str, object] = {
                 "proposal_path": proposal["target"],
                 "approved_preview_hash": preview["preview_hash"],
@@ -725,6 +797,8 @@ class IntelligenceOperationTest(unittest.TestCase):
             proposal_text = (root / str(proposal["target"])).read_text(encoding="utf-8")
             self.assertIn("status: applied", proposal_text)
             self.assertIn(str(preview["preview_hash"]), proposal_text)
+            self.assertIn("Accepted exact Change Preview", proposal_text)
+            self.assertIn("Applied exact Change Preview", proposal_text)
 
             repeat_result, repeated = self.run_skill_operation(root, "skill.apply", payload)
             self.assertEqual(repeat_result.returncode, 0, repeat_result.stderr)

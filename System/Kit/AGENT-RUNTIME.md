@@ -161,8 +161,8 @@ Kit v0.4.0 exposes six deterministic operations through the Core Skill scripts. 
 
 | Operation | Contract |
 | --- | --- |
-| `project.configure` | Preview or apply one human-readable v1 Context Intake Profile while preserving an existing legacy Profile body. |
-| `project.checkpoint` | Append one idempotent complete or partial Intake run and advance the complete checkpoint only when every required source succeeds. |
+| `project.configure` | Preview or apply one human-readable v1 Context Intake Profile while preserving an existing legacy Profile body and recording the accepted/applied Project Proposal. |
+| `project.checkpoint` | Reconcile the canonical `source: anchor` rows, append one idempotent complete or partial Intake run, and advance the complete checkpoint only when every required row succeeds. |
 | `capture.create` | Save or reuse one private Source/Inbox item with provenance, extraction state, validation, and rollback. |
 | `proposal.create` | Create one evidence-linked Skill Improvement Proposal for an enabled active Personal Skill. |
 | `skill.preview` | Validate and persist one immutable exact diff, semantic version change, base hash, proposed hash, and preview hash. |

@@ -71,7 +71,7 @@ def main() -> int:
             "outcome": "Produce one evidence-backed writing rule.",
             "profile_markdown": (
                 "## Context Intake Profile\n\n"
-                "### Sources and anchors\n\n- Web: synthetic reading list\n- Notes: synthetic notebook\n\n"
+                "### Sources and anchors\n\n- Web: reading list\n- Notes: notebook\n\n"
                 "### Retained domains\n\n- Evidence and writing decisions\n\n"
                 "### Schedule\n\n- Cadence: weekly\n- Baseline: baseline_pending\n"
             ),

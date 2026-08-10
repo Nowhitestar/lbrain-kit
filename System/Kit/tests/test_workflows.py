@@ -66,22 +66,25 @@ class WorkflowSmokeTest(unittest.TestCase):
             shutil.copytree(ROOT, kit, ignore=shutil.ignore_patterns(".git", "__pycache__"))
 
             enabled = kit / "Skills/Enabled.md"
-            enabled.write_text(
-                enabled.read_text(encoding="utf-8")
-                .replace("All seven Core Skills", "All six Core Skills")
-                .replace("- [[Skills/Kit/lbrain-context-pack/SKILL]] — codex, claude, hermes, openclaw\n", ""),
-                encoding="utf-8",
-            )
+            release_paths = [
+                "Skills/Kit/lbrain-capture/scripts/operations.py",
+                "Skills/Kit/lbrain-weave/scripts/operations.py",
+                "Skills/Kit/lbrain-skill-manager/scripts/operations.py",
+                "System/Kit/MIGRATIONS/0.3.0-to-0.4.0.md",
+                "System/Kit/RELEASE-EVIDENCE-0.4.0.md",
+            ]
+            for relative in release_paths:
+                (kit / relative).unlink(missing_ok=True)
 
             git(kit, "init", "-b", "main")
             git(kit, "config", "user.name", "LBrain Test")
             git(kit, "config", "user.email", "lbrain-test@example.invalid")
-            (kit / "System/Kit/VERSION").write_text("0.1.0\n", encoding="utf-8")
+            (kit / "System/Kit/VERSION").write_text("0.3.0\n", encoding="utf-8")
             git(kit, "add", ".")
             for manifest in sorted((kit / "Skills/Personal").glob("*/lbrain.json")):
                 git(kit, "add", "-f", manifest.relative_to(kit).as_posix())
-            git(kit, "commit", "-m", "kit: release 0.1.0")
-            git(kit, "tag", "v0.1.0")
+            git(kit, "commit", "-m", "kit: release 0.3.0")
+            git(kit, "tag", "v0.3.0")
 
             subprocess.run(["git", "init", "--bare", str(private_origin)], check=True, capture_output=True)
             subprocess.run(["git", "clone", str(kit), str(personal)], check=True, capture_output=True)
@@ -90,13 +93,26 @@ class WorkflowSmokeTest(unittest.TestCase):
             git(personal, "remote", "rename", "origin", "kit")
             git(personal, "remote", "set-url", "--push", "kit", "DISABLED")
             git(personal, "branch", "-m", "main", "kit-base")
-            git(personal, "switch", "-c", "main", "v0.1.0")
+            git(personal, "switch", "-c", "main", "v0.3.0")
             git(personal, "remote", "add", "origin", str(private_origin))
 
             with (personal / "HOME.md").open("a", encoding="utf-8") as file:
                 file.write("\nPersonal home marker.\n")
             with (personal / "Context/Identity/Profile.md").open("a", encoding="utf-8") as file:
                 file.write("\nPersonal identity marker.\n")
+            project = personal / "Context/Projects/Upgrade-Project.md"
+            project_content = (
+                "---\ntype: project\nsummary: Synthetic v0.3 Project.\nstatus: active\n"
+                "visibility: private\noutcome: Preserve this outcome.\nsource_of_truth: internal\n"
+                "review_after: 2026-09-01\ncreated: 2026-08-09\nupdated: 2026-08-09\n---\n"
+                "# Upgrade Project\n\n## Context Intake Profile\n\n"
+                "### Sources and anchors\n\n- notes: historical project notebook\n\n"
+                "### Schedule\n\n- Baseline: complete\n"
+            )
+            project.write_text(project_content, encoding="utf-8")
+            runtime_config = personal / ".mcp/lbrain-runtime.json"
+            runtime_config.parent.mkdir(parents=True, exist_ok=True)
+            runtime_config.write_text('{"provider":"filesystem","root":"private-fixture"}\n', encoding="utf-8")
             (personal / "Knowledge/Sources/Upgrade-Source.md").write_text(
                 "---\ntype: source\nsummary: Synthetic upgrade source.\nstatus: active\nvisibility: private\norigin: synthetic\ncapture: reference\nweaving: woven\ncreated: 2026-08-07\nupdated: 2026-08-07\n---\n# Upgrade Source\n",
                 encoding="utf-8",
@@ -186,31 +202,22 @@ class WorkflowSmokeTest(unittest.TestCase):
             git(personal, "add", ".")
             git(personal, "commit", "-m", "capture: personalize upgrade fixture")
 
-            enabled.write_text(
-                enabled.read_text(encoding="utf-8")
-                .replace("All six Core Skills", "All seven Core Skills")
-                .replace(
-                    "\nAdd active Personal Skills below",
-                    "\n- [[Skills/Kit/lbrain-context-pack/SKILL]] — codex, claude, hermes, openclaw\n\nAdd active Personal Skills below",
-                ),
-                encoding="utf-8",
-            )
-            (kit / "System/Kit/VERSION").write_text("0.1.1\n", encoding="utf-8")
+            for relative in release_paths:
+                destination = kit / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / relative, destination)
+            (kit / "System/Kit/VERSION").write_text("0.4.0\n", encoding="utf-8")
             with (kit / "System/Rules/Core/visibility.md").open("a", encoding="utf-8") as file:
-                file.write("\nUpgrade marker: v0.1.1.\n")
-            (kit / "System/Kit/MIGRATIONS/0.1.0-to-0.1.1.md").write_text(
-                "<!-- ownership: kit -->\n# 0.1.0 to 0.1.1\n\nNo user-owned files are changed.\n",
-                encoding="utf-8",
-            )
+                file.write("\nUpgrade marker: v0.4.0.\n")
             git(kit, "add", ".")
-            git(kit, "commit", "-m", "kit: release 0.1.1")
-            git(kit, "tag", "v0.1.1")
+            git(kit, "commit", "-m", "kit: release 0.4.0")
+            git(kit, "tag", "v0.4.0")
 
             git(personal, "fetch", "kit", "--tags")
             git(personal, "switch", "kit-base")
             git(personal, "merge", "--ff-only", "kit/main")
             git(personal, "switch", "main")
-            git(personal, "merge", "--no-ff", "v0.1.1", "-m", "kit: upgrade to v0.1.1")
+            git(personal, "merge", "--no-ff", "v0.4.0", "-m", "kit: upgrade to v0.4.0")
 
             checked = subprocess.run(
                 [sys.executable, str(personal / "System/Kit/check.py"), "--root", str(personal)],
@@ -223,10 +230,17 @@ class WorkflowSmokeTest(unittest.TestCase):
             self.assertIn("Personal identity marker", (personal / "Context/Identity/Profile.md").read_text(encoding="utf-8"))
             self.assertTrue((personal / "Knowledge/Wiki/Concepts/Personal-Upgrade-Note.md").is_file())
             self.assertTrue((personal / "Skills/Personal/personal-upgrade/SKILL.md").is_file())
+            self.assertEqual(project.read_text(encoding="utf-8"), project_content)
+            self.assertEqual(
+                runtime_config.read_text(encoding="utf-8"),
+                '{"provider":"filesystem","root":"private-fixture"}\n',
+            )
             enabled_text = (personal / "Skills/Enabled.md").read_text(encoding="utf-8")
             self.assertIn("[[Skills/Kit/lbrain-context-pack/SKILL]]", enabled_text)
             self.assertIn("[[Skills/Personal/personal-upgrade/SKILL]]", enabled_text)
-            self.assertIn("Upgrade marker: v0.1.1", (personal / "System/Rules/Core/visibility.md").read_text(encoding="utf-8"))
+            self.assertEqual((personal / "System/Kit/VERSION").read_text(encoding="utf-8"), "0.4.0\n")
+            self.assertTrue((personal / "System/Kit/MIGRATIONS/0.3.0-to-0.4.0.md").is_file())
+            self.assertIn("Upgrade marker: v0.4.0", (personal / "System/Rules/Core/visibility.md").read_text(encoding="utf-8"))
             self.assertTrue(definition.is_file())
             self.assertIn(str(pack_remote), (personal / ".gitmodules").read_text(encoding="utf-8"))
             self.assertIn("personal-pack", git(personal, "submodule", "status"))

@@ -57,6 +57,7 @@ Given a user requests Context Intake for work that has no code repository:
 - group independent missing questions into one round;
 - show one exact human-readable Project and Intake Profile preview;
 - use one confirmation and the preview's prior-state hash to apply;
+- record the Project scope decision as accepted and then applied in one durable Proposal;
 - keep exactly one version-bounded Intake Profile after idempotent reruns; and
 - migrate an unmarked Profile only through a content-preserving preview.
 
@@ -75,4 +76,4 @@ A one-line conclusion is insufficient when the source contains the reasoning. A 
 
 ## Coverage report case
 
-Every run reports the inspected scope, candidate count, full-read count, created or updated records, duplicates and noise rejected, unresolved conflicts, changed files, and next completeness review. It previews and records that report through `project.checkpoint`. It may report complete coverage only when every enabled source and required anchor is accounted for; partial or failed runs retain the last complete checkpoint and idempotent retries do not duplicate a run. Raw connector cursors never enter the checkpoint.
+Every run reports the inspected scope, candidate count, full-read count, created or updated records, duplicates and noise rejected, unresolved conflicts, changed files, and next completeness review. It previews and records that report through `project.checkpoint`. It may report complete coverage only when every enabled source and required anchor is accounted for; omitting a canonical `- source: anchor` row fails before write, while partial or failed runs retain the last complete checkpoint and idempotent retries do not duplicate a run. Raw connector cursors never enter the checkpoint.
