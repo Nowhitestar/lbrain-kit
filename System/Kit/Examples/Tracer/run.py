@@ -31,6 +31,25 @@ def operation(script: Path, name: str, root: Path, payload: dict[str, object]) -
     return output
 
 
+def accept_project_preview(root: Path, preview: dict[str, object]) -> None:
+    proposal = preview.get("proposal")
+    if not isinstance(proposal, dict):
+        raise RuntimeError("project.configure returned no Proposal preview")
+    (root / str(proposal["path"])).write_text(str(proposal["accepted_markdown"]), encoding="utf-8")
+
+
+def accept_skill_preview(root: Path, proposal_path: object, preview_hash: object) -> None:
+    path = root / str(proposal_path)
+    content = path.read_text(encoding="utf-8")
+    content = content.replace("status: pending", "status: accepted", 1)
+    content = content.replace(
+        "## Decision\n\nPending user review.",
+        f"## Decision\n\nApproved exact Change Preview `{preview_hash}` after explicit user confirmation.",
+        1,
+    )
+    path.write_text(content, encoding="utf-8")
+
+
 def add_personal_skill(root: Path) -> Path:
     skill = root / "Skills/Personal/synthetic-writing"
     (skill / "tests").mkdir(parents=True)
@@ -77,6 +96,7 @@ def main() -> int:
             ),
         }
         project_preview = operation(capture_operations, "project.configure", root, project_payload)
+        accept_project_preview(root, project_preview)
         project_payload.update(mode="apply", expected_hash=project_preview["before_hash"])
         configured = operation(capture_operations, "project.configure", root, project_payload)
         print(f"PROJECT CONFIGURE status={configured['status']}")
@@ -185,6 +205,7 @@ def main() -> int:
         if not isinstance(preview, dict):
             raise RuntimeError("skill.preview returned no preview")
         print(f"SKILL PREVIEW status={previewed['status']} version={preview['proposed_version']}")
+        accept_skill_preview(root, proposed["target"], preview["preview_hash"])
 
         codex_root = base / "codex"
         openclaw_root = base / "openclaw"

@@ -544,34 +544,13 @@ def skill_apply(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
             "validation": {"ok": True, "message": "approved preview is already applied"},
             "rollback": None,
         }
-    if status not in {"pending", "accepted"}:
-        raise OperationError("Proposal is not eligible for application")
+    if status != "accepted":
+        raise OperationError("skill.apply requires an explicitly accepted Proposal")
     if current_hash != preview.get("base_hash"):
         raise OperationError("Personal Skill changed after preview; generate and approve a new preview")
-
-    accepted_text = approved_proposal(
-        before_proposal,
-        approved_hash,
-        "Application is pending validation and runtime refresh.",
-    )
-    if status == "pending":
-        atomic_write(path, accepted_text)
-        valid, message = validate_root(root)
-        if not valid:
-            return {
-                "operation": "skill.apply",
-                "operation_id": approved_hash[:20],
-                "mode": "apply",
-                "status": "failed",
-                "target": target,
-                "affected_paths": [path.relative_to(root).as_posix()],
-                "validation": {"ok": False, "message": message},
-                "rollback": {"performed": False, "ok": True},
-            }
-    elif f"Approved exact Change Preview `{approved_hash}`" not in before_proposal:
+    if f"Approved exact Change Preview `{approved_hash}`" not in before_proposal:
         raise OperationError("accepted Proposal does not record approval of this Change Preview")
-    else:
-        accepted_text = before_proposal
+    accepted_text = before_proposal
 
     try:
         plan = runtime_plan(root, skill, current_hash, payload.get("runtime_targets", []))

@@ -161,12 +161,12 @@ Kit v0.4.0 exposes six deterministic operations through the Core Skill scripts. 
 
 | Operation | Contract |
 | --- | --- |
-| `project.configure` | Preview or apply one human-readable v1 Context Intake Profile while preserving an existing legacy Profile body and recording the accepted/applied Project Proposal. |
+| `project.configure` | Preview one human-readable v1 Context Intake Profile and matching Proposal, then apply only that already accepted Proposal while preserving an existing legacy Profile body. |
 | `project.checkpoint` | Reconcile the canonical `source: anchor` rows, append one idempotent complete or partial Intake run, and advance the complete checkpoint only when every required row succeeds. |
 | `capture.create` | Save or reuse one private Source/Inbox item with provenance, extraction state, validation, and rollback. |
 | `proposal.create` | Create one evidence-linked Skill Improvement Proposal for an enabled active Personal Skill. |
 | `skill.preview` | Validate and persist one immutable exact diff, semantic version change, base hash, proposed hash, and preview hash. |
-| `skill.apply` | Apply only the approved exact preview, refresh declared runtimes, validate, roll back on failure, and make a replay a no-op. |
+| `skill.apply` | Apply only an already accepted Proposal containing the approved exact preview hash, refresh declared runtimes, validate, roll back on failure, and make a replay a no-op. |
 
 Successful results identify the operation, stable operation ID, status, target, affected paths, validation outcome, and rollback outcome. Rejected inputs fail closed before mutation. Core Skills retain semantic decisions such as what to collect, how to weave knowledge, whether a Skill is relevant, and when the user has approved a preview.
 

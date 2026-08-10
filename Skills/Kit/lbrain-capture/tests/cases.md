@@ -57,7 +57,7 @@ Given a user requests Context Intake for work that has no code repository:
 - group independent missing questions into one round;
 - show one exact human-readable Project and Intake Profile preview;
 - use one confirmation and the preview's prior-state hash to apply;
-- record the Project scope decision as accepted and then applied in one durable Proposal;
+- after the one confirmation, record the previewed Project Proposal as accepted before `project.configure` applies it;
 - keep exactly one version-bounded Intake Profile after idempotent reruns; and
 - migrate an unmarked Profile only through a content-preserving preview.
 

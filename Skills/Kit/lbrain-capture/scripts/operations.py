@@ -167,7 +167,7 @@ def project_proposal(
     identifier: str,
     status: str,
     outcome: str,
-) -> tuple[PurePosixPath, str]:
+) -> tuple[PurePosixPath, str, str]:
     today = date.today().isoformat()
     proposal_id = digest(f"project.configure\0{relative.as_posix()}\0{after_hash}")
     proposal = PurePosixPath("System/Proposals") / f"project-configure-{identifier}.md"
@@ -192,7 +192,7 @@ def project_proposal(
         "## Expected diff\n\nCreate or update the named Project and its bounded v1 Intake Profile.\n\n"
         f"## Decision\n\n{outcome}\n"
     )
-    return proposal, content
+    return proposal, content, proposal_id
 
 
 def project_configure(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -211,7 +211,7 @@ def project_configure(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     after = replace_profile(before, profile) if before is not None else new_project(payload, profile)
     after_hash = digest(after)
     identifier = operation_id("project.configure", relative.as_posix(), after)
-    proposal_relative, accepted_proposal = project_proposal(
+    proposal_relative, accepted_proposal, proposal_id = project_proposal(
         relative,
         before_hash,
         after_hash,
@@ -219,7 +219,7 @@ def project_configure(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
         "accepted",
         f"Accepted exact Project configuration `{identifier}` after explicit confirmation. Application pending.",
     )
-    _, applied_proposal = project_proposal(
+    _, applied_proposal, _ = project_proposal(
         relative,
         before_hash,
         after_hash,
@@ -240,21 +240,51 @@ def project_configure(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
         "affected_paths": [] if before == after else [relative.as_posix(), proposal_relative.as_posix()],
         "before_hash": before_hash,
         "after_hash": after_hash,
+        "proposal": {
+            "path": proposal_relative.as_posix(),
+            "proposal_id": proposal_id,
+            "accepted_markdown": accepted_proposal,
+        },
         "validation": {"ok": True, "message": "not run for preview"},
         "rollback": None,
     }
-    if mode == "preview" or before == after:
+    if mode == "preview":
         return result
 
     if "expected_hash" not in payload or payload.get("expected_hash") != before_hash:
         raise OperationError("project changed after preview; generate a new preview")
 
-    if proposal_path.exists() and proposal_path.read_text(encoding="utf-8") not in {
-        accepted_proposal,
-        applied_proposal,
-    }:
-        raise OperationError("Project configuration Proposal conflicts with the approved preview")
-    atomic_write(proposal_path, accepted_proposal)
+    if not proposal_path.is_file():
+        if before == after:
+            return result
+        raise OperationError("project.configure apply requires the explicitly accepted Proposal")
+    proposal_before = proposal_path.read_text(encoding="utf-8")
+    try:
+        proposal_head = proposal_before.split("---", 2)[1].splitlines()
+    except IndexError as error:
+        raise OperationError("Project configuration Proposal is malformed") from error
+    recorded_id = frontmatter_text(proposal_head, "proposal_id")
+    status = frontmatter_text(proposal_head, "status")
+    target = frontmatter_text(proposal_head, "target")
+    if recorded_id != proposal_id or target != relative.as_posix():
+        raise OperationError("Project configuration Proposal does not match the approved preview")
+    if before == after:
+        if status == "applied":
+            return result
+        if status != "accepted":
+            raise OperationError("Project configuration Proposal must be explicitly accepted")
+        atomic_write(proposal_path, applied_proposal)
+        valid, message = validate(root)
+        if not valid:
+            atomic_write(proposal_path, proposal_before)
+            raise OperationError("Project configuration Proposal could not be finalized")
+        result["status"] = "applied"
+        result["affected_paths"] = [proposal_relative.as_posix()]
+        result["validation"] = {"ok": True, "message": message or "Kit validation passed"}
+        return result
+    if status != "accepted":
+        raise OperationError("project.configure apply requires the explicitly accepted Proposal")
+
     atomic_write(path, after)
     valid, message = validate(root)
     if valid:

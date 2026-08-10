@@ -4,7 +4,7 @@
 
 - “Create a private skill for my weekly review and enable it in Codex.” → create, test, validate, then preview installation.
 - “Update my Personal Skill to 1.2.0.” → change the canonical package and its own version history.
-- “Use this accepted improvement Proposal to update my writing Skill.” → generate and validate one exact Change Preview, then wait for explicit approval before applying it.
+- “Use this accepted improvement Proposal to update my writing Skill.” → generate and validate one exact Change Preview, wait for explicit approval, record that Proposal as accepted, then apply it.
 - “Make these Skills work in Codex and Hermes.” → keep only `name` and `description` in `SKILL.md`, preserve lifecycle metadata in `lbrain.json`, and validate both contracts.
 - “Install the Core Skills for OpenClaw.” → preview an explicit OpenClaw-visible target, then copy packages without overwriting divergent packages; reject escaped symlink mode.
 
@@ -20,3 +20,4 @@
 - The Skill baseline changes after preview → invalidate the preview and require a newly approved one.
 - The user approves a summary but has not seen the exact diff, tests, and version → do not apply the change.
 - Runtime refresh fails after the canonical write begins → restore the Skill package, version, tests, and every already-refreshed runtime; keep the Proposal accepted but not applied.
+- A pending Proposal is passed directly to `skill.apply` → reject it without accepting or applying anything.

@@ -63,18 +63,18 @@ class WorkflowSmokeTest(unittest.TestCase):
             kit = base / "kit-source"
             personal = base / "personal"
             private_origin = base / "private-origin.git"
-            shutil.copytree(ROOT, kit, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+            archive = base / "v0.3.0.tar"
+            archived = subprocess.run(
+                ["git", "-C", str(ROOT), "archive", "--format=tar", "--output", str(archive), "v0.3.0"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(archived.returncode, 0, archived.stdout + archived.stderr)
+            kit.mkdir()
+            shutil.unpack_archive(str(archive), str(kit))
 
             enabled = kit / "Skills/Enabled.md"
-            release_paths = [
-                "Skills/Kit/lbrain-capture/scripts/operations.py",
-                "Skills/Kit/lbrain-weave/scripts/operations.py",
-                "Skills/Kit/lbrain-skill-manager/scripts/operations.py",
-                "System/Kit/MIGRATIONS/0.3.0-to-0.4.0.md",
-                "System/Kit/RELEASE-EVIDENCE-0.4.0.md",
-            ]
-            for relative in release_paths:
-                (kit / relative).unlink(missing_ok=True)
 
             git(kit, "init", "-b", "main")
             git(kit, "config", "user.name", "LBrain Test")
@@ -202,11 +202,9 @@ class WorkflowSmokeTest(unittest.TestCase):
             git(personal, "add", ".")
             git(personal, "commit", "-m", "capture: personalize upgrade fixture")
 
-            for relative in release_paths:
-                destination = kit / relative
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(ROOT / relative, destination)
-            (kit / "System/Kit/VERSION").write_text("0.4.0\n", encoding="utf-8")
+            for relative in ("System/Kit", "Skills/Kit"):
+                shutil.rmtree(kit / relative)
+                shutil.copytree(ROOT / relative, kit / relative, ignore=shutil.ignore_patterns("__pycache__"))
             with (kit / "System/Rules/Core/visibility.md").open("a", encoding="utf-8") as file:
                 file.write("\nUpgrade marker: v0.4.0.\n")
             git(kit, "add", ".")

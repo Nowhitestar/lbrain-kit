@@ -78,6 +78,23 @@ class IntelligenceOperationTest(unittest.TestCase):
         self.assertEqual(output["affected_paths"], [])
         self.assertFalse(dict(output["validation"])["ok"])
 
+    def accept_project_preview(self, root: Path, preview: dict[str, object]) -> None:
+        proposal = dict(preview["proposal"])
+        path = root / str(proposal["path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(proposal["accepted_markdown"]), encoding="utf-8")
+
+    def accept_skill_preview(self, root: Path, proposal_path: object, preview_hash: object) -> None:
+        path = root / str(proposal_path)
+        content = path.read_text(encoding="utf-8")
+        content = content.replace("status: pending", "status: accepted", 1)
+        content = content.replace(
+            "## Decision\n\nPending user review.",
+            f"## Decision\n\nApproved exact Change Preview `{preview_hash}` after explicit user confirmation.",
+            1,
+        )
+        path.write_text(content, encoding="utf-8")
+
     def add_enabled_personal_skill(
         self,
         root: Path,
@@ -138,6 +155,13 @@ class IntelligenceOperationTest(unittest.TestCase):
 
             payload["mode"] = "apply"
             payload["expected_hash"] = preview["before_hash"]
+            unapproved_result, unapproved = self.run_capture_operation(
+                root, "project.configure", payload
+            )
+            self.assertNotEqual(unapproved_result.returncode, 0)
+            self.assertIn("explicitly accepted Proposal", unapproved["error"])
+            self.assertFalse(project.exists())
+            self.accept_project_preview(root, preview)
             apply_result, applied = self.run_capture_operation(root, "project.configure", payload)
             self.assertEqual(apply_result.returncode, 0, apply_result.stderr)
             self.assertEqual(applied["status"], "applied")
@@ -162,6 +186,48 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(repeated["status"], "noop")
             self.assertEqual(project.read_text(encoding="utf-8"), project_text)
 
+    def test_project_configure_retries_an_accepted_proposal_after_validation_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.copy_repo(Path(temporary))
+            project = root / "Context/Projects/Retryable.md"
+            payload: dict[str, object] = {
+                "mode": "preview",
+                "project_path": "Context/Projects/Retryable.md",
+                "title": "Retryable",
+                "summary": "Exercise retry after validation failure.",
+                "outcome": "Apply one validated Intake Profile.",
+                "profile_markdown": (
+                    "## Context Intake Profile\n\n"
+                    "### Sources and anchors\n\n- notes: research notebook\n\n"
+                    "### Schedule\n\n- Baseline: baseline_pending\n"
+                ),
+            }
+            _, preview = self.run_capture_operation(root, "project.configure", payload)
+            self.accept_project_preview(root, preview)
+            payload.update(mode="apply", expected_hash=preview["before_hash"])
+            invalid = root / "Inbox/Invalid-During-Apply.md"
+            invalid.write_text(
+                "---\ntype: note\nsummary: invalid fixture\nstatus: active\nvisibility: private\n"
+                "created: 2026-08-10\nupdated: 2026-08-10\n---\n# Invalid\n\n[[Missing-Retry-Fixture]]\n",
+                encoding="utf-8",
+            )
+
+            failed_result, failed = self.run_capture_operation(root, "project.configure", payload)
+
+            self.assertNotEqual(failed_result.returncode, 0)
+            self.assertEqual(failed["status"], "failed")
+            self.assertFalse(project.exists())
+            proposal_path = root / str(dict(preview["proposal"])["path"])
+            self.assertIn("status: accepted", proposal_path.read_text(encoding="utf-8"))
+            self.assertIn("remains retryable", proposal_path.read_text(encoding="utf-8"))
+
+            invalid.unlink()
+            retry_result, retried = self.run_capture_operation(root, "project.configure", payload)
+            self.assertEqual(retry_result.returncode, 0, retry_result.stderr)
+            self.assertEqual(retried["status"], "applied")
+            self.assertTrue(project.is_file())
+            self.assertIn("status: applied", proposal_path.read_text(encoding="utf-8"))
+
     def test_project_configure_migrates_legacy_profile_without_changing_its_body(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = self.copy_repo(Path(temporary))
@@ -185,11 +251,16 @@ class IntelligenceOperationTest(unittest.TestCase):
             )
             before_hash = hashlib.sha256(project.read_bytes()).hexdigest()
             payload: dict[str, object] = {
-                "mode": "apply",
+                "mode": "preview",
                 "project_path": "Context/Projects/Legacy.md",
                 "profile_markdown": legacy_profile,
-                "expected_hash": before_hash,
             }
+
+            preview_result, preview = self.run_capture_operation(root, "project.configure", payload)
+            self.assertEqual(preview_result.returncode, 0, preview_result.stderr)
+            self.assertEqual(preview["before_hash"], before_hash)
+            self.accept_project_preview(root, preview)
+            payload.update(mode="apply", expected_hash=before_hash)
 
             result, output = self.run_capture_operation(root, "project.configure", payload)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -270,6 +341,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                 ),
             }
             _, preview = self.run_capture_operation(root, "project.configure", configure)
+            self.accept_project_preview(root, preview)
             configure.update(mode="apply", expected_hash=preview["before_hash"])
             configured_result, configured = self.run_capture_operation(root, "project.configure", configure)
             self.assertEqual(configured_result.returncode, 0, configured_result.stderr)
@@ -750,6 +822,19 @@ class IntelligenceOperationTest(unittest.TestCase):
                 },
             )
             preview = previewed["preview"]
+            pending_result, pending = self.run_skill_operation(
+                root,
+                "skill.apply",
+                {
+                    "proposal_path": proposal["target"],
+                    "approved_preview_hash": preview["preview_hash"],
+                    "preview": preview,
+                    "runtime_targets": [],
+                },
+            )
+            self.assertNotEqual(pending_result.returncode, 0)
+            self.assertIn("explicitly accepted Proposal", pending["error"])
+            self.accept_skill_preview(root, proposal["target"], preview["preview_hash"])
             escaped_openclaw = base / "openclaw-symlink"
             escaped_openclaw.mkdir()
             (escaped_openclaw / skill.name).symlink_to(skill, target_is_directory=True)
@@ -851,6 +936,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                 },
             )
             preview = previewed["preview"]
+            self.accept_skill_preview(root, proposal["target"], preview["preview_hash"])
             blocked_runtime_root = base / "not-a-directory"
             blocked_runtime_root.write_text("block runtime installation", encoding="utf-8")
 
@@ -920,6 +1006,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                 },
             )
             preview = previewed["preview"]
+            self.accept_skill_preview(root, proposal["target"], preview["preview_hash"])
             with (skill / "SKILL.md").open("a", encoding="utf-8") as file:
                 file.write("\nConcurrent canonical edit.\n")
 
@@ -937,7 +1024,7 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(stale["status"], "failed")
             self.assertIn("changed after preview", stale["error"])
             proposal_text = (root / str(proposal["target"])).read_text(encoding="utf-8")
-            self.assertIn("status: pending", proposal_text)
+            self.assertIn("status: accepted", proposal_text)
 
 
 if __name__ == "__main__":
