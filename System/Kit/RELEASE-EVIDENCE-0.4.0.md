@@ -1,5 +1,5 @@
 <!-- ownership: kit -->
-# LBrain Kit 0.4.0 Release Candidate Evidence
+# LBrain Kit 0.4.0 Release Evidence
 
 Date: 2026-08-10
 
@@ -26,4 +26,4 @@ Date: 2026-08-10
 
 ## Release boundary
 
-This is a local Release Candidate. No remote push, tag, GitHub Release, Pack publication, or private-content publication is authorized by this evidence.
+This evidence covers only the public, Kit-owned contents of v0.4.0. Publication requires separate explicit authorization. It does not authorize Pack publication or private-content publication.
