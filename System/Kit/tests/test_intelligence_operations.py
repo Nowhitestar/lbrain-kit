@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 CAPTURE_OPERATIONS = ROOT / "Skills/Kit/lbrain-capture/scripts/operations.py"
+WEAVE_OPERATIONS = ROOT / "Skills/Kit/lbrain-weave/scripts/operations.py"
 
 
 class IntelligenceOperationTest(unittest.TestCase):
@@ -35,6 +36,50 @@ class IntelligenceOperationTest(unittest.TestCase):
         )
         output = json.loads(result.stdout) if result.stdout else {}
         return result, output
+
+    def run_weave_operation(
+        self,
+        root: Path,
+        operation: str,
+        payload: dict[str, object],
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        result = subprocess.run(
+            [sys.executable, str(WEAVE_OPERATIONS), operation, "--root", str(root)],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        output = json.loads(result.stdout) if result.stdout else {}
+        return result, output
+
+    def add_enabled_personal_skill(
+        self,
+        root: Path,
+        name: str = "synthetic-writing",
+        *,
+        enabled: bool = True,
+    ) -> Path:
+        skill = root / f"Skills/Personal/{name}"
+        (skill / "tests").mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Improves synthetic writing.\n---\n"
+            "# Synthetic Writing\n\nUse concrete verbs.\n",
+            encoding="utf-8",
+        )
+        (skill / "lbrain.json").write_text(
+            '{"schema":"lbrain.skill.v1","version":"1.0.0","status":"active",'
+            '"visibility":"private","created":"2026-08-10","updated":"2026-08-10"}\n',
+            encoding="utf-8",
+        )
+        (skill / "tests/cases.md").write_text(
+            "# Cases\n\n- Draft with concrete verbs.\n",
+            encoding="utf-8",
+        )
+        if enabled:
+            with (root / "Skills/Enabled.md").open("a", encoding="utf-8") as file:
+                file.write(f"\n- [[Skills/Personal/{name}/SKILL]] — codex\n")
+        return skill
 
     def test_project_configure_previews_applies_and_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -332,6 +377,102 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(secret["status"], "failed")
             self.assertNotIn(sensitive, secret_result.stdout + secret_result.stderr)
             self.assertFalse(list((root / "Inbox").glob("*Unsafe-Capture*.md")))
+
+    def test_proposal_create_targets_enabled_personal_skill_and_deduplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.copy_repo(Path(temporary))
+            self.add_enabled_personal_skill(root)
+            evidence = root / "Knowledge/Sources/Synthetic-Writing-Evidence.md"
+            evidence.write_text(
+                "---\ntype: source\nsummary: writing evidence\nstatus: active\nvisibility: private\n"
+                "origin: synthetic://writing-evidence\ncapture: full\nweaving: woven\n"
+                "created: 2026-08-10\nupdated: 2026-08-10\n---\n"
+                "# Writing Evidence\n\nSpecific openings outperform abstract ones.\n",
+                encoding="utf-8",
+            )
+            wiki = root / "Knowledge/Wiki/Concepts/Synthetic-Writing.md"
+            wiki.write_text(
+                "---\ntype: knowledge\nkind: concept\nsummary: synthetic writing concept\n"
+                "status: active\nvisibility: private\nsources:\n"
+                '  - "[[Knowledge/Sources/Synthetic-Writing-Evidence]]"\n'
+                "created: 2026-08-10\nupdated: 2026-08-10\n---\n"
+                "# Synthetic Writing\n\nUse a specific opening.\n",
+                encoding="utf-8",
+            )
+            payload: dict[str, object] = {
+                "title": "Improve synthetic writing openings",
+                "summary": "Make openings specific and testable.",
+                "skill_name": "synthetic-writing",
+                "evidence": [
+                    "Knowledge/Sources/Synthetic-Writing-Evidence.md",
+                    "Knowledge/Wiki/Concepts/Synthetic-Writing.md",
+                ],
+                "rationale": "The woven evidence adds a concrete decision rule.",
+                "behavior_delta": "Require a specific claim in the opening before drafting the body.",
+                "expected_diff": "Update instructions and the opening behavior case.",
+                "test_changes": ["Add a case rejecting an abstract opening."],
+            }
+
+            result, created = self.run_weave_operation(root, "proposal.create", payload)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(created["status"], "applied")
+            proposal = root / str(created["target"])
+            proposal_text = proposal.read_text(encoding="utf-8")
+            self.assertIn("status: pending", proposal_text)
+            self.assertIn("Skills/Personal/synthetic-writing/SKILL.md", proposal_text)
+            self.assertIn("## Behavior delta", proposal_text)
+            self.assertIn("## Test changes", proposal_text)
+            self.assertIn("Synthetic-Writing-Evidence", proposal_text)
+
+            repeat_result, repeated = self.run_weave_operation(root, "proposal.create", payload)
+            self.assertEqual(repeat_result.returncode, 0, repeat_result.stderr)
+            self.assertEqual(repeated["status"], "noop")
+            self.assertEqual(repeated["target"], created["target"])
+            self.assertEqual(len(list((root / "System/Proposals").glob("*synthetic-writing-openings*.md"))), 1)
+
+    def test_proposal_create_rejects_ineligible_or_untestable_skill_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.copy_repo(Path(temporary))
+            self.add_enabled_personal_skill(root, "disabled-writing", enabled=False)
+            evidence = root / "Knowledge/Sources/Proposal-Evidence.md"
+            evidence.write_text(
+                "---\ntype: source\nsummary: proposal evidence\nstatus: active\nvisibility: private\n"
+                "origin: synthetic://proposal-evidence\ncapture: full\nweaving: pending\n"
+                "created: 2026-08-10\nupdated: 2026-08-10\n---\n# Evidence\n",
+                encoding="utf-8",
+            )
+            base: dict[str, object] = {
+                "title": "Do not create this proposal",
+                "summary": "Rejected fixture.",
+                "skill_name": "disabled-writing",
+                "evidence": ["Knowledge/Sources/Proposal-Evidence.md"],
+                "rationale": "The evidence appears related.",
+                "behavior_delta": "Change an instruction.",
+                "expected_diff": "Update the Skill.",
+                "test_changes": ["Add a case."],
+            }
+
+            disabled_result, disabled = self.run_weave_operation(root, "proposal.create", base)
+            self.assertNotEqual(disabled_result.returncode, 0)
+            self.assertEqual(disabled["status"], "failed")
+            self.assertIn("must be enabled", disabled["error"])
+
+            core_result, core = self.run_weave_operation(
+                root, "proposal.create", {**base, "skill_name": "lbrain-weave"}
+            )
+            self.assertNotEqual(core_result.returncode, 0)
+            self.assertEqual(core["status"], "failed")
+            self.assertIn("Personal Skill", core["error"])
+
+            self.add_enabled_personal_skill(root, "enabled-writing")
+            untestable_result, untestable = self.run_weave_operation(
+                root,
+                "proposal.create",
+                {**base, "skill_name": "enabled-writing", "test_changes": []},
+            )
+            self.assertNotEqual(untestable_result.returncode, 0)
+            self.assertEqual(untestable["status"], "failed")
+            self.assertFalse(list((root / "System/Proposals").glob("*do-not-create*.md")))
 
 
 if __name__ == "__main__":

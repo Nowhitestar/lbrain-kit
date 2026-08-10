@@ -15,3 +15,13 @@ Turn evidence into reusable knowledge without erasing uncertainty.
 7. Validate and commit authorized synthesis locally with `weave:`. Do not push.
 
 Do not rewrite raw Source captures to make the synthesis appear cleaner.
+
+## Skill Improvement discovery
+
+After the Wiki synthesis is complete, check whether the new knowledge materially changes the behavior of an enabled Personal Skill.
+
+1. Inspect only enabled, active Personal Skills. Never scan or target Core, disabled, deprecated, or unrelated Skills.
+2. Require all of the following before proposing a change: a specific target Skill, Source or Wiki evidence, a concrete behavior delta, an expected diff, and at least one behavior-case change. Topic similarity alone is insufficient.
+3. Use `scripts/operations.py` operation `proposal.create` to create or deduplicate the pending Skill Improvement Proposal. Never ask the user to run the script or a CLI.
+4. If no existing Skill qualifies, do nothing. New Personal Skill creation remains an active user request handled by `lbrain-skill-manager`.
+5. Never edit or version the target Skill during Weave. Skill Manager prepares the exact Change Preview only after the Proposal exists.

@@ -13,3 +13,12 @@
 ## Integrity case
 
 - A desired conclusion lacks a Source → label it as inference or leave it unresolved; do not invent evidence.
+
+## Skill Improvement case
+
+- Woven evidence adds a concrete, testable opening rule to an enabled Personal writing Skill → create one deduplicated Skill Improvement Proposal with target, evidence, behavior delta, expected diff, and test-case change.
+- Woven evidence is merely about writing but changes no behavior → create no Proposal.
+- The only related target is a Core, disabled, or deprecated Skill → create no Proposal.
+- No related Personal Skill exists → create no passive new-Skill suggestion; active creation belongs to `lbrain-skill-manager`.
+- Reweaving equivalent evidence → return the existing pending or applied Proposal rather than adding another one.
+- Proposal creation never edits, versions, installs, or publishes the target Skill.
