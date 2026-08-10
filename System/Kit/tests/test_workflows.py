@@ -34,7 +34,15 @@ class WorkflowSmokeTest(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("TRACE PASS", result.stdout)
+        self.assertIn("PROJECT CONFIGURE status=applied", result.stdout)
+        self.assertIn("CHECKPOINT status=partial advanced=0", result.stdout)
+        self.assertIn("CHECKPOINT status=applied advanced=1", result.stdout)
+        self.assertIn("CAPTURE status=applied", result.stdout)
+        self.assertIn("WEAVE proposal=applied", result.stdout)
+        self.assertIn("SKILL PREVIEW status=applied version=1.1.0", result.stdout)
+        self.assertIn("SKILL APPLY status=applied", result.stdout)
+        self.assertIn("RERUN capture=noop proposal=noop apply=noop", result.stdout)
+        self.assertIn("PERSONAL INTELLIGENCE TRACE PASS", result.stdout)
 
     def test_context_pack_intake_to_consumer_tracer(self) -> None:
         result = subprocess.run(
