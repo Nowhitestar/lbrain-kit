@@ -24,7 +24,9 @@ Only the user may make a skill public or publish it. Public and published are se
 2. Prepare the complete proposed `SKILL.md`, behavior-case changes, and only the resources those instructions require. Classify the behavioral change as patch, minor, or major.
 3. Use `scripts/operations.py` operation `skill.preview`. It validates the proposed package in isolation, recommends the next semantic version, writes the exact diff and preview hash to the Proposal, and does not modify the canonical Skill. Never ask the user to run the script or a CLI.
 4. Show the exact Change Preview, including tests and version rationale. Ask for one explicit approval of that immutable preview. Any preview or Skill-baseline change invalidates the approval.
-5. After approval, use operation `skill.apply`; never reproduce the diff manually or edit a runtime copy as the source of truth.
+5. After approval, use operation `skill.apply` with the exact returned preview and approved preview hash; never reproduce the diff manually or edit a runtime copy as the source of truth.
+6. Let the operation verify the Proposal, preview fingerprint, canonical Skill baseline, validation, and explicit runtime targets. It applies the canonical package and runtime refresh as one rollback-capable action.
+7. A failure restores the canonical Skill, version, tests, and any changed runtime target. Record the Proposal as accepted but not applied with safe failure evidence. A stale baseline invalidates approval before acceptance and requires a new preview.
 
 Patch fixes or clarifies compatible behavior, minor adds compatible behavior or triggers, and major breaks an existing behavior contract. Rejected and no-op changes do not bump the version.
 

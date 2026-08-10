@@ -19,3 +19,4 @@
 - A Change Preview adds invalid Skill frontmatter or omits behavior-case changes → reject it before modifying the canonical Skill.
 - The Skill baseline changes after preview → invalidate the preview and require a newly approved one.
 - The user approves a summary but has not seen the exact diff, tests, and version → do not apply the change.
+- Runtime refresh fails after the canonical write begins → restore the Skill package, version, tests, and every already-refreshed runtime; keep the Proposal accepted but not applied.

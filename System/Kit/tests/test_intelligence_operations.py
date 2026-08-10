@@ -554,6 +554,18 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(repeated["status"], "noop")
             self.assertEqual(repeated["preview"]["preview_hash"], preview["preview_hash"])
 
+            patch_result, patch_preview = self.run_skill_operation(
+                root, "skill.preview", {**payload, "change_level": "patch"}
+            )
+            self.assertEqual(patch_result.returncode, 0, patch_result.stderr)
+            self.assertEqual(patch_preview["preview"]["proposed_version"], "1.0.1")
+
+            major_result, major_preview = self.run_skill_operation(
+                root, "skill.preview", {**payload, "change_level": "major"}
+            )
+            self.assertEqual(major_result.returncode, 0, major_result.stderr)
+            self.assertEqual(major_preview["preview"]["proposed_version"], "2.0.0")
+
     def test_skill_preview_rejects_an_invalid_proposed_package(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = self.copy_repo(Path(temporary))
@@ -601,6 +613,221 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual((skill / "SKILL.md").read_text(encoding="utf-8"), original)
             proposal_text = (root / str(proposal["target"])).read_text(encoding="utf-8")
             self.assertNotIn("## Change Preview", proposal_text)
+
+    def test_skill_apply_uses_exact_approval_and_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = self.copy_repo(base)
+            skill = self.add_enabled_personal_skill(root)
+            source = root / "Knowledge/Sources/Apply-Evidence.md"
+            source.write_text(
+                "---\ntype: source\nsummary: apply evidence\nstatus: active\nvisibility: private\n"
+                "origin: synthetic://apply-evidence\ncapture: full\nweaving: pending\n"
+                "created: 2026-08-10\nupdated: 2026-08-10\n---\n# Apply Evidence\n",
+                encoding="utf-8",
+            )
+            _, proposal = self.run_weave_operation(
+                root,
+                "proposal.create",
+                {
+                    "title": "Apply writing improvement",
+                    "summary": "Apply a concrete-opening rule.",
+                    "skill_name": "synthetic-writing",
+                    "evidence": ["Knowledge/Sources/Apply-Evidence.md"],
+                    "rationale": "The rule is evidence-backed.",
+                    "behavior_delta": "Require a concrete opening claim.",
+                    "expected_diff": "Update instructions and cases.",
+                    "test_changes": ["Add a concrete-opening case."],
+                },
+            )
+            before_skill = (skill / "SKILL.md").read_text(encoding="utf-8")
+            before_cases = (skill / "tests/cases.md").read_text(encoding="utf-8")
+            codex_root = base / "codex"
+            openclaw_root = base / "openclaw"
+            shutil.copytree(skill, openclaw_root / skill.name)
+            _, previewed = self.run_skill_operation(
+                root,
+                "skill.preview",
+                {
+                    "proposal_path": proposal["target"],
+                    "change_level": "minor",
+                    "rationale": "Adds compatible opening behavior.",
+                    "changes": {
+                        "SKILL.md": before_skill.replace(
+                            "Use concrete verbs.",
+                            "Use concrete verbs. Require a concrete opening claim.",
+                        ),
+                        "tests/cases.md": before_cases + "- Require a concrete opening claim.\n",
+                    },
+                },
+            )
+            preview = previewed["preview"]
+            payload: dict[str, object] = {
+                "proposal_path": proposal["target"],
+                "approved_preview_hash": preview["preview_hash"],
+                "preview": preview,
+                "runtime_targets": [
+                    {"runtime": "codex", "target": str(codex_root)},
+                    {"runtime": "openclaw", "target": str(openclaw_root)},
+                ],
+            }
+
+            result, applied = self.run_skill_operation(root, "skill.apply", payload)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(applied["status"], "applied")
+            self.assertIn("Require a concrete opening claim", (skill / "SKILL.md").read_text(encoding="utf-8"))
+            self.assertIn("Require a concrete opening claim", (skill / "tests/cases.md").read_text(encoding="utf-8"))
+            manifest = json.loads((skill / "lbrain.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["version"], "1.1.0")
+            self.assertTrue((codex_root / skill.name).is_symlink())
+            self.assertEqual((codex_root / skill.name).resolve(), skill.resolve())
+            self.assertFalse((openclaw_root / skill.name).is_symlink())
+            self.assertIn(
+                "Require a concrete opening claim",
+                (openclaw_root / skill.name / "SKILL.md").read_text(encoding="utf-8"),
+            )
+            proposal_text = (root / str(proposal["target"])).read_text(encoding="utf-8")
+            self.assertIn("status: applied", proposal_text)
+            self.assertIn(str(preview["preview_hash"]), proposal_text)
+
+            repeat_result, repeated = self.run_skill_operation(root, "skill.apply", payload)
+            self.assertEqual(repeat_result.returncode, 0, repeat_result.stderr)
+            self.assertEqual(repeated["status"], "noop")
+
+    def test_skill_apply_rolls_back_and_records_accepted_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = self.copy_repo(base)
+            skill = self.add_enabled_personal_skill(root)
+            source = root / "Knowledge/Sources/Rollback-Evidence.md"
+            source.write_text(
+                "---\ntype: source\nsummary: rollback evidence\nstatus: active\nvisibility: private\n"
+                "origin: synthetic://rollback-evidence\ncapture: full\nweaving: pending\n"
+                "created: 2026-08-10\nupdated: 2026-08-10\n---\n# Rollback Evidence\n",
+                encoding="utf-8",
+            )
+            _, proposal = self.run_weave_operation(
+                root,
+                "proposal.create",
+                {
+                    "title": "Rollback writing improvement",
+                    "summary": "Exercise atomic rollback.",
+                    "skill_name": "synthetic-writing",
+                    "evidence": ["Knowledge/Sources/Rollback-Evidence.md"],
+                    "rationale": "Runtime failure must not split state.",
+                    "behavior_delta": "Add a rollback-tested instruction.",
+                    "expected_diff": "Update instructions and cases.",
+                    "test_changes": ["Add a rollback behavior case."],
+                },
+            )
+            before_skill = (skill / "SKILL.md").read_text(encoding="utf-8")
+            before_cases = (skill / "tests/cases.md").read_text(encoding="utf-8")
+            before_manifest = (skill / "lbrain.json").read_text(encoding="utf-8")
+            openclaw_root = base / "openclaw"
+            runtime_skill = openclaw_root / skill.name
+            shutil.copytree(skill, runtime_skill)
+            before_runtime = (runtime_skill / "SKILL.md").read_text(encoding="utf-8")
+            _, previewed = self.run_skill_operation(
+                root,
+                "skill.preview",
+                {
+                    "proposal_path": proposal["target"],
+                    "change_level": "patch",
+                    "rationale": "Compatible instruction fix.",
+                    "changes": {
+                        "SKILL.md": before_skill + "\nRollback-tested instruction.\n",
+                        "tests/cases.md": before_cases + "- Roll back a failed runtime refresh.\n",
+                    },
+                },
+            )
+            preview = previewed["preview"]
+            blocked_runtime_root = base / "not-a-directory"
+            blocked_runtime_root.write_text("block runtime installation", encoding="utf-8")
+
+            result, failed = self.run_skill_operation(
+                root,
+                "skill.apply",
+                {
+                    "proposal_path": proposal["target"],
+                    "approved_preview_hash": preview["preview_hash"],
+                    "preview": preview,
+                    "runtime_targets": [
+                        {"runtime": "openclaw", "target": str(openclaw_root)},
+                        {"runtime": "openclaw", "target": str(blocked_runtime_root)}
+                    ],
+                },
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed["rollback"], {"performed": True, "ok": True})
+            self.assertEqual((skill / "SKILL.md").read_text(encoding="utf-8"), before_skill)
+            self.assertEqual((skill / "tests/cases.md").read_text(encoding="utf-8"), before_cases)
+            self.assertEqual((skill / "lbrain.json").read_text(encoding="utf-8"), before_manifest)
+            self.assertEqual((runtime_skill / "SKILL.md").read_text(encoding="utf-8"), before_runtime)
+            proposal_text = (root / str(proposal["target"])).read_text(encoding="utf-8")
+            self.assertIn("status: accepted", proposal_text)
+            self.assertNotIn("status: applied", proposal_text)
+            self.assertIn("failed and rolled back", proposal_text)
+
+    def test_skill_apply_invalidates_stale_preview_before_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.copy_repo(Path(temporary))
+            skill = self.add_enabled_personal_skill(root)
+            source = root / "Knowledge/Sources/Stale-Evidence.md"
+            source.write_text(
+                "---\ntype: source\nsummary: stale evidence\nstatus: active\nvisibility: private\n"
+                "origin: synthetic://stale-evidence\ncapture: full\nweaving: pending\n"
+                "created: 2026-08-10\nupdated: 2026-08-10\n---\n# Stale Evidence\n",
+                encoding="utf-8",
+            )
+            _, proposal = self.run_weave_operation(
+                root,
+                "proposal.create",
+                {
+                    "title": "Stale writing improvement",
+                    "summary": "Reject stale approval.",
+                    "skill_name": "synthetic-writing",
+                    "evidence": ["Knowledge/Sources/Stale-Evidence.md"],
+                    "rationale": "Baseline changes invalidate approval.",
+                    "behavior_delta": "Add a stale-tested instruction.",
+                    "expected_diff": "Update instructions and cases.",
+                    "test_changes": ["Add a stale-preview case."],
+                },
+            )
+            before_skill = (skill / "SKILL.md").read_text(encoding="utf-8")
+            before_cases = (skill / "tests/cases.md").read_text(encoding="utf-8")
+            _, previewed = self.run_skill_operation(
+                root,
+                "skill.preview",
+                {
+                    "proposal_path": proposal["target"],
+                    "change_level": "patch",
+                    "rationale": "Compatible instruction fix.",
+                    "changes": {
+                        "SKILL.md": before_skill + "\nStale-tested instruction.\n",
+                        "tests/cases.md": before_cases + "- Reject stale preview.\n",
+                    },
+                },
+            )
+            preview = previewed["preview"]
+            with (skill / "SKILL.md").open("a", encoding="utf-8") as file:
+                file.write("\nConcurrent canonical edit.\n")
+
+            result, stale = self.run_skill_operation(
+                root,
+                "skill.apply",
+                {
+                    "proposal_path": proposal["target"],
+                    "approved_preview_hash": preview["preview_hash"],
+                    "preview": preview,
+                    "runtime_targets": [],
+                },
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(stale["status"], "failed")
+            self.assertIn("changed after preview", stale["error"])
+            proposal_text = (root / str(proposal["target"])).read_text(encoding="utf-8")
+            self.assertIn("status: pending", proposal_text)
 
 
 if __name__ == "__main__":
