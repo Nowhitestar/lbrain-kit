@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -370,6 +371,22 @@ def nested_string_contents(
             return contents, False
         pending = next_pending
     return contents, True
+
+
+def python_docstrings(text: str) -> set[str]:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set()
+    return {
+        node.body[0].value.value
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+        and isinstance(node.body[0].value.value, str)
+    }
 
 
 def without_line_comments(
@@ -789,6 +806,13 @@ def assignments(
             continue
         if matched_suffix is None:
             continue
+        if (
+            match.group("name") is not None
+            and text[following:following + 1] in ",)]}"
+            and previous >= 0
+            and text[previous] == ":"
+        ):
+            continue
         value = assignment_value(text, match.end(), shell, python)
         if value is not None:
             add(f"{normalized}({value})" if sensitive_call(normalized, suffixes) else value)
@@ -935,7 +959,9 @@ def has_suspicious_literal(value: str, suffixes: set[str]) -> bool:
 
 
 def has_explicit_literal(value: str) -> bool:
-    return bool(string_contents(value)) or re.search(r"(?<![A-Za-z0-9_])\d{8,}(?![A-Za-z0-9_])", value) is not None
+    return bool(string_contents(value)) or re.search(
+        r"(?<![A-Za-z0-9_])\d{8,}(?![A-Za-z0-9_])", value
+    ) is not None
 
 
 def brace_scope(value: str, end: int) -> tuple[int, ...]:
@@ -983,8 +1009,13 @@ def literal_bindings(value: str, suffixes: set[str]) -> dict[str, list[int]]:
         rf"\b(?P<name>{IDENTIFIER})(?:\s*:\s*[^=;\r\n]+)?\s*=(?!=|>)\s*(?P<rhs>[^;\r\n]+)",
         cleaned,
     ):
-        if has_explicit_literal(match.group("rhs")) and not code_reference(
-            match.group("rhs"), suffixes, nested=True
+        if match.group("name") in {"else", "except", "finally", "if", "return", "try", "while"}:
+            continue
+        rhs = match.group("rhs").strip()
+        if rhs.endswith("):"):
+            rhs = rhs[:-2].rstrip()
+        if has_explicit_literal(rhs) and not code_reference(
+            rhs, suffixes, nested=True
         ):
             bindings.setdefault(match.group("name"), []).append(match.start("name"))
     return bindings
@@ -997,8 +1028,18 @@ def references_binding(
     source: str,
 ) -> bool:
     scope = brace_scope(source, position)
+
+    def referenced(name: str) -> bool:
+        return any(
+            re.match(r"\s*=", value[match.end():]) is None
+            for match in re.finditer(
+                rf"(?<![A-Za-z0-9_$]){re.escape(name)}(?![A-Za-z0-9_$])",
+                value,
+            )
+        )
+
     return any(
-        re.search(rf"(?<![A-Za-z0-9_$]){re.escape(name)}(?![A-Za-z0-9_$])", value)
+        referenced(name)
         and any(
             (binding_scope := brace_scope(source, binding)) == scope[:len(binding_scope)]
             for binding in positions
@@ -1031,6 +1072,11 @@ def block_reference(body: str, suffixes: set[str], python: bool = False) -> bool
     )
 
 
+def static_lookup_key(value: str) -> bool:
+    match = re.fullmatch(r"([\"'])(?P<key>[A-Za-z_][A-Za-z0-9_.]*)\1", value)
+    return match is not None and len(match.group("key")) <= 32
+
+
 def code_reference(
     value: str,
     suffixes: set[str],
@@ -1039,6 +1085,8 @@ def code_reference(
 ) -> bool:
     cleaned = without_line_comments(value, python=python).strip().rstrip(",;")
     if cleaned in {"None", "null", "undefined", "''", '""', "``", "()", "[]", "{}"}:
+        return True
+    if cleaned == "0" and suffixes == RUNTIME_SUFFIXES:
         return True
     arrow = split_top_level(cleaned, "=>", angles=True)
     if arrow is not None and len(arrow) == 2:
@@ -1093,6 +1141,13 @@ def code_reference(
         parts = split_top_level(cleaned, operator)
         if parts is not None:
             return all(code_reference(part, suffixes, python, nested=True) for part in parts)
+    method_call = re.fullmatch(
+        r"(?P<base>.+)\.(?:isdigit|isalnum|lower|casefold|strip)\(\)",
+        cleaned,
+        re.S,
+    )
+    if method_call is not None:
+        return code_reference(method_call.group("base"), suffixes, python, nested=True)
     raw_call = re.fullmatch(
         rf"(?P<callee>{MEMBER_REFERENCE})(?:\?\.)?\((?P<args>.*)\)",
         cleaned,
@@ -1104,6 +1159,14 @@ def code_reference(
             return True
         call_parts = split_top_level(arguments, ",", angles=True) or [arguments]
         callee = re.sub(r"[^a-z0-9]", "", raw_call.group("callee").casefold())
+        if callee.endswith(("dig", "pick")):
+            return bool(call_parts) and code_reference(
+                call_parts[0], suffixes, python, nested=True
+            ) and all(
+                static_lookup_key(part)
+                or code_reference(part, suffixes, python, nested=True)
+                for part in call_parts[1:]
+            )
         if callee.endswith(("get", "getenv")) and re.fullmatch(QUOTED_KEY, call_parts[0]):
             call_parts = call_parts[1:]
         return all(
@@ -1137,7 +1200,9 @@ def code_reference(
         return code_reference(keyword.group("value"), suffixes, python, nested)
     if re.fullmatch(MEMBER_REFERENCE, value):
         normalized = re.sub(r"[^a-z0-9]", "", value.casefold())
-        return nested or value == "value" or "." in value or any(
+        return nested or value == "value" or (
+            len(value) <= 12 and not any(character.isdigit() for character in value)
+        ) or "." in value or any(
             re.search(rf"{suffix}(?:v\d{{1,3}})?$", normalized) for suffix in suffixes
         )
     call = re.fullmatch(
@@ -1150,6 +1215,14 @@ def code_reference(
         return True
     call_parts = split_top_level(arguments, ",", angles=True) or [arguments]
     callee = re.sub(r"[^a-z0-9]", "", call.group("callee").casefold())
+    if callee.endswith(("dig", "pick")):
+        return bool(call_parts) and code_reference(
+            call_parts[0], suffixes, python, nested=True
+        ) and all(
+            static_lookup_key(part)
+            or code_reference(part, suffixes, python, nested=True)
+            for part in call_parts[1:]
+        )
     if callee.endswith(("get", "getenv")) and re.fullmatch(QUOTED_KEY, call_parts[0]):
         return all(
             code_reference(part, suffixes, python, nested=True) for part in call_parts[1:]
@@ -1177,7 +1250,19 @@ def contains_secret(*values: str) -> bool:
 
 
 def contains_runtime_state(*values: str) -> bool:
-    return any(assignments(value, RUNTIME_SUFFIXES) for value in values)
+    def placeholder(item: str) -> bool:
+        stripped = item.strip()
+        return SHELL_REFERENCE.fullmatch(stripped) is not None or stripped in {
+            "", "0", "''", '\"\"', "``", "...", "[...]",
+        }
+
+    return any(
+        any(
+            not placeholder(item)
+            for item in assignments(value, RUNTIME_SUFFIXES)
+        )
+        for value in values
+    )
 
 
 def contains_code_secret(
@@ -1218,8 +1303,24 @@ def contains_code_runtime_state(
         embedded, truncated = nested_string_contents(text, shell, python)
         if truncated:
             return True
+        docstrings = python_docstrings(text) if python else set()
         if any(
-            assignments(content, RUNTIME_SUFFIXES, shell, python)
+            any(
+                item.strip()
+                not in {
+                    "",
+                    "0",
+                    "''",
+                    '\"\"',
+                    "``",
+                    "...",
+                    "[...]",
+                    "分页游标",
+                    "下一页位置",
+                    "用于继续分页的标记",
+                }
+                for item in assignments(content, RUNTIME_SUFFIXES)
+            ) if content in docstrings else contains_runtime_state(content)
             for content in embedded
         ):
             return True

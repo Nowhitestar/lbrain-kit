@@ -3,6 +3,11 @@
 
 All notable Kit-owned changes are documented here. Kit releases follow semantic versioning; Personal Skills carry their own versions.
 
+## 0.4.1 — 2026-08-11
+
+- Fixed the public-content validator so static pagination placeholders, empty or zero cursor initialization, getter key references, and explanatory docstrings remain valid while concrete opaque cursor values are still rejected.
+- Kept Personal Skill versions and personal content unchanged; this release only patches the shared Kit validator used during upgrades and public Skill checks.
+
 ## 0.4.0 — 2026-08-10
 
 - Added Agent-native Project Setup and recoverable Context Intake with preview/apply hashes, lazy v1 Profile markers, explicit partial runs, and complete-checkpoint advancement only after every required source succeeds.

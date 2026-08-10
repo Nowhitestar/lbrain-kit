@@ -688,10 +688,50 @@ class IntelligenceOperationTest(unittest.TestCase):
                     "const setCursor = <T extends (...args: any[]) => any>(value = state.cursor) => state.cursor"
                 )
             )
+            self.assertFalse(contains_runtime_state('"next_cursor": "${cursor}"'))
+            self.assertFalse(contains_runtime_state('"next_cursor": ""'))
+            self.assertFalse(contains_runtime_state("next_cursor: ''"))
+            self.assertFalse(contains_code_runtime_state("cursor = 0", python=True))
+            self.assertFalse(contains_code_runtime_state('cursor = ""', python=True))
+            self.assertFalse(
+                contains_code_runtime_state(
+                    'next_cursor = _dig(raw, "data", "cursor", default="")',
+                    python=True,
+                )
+            )
+            self.assertFalse(
+                contains_code_runtime_state(
+                    'cursor = _pick(inner, "cursor", "lastCursor") or ""',
+                    python=True,
+                )
+            )
+            self.assertFalse(
+                contains_code_runtime_state(
+                    "cursor = int(next_cursor) if str(next_cursor).isdigit() else 0",
+                    python=True,
+                )
+            )
+            self.assertFalse(
+                contains_code_runtime_state(
+                    '"""Args:\n    cursor: 分页游标\n\nReturns:\n    {cursor, notes: [...]}\n"""',
+                    python=True,
+                )
+            )
+            self.assertFalse(
+                contains_code_runtime_state(
+                    '"""Args:\n    cursor: 下一页位置\n    next_cursor: 用于继续分页的标记\n"""',
+                    python=True,
+                )
+            )
             self.assertFalse(contains_code_runtime_state("cursor==response.next_cursor"))
             self.assertFalse(contains_code_runtime_state("cursor:=response.next_cursor"))
             self.assertTrue(contains_code_runtime_state('cursor := "opaque-real-cursor-12345"'))
+            self.assertTrue(contains_code_runtime_state("cursor = 1234567"))
             self.assertTrue(contains_code_runtime_state('cursor = "opaque-real-cursor-12345"'))
+            self.assertTrue(contains_code_runtime_state('setCursor("next_cursor")'))
+            self.assertTrue(
+                contains_code_runtime_state('cursor = _dig("opaque-runtime-state-12345")')
+            )
             self.assertTrue(contains_code_runtime_state('state["next_cursor"] = "opaque-real-cursor-12345"'))
             self.assertTrue(contains_code_runtime_state('state["page"].next_cursor = "opaque-real-cursor-12345"'))
             self.assertTrue(contains_code_runtime_state('cursor: str = "opaque-real-cursor-12345"'))
@@ -716,6 +756,19 @@ class IntelligenceOperationTest(unittest.TestCase):
             )
             self.assertTrue(
                 contains_code_runtime_state('const value = "opaque"; setCursor(value)')
+            )
+            self.assertTrue(
+                contains_code_runtime_state('const value = "next_cursor"; setCursor(value)')
+            )
+            self.assertTrue(
+                contains_code_runtime_state(
+                    'const value = make("opaque-cursor-value"); setCursor(value)'
+                )
+            )
+            self.assertTrue(
+                contains_code_runtime_state(
+                    'const value = response.cursor || "opaque-real-cursor-12345"; setCursor(value)'
+                )
             )
             self.assertTrue(
                 contains_code_runtime_state(
@@ -860,6 +913,27 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertTrue(contains_code_runtime_state("nextCursor = `opaque-runtime-state-12345`"))
             self.assertTrue(contains_runtime_state("next_cursor: opaque_cursor_value"))
             self.assertTrue(contains_runtime_state("next_cursor=eyJhbGci.payload.signature"))
+            self.assertTrue(contains_runtime_state("next_cursor: 密钥游标值"))
+            self.assertTrue(contains_runtime_state("next_cursor: 密钥游标"))
+            self.assertTrue(contains_runtime_state("next_cursor: 秘密分页游标"))
+            self.assertTrue(
+                contains_code_runtime_state(
+                    '"""Config:\nnext_cursor: opaque-real-cursor-12345\n"""',
+                    python=True,
+                )
+            )
+            self.assertTrue(
+                contains_code_runtime_state(
+                    '"""Config:\nnext_cursor: 密钥游标\n"""',
+                    python=True,
+                )
+            )
+            self.assertTrue(
+                contains_code_runtime_state(
+                    '"""Config:\nnext_cursor: 秘密分页游标\n"""',
+                    python=True,
+                )
+            )
             self.assertTrue(contains_key({"connector": {"next_cursor": "opaque"}}, {"cursor"}))
             self.assertTrue(contains_key({"connector": {"endCursor": "opaque"}}, {"cursor"}))
             self.assertTrue(contains_key({"oauth": {"refresh_token": "opaque"}}, {"cursor"}))
@@ -1226,6 +1300,7 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertFalse(contains_code_secret("if(api_key==config.api_key)"))
             self.assertFalse(contains_code_secret("if(apiKey===config.apiKey){}"))
             self.assertFalse(contains_code_secret("api_key:=config.api_key"))
+            self.assertTrue(contains_code_secret("api_key = 0"))
             self.assertTrue(contains_code_secret('api_key := "fixture-secret-value-12345"'))
             self.assertTrue(contains_code_secret('api_key = "fixture-generic-secret-12345"'))
             self.assertTrue(contains_code_secret("api_key: token_abcdefghijklmnop"))

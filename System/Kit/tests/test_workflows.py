@@ -206,16 +206,16 @@ class WorkflowSmokeTest(unittest.TestCase):
                 shutil.rmtree(kit / relative)
                 shutil.copytree(ROOT / relative, kit / relative, ignore=shutil.ignore_patterns("__pycache__"))
             with (kit / "System/Rules/Core/visibility.md").open("a", encoding="utf-8") as file:
-                file.write("\nUpgrade marker: v0.4.0.\n")
+                file.write("\nUpgrade marker: v0.4.1.\n")
             git(kit, "add", ".")
-            git(kit, "commit", "-m", "kit: release 0.4.0")
-            git(kit, "tag", "v0.4.0")
+            git(kit, "commit", "-m", "kit: release 0.4.1")
+            git(kit, "tag", "v0.4.1")
 
             git(personal, "fetch", "kit", "--tags")
             git(personal, "switch", "kit-base")
             git(personal, "merge", "--ff-only", "kit/main")
             git(personal, "switch", "main")
-            git(personal, "merge", "--no-ff", "v0.4.0", "-m", "kit: upgrade to v0.4.0")
+            git(personal, "merge", "--no-ff", "v0.4.1", "-m", "kit: upgrade to v0.4.1")
 
             checked = subprocess.run(
                 [sys.executable, str(personal / "System/Kit/check.py"), "--root", str(personal)],
@@ -236,9 +236,10 @@ class WorkflowSmokeTest(unittest.TestCase):
             enabled_text = (personal / "Skills/Enabled.md").read_text(encoding="utf-8")
             self.assertIn("[[Skills/Kit/lbrain-context-pack/SKILL]]", enabled_text)
             self.assertIn("[[Skills/Personal/personal-upgrade/SKILL]]", enabled_text)
-            self.assertEqual((personal / "System/Kit/VERSION").read_text(encoding="utf-8"), "0.4.0\n")
+            self.assertEqual((personal / "System/Kit/VERSION").read_text(encoding="utf-8"), "0.4.1\n")
             self.assertTrue((personal / "System/Kit/MIGRATIONS/0.3.0-to-0.4.0.md").is_file())
-            self.assertIn("Upgrade marker: v0.4.0", (personal / "System/Rules/Core/visibility.md").read_text(encoding="utf-8"))
+            self.assertTrue((personal / "System/Kit/MIGRATIONS/0.4.0-to-0.4.1.md").is_file())
+            self.assertIn("Upgrade marker: v0.4.1", (personal / "System/Rules/Core/visibility.md").read_text(encoding="utf-8"))
             self.assertTrue(definition.is_file())
             self.assertIn(str(pack_remote), (personal / ".gitmodules").read_text(encoding="utf-8"))
             self.assertIn("personal-pack", git(personal, "submodule", "status"))
