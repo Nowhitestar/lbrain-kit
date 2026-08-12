@@ -43,14 +43,20 @@ save.addEventListener("click", async () => {
   const releaseOrigins = [];
   let reserved = false;
   try {
-    const reservation = await chrome.runtime.sendMessage({ type: "confirmation.reserve", id });
+    const reservation = await chrome.runtime.sendMessage({
+      type: "confirmation.reserve", id, permission_origins: permissionOrigins
+    });
     if (reservation?.error) throw new Error(reservation.error);
     reserved = true;
     const missing = [];
     for (const origin of permissionOrigins) {
       if (!await chrome.permissions.contains({ origins: [origin] })) missing.push(origin);
     }
-    if (missing.length && await chrome.permissions.request({ origins: missing })) releaseOrigins.push(...missing);
+    if (missing.length) {
+      await chrome.runtime.sendMessage({ type: "confirmation.permissions", id, origins: missing });
+      if (await chrome.permissions.request({ origins: missing })) releaseOrigins.push(...missing);
+      else await chrome.runtime.sendMessage({ type: "confirmation.permissions", id, origins: [] });
+    }
   } catch (_) {
     // The authenticated page archive remains the fallback; missing attachments become partial.
   }

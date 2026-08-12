@@ -461,6 +461,10 @@ async function deleteConfirmation(id) {
 }
 
 async function clearConfirmations() {
+  const stored = (await chrome.storage.session.get(SAVE_RESERVATION))[SAVE_RESERVATION];
+  if (stored?.release_origins?.length) {
+    await chrome.permissions?.remove?.({ origins: stored.release_origins }).catch(() => {});
+  }
   await caches.delete(CONFIRMATION_CACHE);
   await chrome.storage.session.remove(SAVE_RESERVATION);
 }
@@ -469,7 +473,12 @@ async function releaseSaveReservation(id) {
   if (saveReservation === id) saveReservation = null;
   try {
     const stored = (await chrome.storage.session.get(SAVE_RESERVATION))[SAVE_RESERVATION];
-    if (stored?.id === id) await chrome.storage.session.remove(SAVE_RESERVATION);
+    if (stored?.id === id) {
+      if (stored.release_origins?.length) {
+        await chrome.permissions?.remove?.({ origins: stored.release_origins }).catch(() => {});
+      }
+      await chrome.storage.session.remove(SAVE_RESERVATION);
+    }
   } catch (_) {
     // Reservation expiry remains the crash-safe fallback.
   }
@@ -516,12 +525,27 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         if (stored?.id && stored.id !== message.id && Date.now() - stored.created < 10 * 60 * 1000) {
           throw new Error("Another LBrain capture is already being saved.");
         }
-        await chrome.storage.session.set({ [SAVE_RESERVATION]: { id: message.id, created: Date.now() } });
+        const allowedOrigins = Array.isArray(message.permission_origins)
+          ? message.permission_origins.filter((origin) => /^https?:\/\/[^/]+\/\*$/.test(origin))
+          : [];
+        await chrome.storage.session.set({
+          [SAVE_RESERVATION]: { id: message.id, created: Date.now(), allowed_origins: allowedOrigins, release_origins: [] }
+        });
       } catch (error) {
         saveReservation = null;
         throw error;
       }
       return { reserved: true };
+    }
+    if (message.type === "confirmation.permissions") {
+      const stored = (await chrome.storage.session.get(SAVE_RESERVATION))[SAVE_RESERVATION];
+      if (stored?.id !== message.id) throw new Error("This capture no longer owns the save slot.");
+      const allowed = new Set(stored.allowed_origins || []);
+      stored.release_origins = Array.isArray(message.origins)
+        ? message.origins.filter((origin) => allowed.has(origin))
+        : [];
+      await chrome.storage.session.set({ [SAVE_RESERVATION]: stored });
+      return { recorded: true };
     }
     if (message.type === "confirmation.release") {
       await releaseSaveReservation(message.id);

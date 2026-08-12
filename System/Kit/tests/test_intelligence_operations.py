@@ -2529,21 +2529,26 @@ with tempfile.TemporaryDirectory() as temporary:
 
     def test_extension_save_reservation_survives_worker_restart(self) -> None:
         script = (
-            "const fs=require('fs'),vm=require('vm'),{webcrypto}=require('crypto');const shared={};"
-            "function worker(){let handler;const session={async get(key){return{[key]:shared[key]}},"
+            "const fs=require('fs'),vm=require('vm'),{webcrypto}=require('crypto');const shared={},removed=[];"
+            "function worker(){let handler,startup;const session={async get(key){return{[key]:shared[key]}},"
             "async set(value){Object.assign(shared,value)},async remove(key){delete shared[key]}};"
-            "const chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},"
+            "const chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(fn){startup=fn}},"
             "onMessage:{addListener(fn){handler=fn}},onConnect:{addListener(){}},lastError:null,"
             "getURL(value){return 'chrome-extension://test/'+value}},contextMenus:{removeAll(){},create(){},"
             "onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},windows:{onRemoved:{addListener(){}}},"
+            "permissions:{async remove({origins}){removed.push(...origins);return true}},"
             "notifications:{onButtonClicked:{addListener(){}}},storage:{session,local:{async get(){return{}},async set(){},async remove(){}}}};"
             "const caches={async open(){return{async match(){return undefined},async delete(){}}},async delete(){}};"
             "const context={chrome,caches,crypto:webcrypto,URL,TextEncoder,Blob,Response,setTimeout,clearTimeout,console};"
-            "vm.createContext(context);vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),context);return handler}"
+            "vm.createContext(context);vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),context);return{handler,startup}}"
             "function send(handler,message){return new Promise(resolve=>handler(message,{},resolve))}"
-            "(async()=>{const reserved=await send(worker(),{type:'confirmation.reserve',id:'capture-1'});"
-            "const decided=await send(worker(),{type:'confirmation.decide',id:'capture-1'});"
-            "console.log(JSON.stringify({reserved:reserved.reserved,error:decided.error,stale:Boolean(shared['lbrain-save-reservation-v1'])}))})()"
+            "(async()=>{const first=worker();const reserved=await send(first.handler,{type:'confirmation.reserve',id:'capture-1',"
+            "permission_origins:['https://new.invalid/*']});"
+            "await send(first.handler,{type:'confirmation.permissions',id:'capture-1',origins:['https://new.invalid/*']});"
+            "const decided=await send(worker().handler,{type:'confirmation.decide',id:'capture-1'});"
+            "shared['lbrain-save-reservation-v1']={id:'capture-2',created:Date.now(),release_origins:['https://crash.invalid/*']};"
+            "await worker().startup();"
+            "console.log(JSON.stringify({reserved:reserved.reserved,error:decided.error,removed,stale:Boolean(shared['lbrain-save-reservation-v1'])}))})()"
             ".catch(error=>{console.error(error);process.exit(1)});"
         )
         result = subprocess.run(
@@ -2557,6 +2562,7 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertTrue(output["reserved"])
         self.assertIn("confirmation is no longer available", output["error"])
         self.assertNotIn("owns the save slot", output["error"])
+        self.assertEqual(output["removed"], ["https://new.invalid/*", "https://crash.invalid/*"])
         self.assertFalse(output["stale"])
 
     def test_bundle_extracts_pdf_and_subtitle_text_and_recovers_partial_media(self) -> None:
@@ -2993,6 +2999,24 @@ with tempfile.TemporaryDirectory() as temporary:
                 text, method = operations.local_pdf_text(pdf)
             self.assertEqual(method, "ocr")
             self.assertEqual(text, "OCR recovered sentence.")
+
+            clock = [0.0]
+            commands: list[str] = []
+
+            def slow_render(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                commands.append(command[0])
+                if command[0] == "pdftotext":
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                Path(f"{command[-1]}.png").write_bytes(b"page")
+                clock[0] = operations.MAX_OCR_SECONDS + 1
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with mock.patch.object(operations.shutil, "which", side_effect=lambda name: name), mock.patch.object(
+                operations.subprocess, "run", side_effect=slow_render
+            ), mock.patch.object(operations.time, "monotonic", side_effect=lambda: clock[0]):
+                _, method = operations.local_pdf_text(pdf)
+            self.assertEqual(method, "failed")
+            self.assertNotIn("tesseract", commands)
 
     def test_capture_binary_assets_use_git_lfs_without_a_remote(self) -> None:
         if shutil.which("git-lfs") is None:

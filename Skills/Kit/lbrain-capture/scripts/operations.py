@@ -939,9 +939,12 @@ def local_pdf_text(path: Path) -> tuple[str, str]:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     check=False,
-                    timeout=120,
+                    timeout=min(120, max(deadline - time.monotonic(), 0.001)),
                 )
                 if rendered.returncode or not page.is_file():
+                    break
+                if time.monotonic() >= deadline:
+                    truncated = True
                     break
                 with tempfile.TemporaryFile() as output:
                     result = subprocess.run(
@@ -949,7 +952,7 @@ def local_pdf_text(path: Path) -> tuple[str, str]:
                         stdout=output,
                         stderr=subprocess.DEVNULL,
                         check=False,
-                        timeout=120,
+                        timeout=min(120, max(deadline - time.monotonic(), 0.001)),
                     )
                     output.seek(0)
                     extracted, page_truncated = limited_text(output, max(remaining, 0))
