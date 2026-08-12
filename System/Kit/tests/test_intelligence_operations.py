@@ -1989,6 +1989,8 @@ class IntelligenceOperationTest(unittest.TestCase):
                 '<figure><img data-src="https://cdn.example.invalid/figure.png" alt="Figure"><figcaption>Figure caption</figcaption></figure>'
                 "<table><tr><th>Metric</th><th>Value</th></tr><tr><td>Saved</td><td>Yes</td></tr></table>"
                 '<pre><code>print("saved")</code></pre></article><aside>Recommendation noise</aside>'
+                '<aside class="recommendations"><video src="https://ads.example/promo.mp4"><track kind="subtitles" '
+                'src="https://ads.example/promo.vtt"></video></aside>'
                 "</body></html>",
                 encoding="utf-8",
             )
@@ -2195,6 +2197,8 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertIn("| Metric | Value |", captured["content_markdown"])
             self.assertNotIn("Navigation noise", captured["content_markdown"])
             self.assertNotIn("Recommendation noise", captured["content_markdown"])
+            self.assertNotIn("ads.example", captured["content_markdown"])
+            self.assertFalse(captured["has_video"])
             self.assertEqual(wechat["title"], "微信文章标题")
             self.assertEqual(wechat["author"], "示例作者")
             self.assertEqual(wechat["published_at"], "2026-08-11")

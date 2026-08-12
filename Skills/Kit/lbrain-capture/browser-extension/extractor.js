@@ -402,13 +402,16 @@
     const canonical = (thread ? firstStatus?.href : "")
       || url(document.querySelector("link[rel='canonical']")?.getAttribute("href") || "")
       || url(location.href);
-    const mediaRoot = scope === "page" ? document.body : root;
+    const genericPage = scope === "page" && !wechat && !xArticle && !thread && !semanticArticle;
+    const mediaRoot = genericPage ? document.body : root;
     const videoDetails = videoMarkdown(mediaRoot);
     const rendered = `${block(root).trim()}${videoDetails}`
       .replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
     if (!title || !rendered) throw new Error("The rendered page did not contain a readable title and body.");
-    const containsVideo = Boolean(mediaRoot.querySelector("video, ytd-transcript-renderer, [data-testid='transcript'], [itemprop='transcript']"));
-    const videoPage = /(^|\.)((youtube\.com)|(youtu\.be)|(bilibili\.com))$/i.test(location.hostname)
+    const supportedVideoHost = /(^|\.)((youtube\.com)|(youtu\.be)|(bilibili\.com))$/i.test(location.hostname);
+    const containsVideo = supportedVideoHost
+      || Boolean(mediaRoot.querySelector("video, ytd-transcript-renderer, [data-testid='transcript'], [itemprop='transcript']"));
+    const videoPage = supportedVideoHost
       || Boolean(mediaRoot.querySelector("ytd-transcript-renderer, [data-testid='transcript'], [itemprop='transcript']"));
     const articlePage = Boolean(wechat || xArticle || thread || semanticArticle);
     const captureKind = scope === "selection"
