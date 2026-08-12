@@ -394,7 +394,7 @@
     const publishedAt = (wechat ? text(document.querySelector("#publish_time")) : "")
       || document.querySelector("meta[property='article:published_time'], time[datetime]")?.content
       || document.querySelector("time[datetime]")?.getAttribute("datetime") || "";
-    const canonical = firstStatus?.href
+    const canonical = (thread ? firstStatus?.href : "")
       || url(document.querySelector("link[rel='canonical']")?.getAttribute("href") || "")
       || url(location.href);
     const rendered = `${block(root).trim()}${videoMarkdown(root)}`

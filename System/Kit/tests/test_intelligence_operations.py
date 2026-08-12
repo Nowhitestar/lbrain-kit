@@ -2047,7 +2047,8 @@ class IntelligenceOperationTest(unittest.TestCase):
             )
             timeline_fixture = directory / "x-timeline.html"
             timeline_fixture.write_text(
-                '<!doctype html><html><head><title>Alice timeline</title></head><body><main>'
+                '<!doctype html><html><head><title>Alice timeline</title>'
+                '<link rel="canonical" href="https://x.com/alice"></head><body><main>'
                 '<article data-testid="tweet"><div data-testid="User-Name"><span>Alice</span>'
                 '<a href="https://x.com/alice/status/500"></a></div><div data-testid="tweetText">Standalone one.</div></article>'
                 '<article data-testid="tweet"><div data-testid="User-Name"><span>Alice</span>'
@@ -2151,6 +2152,9 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertNotIn("Interposed reply.", interposed_thread["content_markdown"])
             self.assertNotIn("Interposed standalone post.", interposed_thread["content_markdown"])
             self.assertEqual(timeline["capture_kind"], "html")
+            self.assertEqual(timeline["origin"], "https://x.com/alice")
+            self.assertIn("https://x.com/alice", timeline["content_markdown"])
+            self.assertNotIn("/status/500", timeline["content_markdown"])
             self.assertEqual(chinese_article["capture_kind"], "article")
             self.assertEqual(chinese_article["title"], "研究札记")
 
