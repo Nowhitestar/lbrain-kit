@@ -2123,8 +2123,9 @@ class IntelligenceOperationTest(unittest.TestCase):
             youtube_fixture.write_text(
                 '<!doctype html><html><head><title>Restricted video</title></head><body><main>'
                 '<h1>Restricted video</h1><p>Sign in to confirm your age.</p><p>This content is restricted.</p>'
-                '<audio src="https://ads.example/audio-only.m4a"></audio>'
-                '<ytd-transcript-renderer><p>Visible transcript sentence.</p></ytd-transcript-renderer>'
+                '<audio src="https://ads.example/audio-only.m4a"></audio><ytd-wrapper>'
+                '<ytd-transcript-renderer><div class="segment">First transcript cue.</div>'
+                '<div class="segment">Second transcript cue.</div></ytd-transcript-renderer></ytd-wrapper>'
                 '</main></body></html>', encoding="utf-8",
             )
             plain_article_fixture = directory / "plain-article.html"
@@ -2176,8 +2177,10 @@ class IntelligenceOperationTest(unittest.TestCase):
                 '<!doctype html><html><head><title>Product analysis</title>'
                 '<meta property="og:type" content="article"><meta property="article:published_time" content="2026-08-11">'
                 '</head><body><main><h1>Product analysis</h1><p>'
-                + ('Independent editorial evidence and analysis. ' * 40)
-                + '</p><figure><figcaption>Evidence</figcaption></figure>'
+                + ('Independent editorial evidence and analysis. ' * 20)
+                + '</p><section class="content-item"><p>' + ('First editorial section. ' * 20)
+                + '</p></section><section class="content-item"><p>' + ('Second editorial section. ' * 20)
+                + '</p></section><figure><figcaption>Evidence</figcaption></figure>'
                 '<aside itemscope itemtype="https://schema.org/Product"><h2>Related product</h2><p>Small recommendation.</p></aside>'
                 '<p>Final editorial conclusion.</p></main></body></html>', encoding="utf-8",
             )
@@ -2295,7 +2298,9 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(youtube_video["capture_kind"], "video")
             self.assertTrue(youtube_video["has_video"])
             self.assertIn("https://www.youtube.com/watch?v=abc", youtube_video["content_markdown"])
-            self.assertEqual(youtube_video["content_markdown"].count("Visible transcript sentence."), 1)
+            self.assertEqual(youtube_video["content_markdown"].count("First transcript cue."), 1)
+            self.assertEqual(youtube_video["content_markdown"].count("Second transcript cue."), 1)
+            self.assertIn("First transcript cue.\nSecond transcript cue.", youtube_video["content_markdown"])
             self.assertFalse(any(asset["media_type"].startswith(("audio/", "video/")) for asset in youtube_video["remote_assets"]))
 
     def test_extension_builds_direct_pdf_capture_without_saving_video_binary(self) -> None:

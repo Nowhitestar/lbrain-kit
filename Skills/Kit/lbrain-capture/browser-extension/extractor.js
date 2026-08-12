@@ -37,10 +37,12 @@
       || ""
   );
   const children = (node, renderer) => Array.from(node.childNodes).map(renderer).join("");
+  const transcriptSelector = "ytd-transcript-renderer, [data-testid='transcript'], [itemprop='transcript'], [data-lbrain-transcript]";
 
   function inline(node) {
     if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || "";
     if (node.nodeType !== Node.ELEMENT_NODE) return "";
+    if (node.matches(transcriptSelector) || node.querySelector(transcriptSelector)) return "";
     const tag = node.tagName;
     if (tag === "BR") return "\n";
     if (tag === "IMG") {
@@ -93,7 +95,7 @@
     if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || "";
     if (node.nodeType !== Node.ELEMENT_NODE) return "";
     const tag = node.tagName;
-    if (node.matches?.("ytd-transcript-renderer, [data-testid='transcript'], [itemprop='transcript'], [data-lbrain-transcript]")) return "";
+    if (node.matches?.(transcriptSelector) || node.querySelector?.(transcriptSelector)) return "";
     if (/^H[1-6]$/.test(tag)) return `${"#".repeat(Number(tag[1]))} ${inline(node).trim()}\n\n`;
     if (tag === "P") return `${inline(node).trim()}\n\n`;
     if (tag === "UL" || tag === "OL") return `${list(node, tag === "OL")}\n`;
@@ -285,7 +287,12 @@
     if (fallback && !lines.some((line) => line.startsWith("- Original video:"))) {
       lines.unshift(`- Original video: [${fallback}](${fallback})`);
     }
-    const transcript = text(root.querySelector("[data-testid='transcript'], [itemprop='transcript'], [data-lbrain-transcript], ytd-transcript-renderer"));
+    const transcriptRoot = root.querySelector(transcriptSelector);
+    const transcriptParts = transcriptRoot
+      ? Array.from(transcriptRoot.querySelectorAll("p, [data-testid='cue'], .segment, ytd-transcript-segment-renderer"))
+        .map(text).filter(Boolean)
+      : [];
+    const transcript = transcriptParts.length ? transcriptParts.join("\n") : text(transcriptRoot);
     if (!lines.length && !transcript) return "";
     return `\n\n## Video\n\n${lines.join("\n")}${transcript ? `\n\n## Transcript\n\n${transcript}` : ""}`;
   }
@@ -348,7 +355,7 @@
       || Boolean(document.querySelector("meta[property='og:type'][content='article' i]"));
     const cardLike = (node) => {
       const schema = node?.getAttribute("itemtype") || "";
-      return /(?:^|[-_\s])(card|catalog|course|item|plan|pricing|product|teaser|tile)(?:$|[-_\s])/i
+      return /(?:^|[-_\s])(card|catalog|course|plan|pricing|product|teaser|tile)(?:$|[-_\s])/i
         .test(`${node?.id || ""} ${node?.className || ""}`)
         || /schema\.org\/(?:Product|Offer|Course)(?:$|[/#])/i.test(schema);
     };
