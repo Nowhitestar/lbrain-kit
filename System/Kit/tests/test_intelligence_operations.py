@@ -1990,6 +1990,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                 + ("Long authenticated article paragraph. " * 20) + "</p>"
                 "<blockquote>Quoted evidence.</blockquote><ul><li>First item</li><li>Second item</li></ul>"
                 '<figure><img data-src="https://cdn.example.invalid/figure.png" alt="Figure"><figcaption>Figure caption</figcaption></figure>'
+                '<picture><source srcset="https://cdn.example.invalid/responsive-article.png 2x"><img alt="Responsive article"></picture>'
                 "<table><tr><th>Metric</th><th>Value</th></tr><tr><td>Saved</td><td>Yes</td></tr></table>"
                 '<pre><code>print("saved")</code></pre></article><aside>Recommendation noise</aside>'
                 '<aside class="recommendations"><video src="https://ads.example/promo.mp4"><track kind="subtitles" '
@@ -2074,6 +2075,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                 '<article class="course-card"><h1>Course card</h1><p>' + ("Course features and pricing. " * 24)
                 + "</p><p>Choose this course.</p></article>"
                 '<img src="https://alpha.example.invalid/hero.png" onerror="leak()">'
+                '<picture><source srcset="https://alpha.example.invalid/responsive-generic.png 2x"><img alt="Responsive generic"></picture>'
                 '<svg><image href="https://alpha.example.invalid/chart.svg"></image></svg>'
                 '<svg xmlns:xlink="http://www.w3.org/1999/xlink"><image xlink:href="https://alpha.example.invalid/xlink-chart.svg"></image></svg>'
                 '<svg><symbol id="local-symbol"><path d="M0 0"></path></symbol>'
@@ -2229,6 +2231,7 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertIn("> Quoted evidence.", captured["content_markdown"])
             self.assertIn("- First item", captured["content_markdown"])
             self.assertIn("![Figure](https://cdn.example.invalid/figure.png)", captured["content_markdown"])
+            self.assertIn("![Responsive article](https://cdn.example.invalid/responsive-article.png)", captured["content_markdown"])
             self.assertIn("Figure caption", captured["content_markdown"])
             self.assertIn("| Metric | Value |", captured["content_markdown"])
             self.assertNotIn("Navigation noise", captured["content_markdown"])
@@ -2294,6 +2297,8 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertIn("xlink-chart.svg", generic["snapshot_html"])
             self.assertIn("https://alpha.example.invalid/lesson.mp3", generic_media)
             self.assertIn("https://ads.example/tracker.png", generic_media)
+            self.assertIn("https://alpha.example.invalid/responsive-generic.png", generic_media)
+            self.assertIn("https://alpha.example.invalid/responsive-generic.png", generic["snapshot_html"])
             self.assertEqual(main_article["capture_kind"], "article")
             self.assertEqual(main_article["title"], "Main Story")
             self.assertIn("Long story body.", main_article["content_markdown"])

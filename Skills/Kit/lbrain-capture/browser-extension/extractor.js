@@ -36,6 +36,16 @@
       || node.getAttribute("src")
       || ""
   );
+  const renderedClone = (node) => {
+    const clone = node.cloneNode(true);
+    const originals = Array.from(node.querySelectorAll("img"));
+    const copies = Array.from(clone.querySelectorAll("img"));
+    originals.forEach((image, index) => {
+      const source = imageUrl(image);
+      if (source) copies[index]?.setAttribute("src", source);
+    });
+    return clone;
+  };
   const children = (node, renderer) => Array.from(node.childNodes).map(renderer).join("");
   const transcriptSelector = "ytd-transcript-renderer, [data-testid='transcript'], [data-lbrain-transcript]";
 
@@ -300,7 +310,7 @@
   }
 
   function htmlSnapshot(root, title) {
-    const copy = root.cloneNode(true);
+    const copy = renderedClone(root);
     copy.querySelectorAll("base, script, style, noscript, template, form, input, textarea, select, button, iframe, object, embed, [aria-hidden='true'], [hidden]")
       .forEach((node) => node.remove());
     const allowed = new Set(["alt", "class", "colspan", "datetime", "height", "href", "id", "open", "poster", "rowspan", "src", "title", "width", "xlink:href"]);
@@ -395,7 +405,7 @@
       ? selectedRoot()
       : wechat || xArticle || thread || semanticArticle || document.querySelector("main, [role='main']") || document.body;
     if (!source) throw new Error("No readable content was found on the current page.");
-    const root = source.cloneNode(true);
+    const root = renderedClone(source);
     root.querySelectorAll(NOISE).forEach((node) => node.remove());
     const heading = root.querySelector("h1");
     const xOwner = xAuthor(xArticle || tweets[0]);
