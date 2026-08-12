@@ -588,14 +588,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (!pending || typeof pending !== "object" || !pending.capture || !pending.tab) {
         throw new Error("This capture confirmation is no longer available.");
       }
-      const allowed = new Set(previewFor(pending.capture).permission_origins || []);
-      const releaseOrigins = Array.isArray(message.release_origins)
-        ? message.release_origins.filter((origin) => allowed.has(origin))
-        : [];
       try {
         return await savePrepared(pending.tab, pending.capture);
       } finally {
-        if (releaseOrigins.length) await chrome.permissions.remove({ origins: releaseOrigins }).catch(() => {});
         await deleteConfirmation(message.id);
         confirmationWindows.delete(message.id);
       }

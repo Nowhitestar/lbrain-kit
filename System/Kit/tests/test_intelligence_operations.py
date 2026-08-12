@@ -2580,6 +2580,56 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertTrue(output["retainedOnFailure"])
         self.assertFalse(output["stale"])
 
+    def test_extension_keeps_the_lease_when_the_confirmation_window_closes_during_save(self) -> None:
+        script = r'''
+const fs=require("fs"),{webcrypto}=require("crypto");
+let action,connectHandler,messageHandler,removedWindow,nativeMessage,nativeDone,id,preview,endSeen=false;
+const shared={},removed=[];
+const session={async get(key){return{[key]:shared[key]}},async set(value){Object.assign(shared,value)},async remove(key){delete shared[key]}};
+const nativePort={onMessage:{addListener(fn){nativeMessage=fn}},onDisconnect:{addListener(){}},postMessage(message){
+  if(message.type==="chunk")queueMicrotask(()=>nativeMessage({type:"ack",channel:message.channel,sequence:message.sequence}));
+  if(message.type==="end")endSeen=true;
+}};
+global.caches={async open(){return{async match(){return new Response(JSON.stringify({capture:preview.capture,tab:preview.tab}))},async delete(){}}},async delete(){}};
+global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(fn){messageHandler=fn}},
+  onConnect:{addListener(fn){connectHandler=fn}},getURL(value){return"chrome-extension://test/"+value},connectNative(){return nativePort},lastError:null},
+  contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(fn){action=fn}}},
+  windows:{async create(options){id=new URL(options.url).searchParams.get("id");let listener;const port={name:"lbrain-confirm",onMessage:{addListener(fn){listener=fn}},postMessage(message){preview=message}};
+    queueMicrotask(()=>{connectHandler(port);listener({type:"ready",id})});return{id:19}},onRemoved:{addListener(fn){removedWindow=fn}}},
+  permissions:{async remove({origins}){removed.push(...origins);return true},async contains(){return false}},
+  storage:{session,local:{async get(){return{}},async set(){},async remove(){}}},notifications:{async create(){},onButtonClicked:{addListener(){}}}};
+global.crypto=webcrypto;
+eval(fs.readFileSync(process.argv[1],"utf8"));
+function send(message){return new Promise(resolve=>messageHandler(message,{},resolve))}
+(async()=>{
+  await action({id:7,url:"https://example.invalid/movie.mp4",title:"Movie"});
+  await send({type:"confirmation.reserve",id,window_id:19,permission_origins:["https://new.invalid/*"]});
+  await send({type:"confirmation.permissions",id,origins:["https://new.invalid/*"]});
+  const decide=send({type:"confirmation.decide",id});
+  while(!endSeen)await new Promise(resolve=>setTimeout(resolve,0));
+  removedWindow(19);
+  let secondResolved=false;const second=send({type:"confirmation.reserve",id:"second"}).then(value=>{secondResolved=true;return value});
+  await new Promise(resolve=>setTimeout(resolve,0));
+  const during={state:shared["lbrain-save-reservation-v1"].state,secondResolved,removed:[...removed]};
+  nativeMessage({status:"saved",target:"Inbox/Captures/movie.md",capture_id:"movie",version:1});
+  const saved=await decide;const next=await second;
+  console.log(JSON.stringify({during,saved:saved.status,next:next.reserved,removed}));
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["during"], {"state": "saving", "secondResolved": False, "removed": []})
+        self.assertEqual(output["saved"], "saved")
+        self.assertTrue(output["next"])
+        self.assertEqual(output["removed"], ["https://new.invalid/*"])
+
     def test_bundle_extracts_pdf_and_subtitle_text_and_recovers_partial_media(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
