@@ -2081,7 +2081,8 @@ class IntelligenceOperationTest(unittest.TestCase):
                 '<audio src="https://alpha.example.invalid/lesson.mp3"></audio>'
                 '<a href="javascript:alert(1)">unsafe link</a>'
                 '<form><input value="private form value"></form><script>privateRuntimeState()</script>'
-                '</main><aside class="recommendations"><ytd-transcript-renderer>Unrelated promo transcript.</ytd-transcript-renderer></aside>'
+                '</main><aside class="recommendations"><ytd-transcript-renderer>Unrelated promo transcript.</ytd-transcript-renderer>'
+                '<img src="https://ads.example/tracker.png"></aside>'
                 "</body></html>",
                 encoding="utf-8",
             )
@@ -2285,6 +2286,7 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertNotIn("<base", generic["snapshot_html"])
             self.assertNotIn("icons.svg", generic["snapshot_html"])
             self.assertNotIn("Unrelated promo transcript.", generic["content_markdown"])
+            self.assertNotIn("ads.example", generic["snapshot_html"])
             self.assertIn('href="#local-symbol"', generic["snapshot_html"])
             generic_media = {asset["url"] for asset in generic["remote_assets"]}
             self.assertIn("https://alpha.example.invalid/chart.svg", generic_media)

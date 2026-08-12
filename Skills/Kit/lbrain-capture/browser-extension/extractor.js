@@ -447,7 +447,7 @@
       content_markdown: content,
       capture_kind: captureKind,
       has_video: containsVideo,
-      snapshot_html: captureKind === "html" ? htmlSnapshot(document.body, title) : "",
+      snapshot_html: captureKind === "html" ? htmlSnapshot(mediaRoot, title) : "",
       preview_characters: rendered.length,
       extraction_status: "complete",
       remote_assets: media(captureKind === "html" ? mediaRoot : root, containsVideo),
