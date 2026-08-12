@@ -2550,12 +2550,16 @@ with tempfile.TemporaryDirectory() as temporary:
             "const restarted=worker();restarted.removedWindow(19);await new Promise(resolve=>setTimeout(resolve,0));"
             "const second=worker();await send(second.handler,{type:'confirmation.reserve',id:'capture-2'});"
             "const decided=await send(worker().handler,{type:'confirmation.decide',id:'capture-2'});"
+            "shared['lbrain-save-reservation-v1']={id:'busy',created:Date.now(),window_id:20,state:'saving'};"
+            "const closing=worker();closing.removedWindow(20);await new Promise(resolve=>setTimeout(resolve,0));"
+            "const concurrent=await send(worker().handler,{type:'confirmation.reserve',id:'concurrent'});"
+            "delete shared['lbrain-save-reservation-v1'];"
             "shared['lbrain-save-reservation-v1']={id:'stale',created:Date.now()-660000,release_origins:['https://crash.invalid/*']};"
             "const third=worker();await send(third.handler,{type:'confirmation.reserve',id:'capture-3'});await third.startup();"
             "shared['lbrain-save-reservation-v1']={id:'retry',created:Date.now(),release_origins:['https://retry.invalid/*']};"
             "failRemove=true;await worker().startup();const retainedOnFailure=Boolean(shared['lbrain-save-reservation-v1']);"
             "failRemove=false;await worker().startup();"
-            "console.log(JSON.stringify({reserved:reserved.reserved,error:decided.error,removed,retainedOnFailure,stale:Boolean(shared['lbrain-save-reservation-v1'])}))})()"
+            "console.log(JSON.stringify({reserved:reserved.reserved,error:decided.error,concurrent:concurrent.error,removed,retainedOnFailure,stale:Boolean(shared['lbrain-save-reservation-v1'])}))})()"
             ".catch(error=>{console.error(error);process.exit(1)});"
         )
         result = subprocess.run(
@@ -2569,6 +2573,7 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertTrue(output["reserved"])
         self.assertIn("confirmation is no longer available", output["error"])
         self.assertNotIn("owns the save slot", output["error"])
+        self.assertIn("already being saved", output["concurrent"])
         self.assertEqual(output["removed"], [
             "https://new.invalid/*", "https://second.invalid/*", "https://crash.invalid/*", "https://retry.invalid/*",
         ])

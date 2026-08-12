@@ -567,9 +567,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return { released: true };
     }
     if (message.type !== "confirmation.decide") return undefined;
+    const stored = (await chrome.storage.session.get(SAVE_RESERVATION))[SAVE_RESERVATION];
+    if (stored?.id !== message.id) throw new Error("This capture no longer owns the save slot.");
+    stored.state = "saving";
+    stored.window_id = null;
+    await chrome.storage.session.set({ [SAVE_RESERVATION]: stored });
     if (saveReservation !== message.id) {
-      const stored = (await chrome.storage.session.get(SAVE_RESERVATION))[SAVE_RESERVATION];
-      if (stored?.id !== message.id) throw new Error("This capture no longer owns the save slot.");
       saveReservation = message.id;
     }
     try {
@@ -618,7 +621,7 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.windows.onRemoved.addListener((windowId) => {
   chrome.storage.session.get(SAVE_RESERVATION).then((value) => {
     const stored = value[SAVE_RESERVATION];
-    if (stored?.window_id === windowId) return releaseSaveReservation(stored.id);
+    if (stored?.state !== "saving" && stored?.window_id === windowId) return releaseSaveReservation(stored.id);
     return undefined;
   }).catch(() => {});
   for (const [id, savedWindowId] of confirmationWindows) {
