@@ -554,9 +554,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       const stored = (await chrome.storage.session.get(SAVE_RESERVATION))[SAVE_RESERVATION];
       if (stored?.id !== message.id) throw new Error("This capture no longer owns the save slot.");
       const allowed = new Set(stored.allowed_origins || []);
-      stored.release_origins = Array.isArray(message.origins)
-        ? message.origins.filter((origin) => allowed.has(origin))
-        : [];
+      stored.release_origins = Array.from(new Set([
+        ...(stored.release_origins || []),
+        ...(Array.isArray(message.origins) ? message.origins.filter((origin) => allowed.has(origin)) : [])
+      ]));
       await chrome.storage.session.set({ [SAVE_RESERVATION]: stored });
       return { recorded: true };
     }

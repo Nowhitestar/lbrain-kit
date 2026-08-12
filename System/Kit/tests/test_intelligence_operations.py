@@ -2544,8 +2544,9 @@ with tempfile.TemporaryDirectory() as temporary:
             "vm.createContext(context);vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),context);return{handler,startup,removedWindow}}"
             "function send(handler,message){return new Promise(resolve=>handler(message,{},resolve))}"
             "(async()=>{const first=worker();const reserved=await send(first.handler,{type:'confirmation.reserve',id:'capture-1',"
-            "window_id:19,permission_origins:['https://new.invalid/*']});"
+            "window_id:19,permission_origins:['https://new.invalid/*','https://second.invalid/*']});"
             "await send(first.handler,{type:'confirmation.permissions',id:'capture-1',origins:['https://new.invalid/*']});"
+            "await send(first.handler,{type:'confirmation.permissions',id:'capture-1',origins:['https://second.invalid/*']});"
             "const restarted=worker();restarted.removedWindow(19);await new Promise(resolve=>setTimeout(resolve,0));"
             "const second=worker();await send(second.handler,{type:'confirmation.reserve',id:'capture-2'});"
             "const decided=await send(worker().handler,{type:'confirmation.decide',id:'capture-2'});"
@@ -2568,7 +2569,9 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertTrue(output["reserved"])
         self.assertIn("confirmation is no longer available", output["error"])
         self.assertNotIn("owns the save slot", output["error"])
-        self.assertEqual(output["removed"], ["https://new.invalid/*", "https://crash.invalid/*", "https://retry.invalid/*"])
+        self.assertEqual(output["removed"], [
+            "https://new.invalid/*", "https://second.invalid/*", "https://crash.invalid/*", "https://retry.invalid/*",
+        ])
         self.assertTrue(output["retainedOnFailure"])
         self.assertFalse(output["stale"])
 
