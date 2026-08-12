@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,28 @@ def operation(script: Path, name: str, root: Path, payload: dict[str, object]) -
         raise RuntimeError(result.stdout + result.stderr) from error
     if result.returncode:
         raise RuntimeError(json.dumps(output, ensure_ascii=False) + result.stderr)
+    return output
+
+
+def native_capture(
+    host: Path,
+    root: Path,
+    payload: dict[str, object],
+    staging: Path,
+) -> dict[str, object]:
+    raw = json.dumps(payload).encode("utf-8")
+    result = subprocess.run(
+        [sys.executable, str(host), "--root", str(root), "--staging-root", str(staging)],
+        input=struct.pack("=I", len(raw)) + raw,
+        capture_output=True,
+        check=False,
+    )
+    if len(result.stdout) < 4:
+        raise RuntimeError(result.stderr.decode(errors="replace"))
+    length = struct.unpack("=I", result.stdout[:4])[0]
+    output = json.loads(result.stdout[4 : 4 + length])
+    if result.returncode:
+        raise RuntimeError(json.dumps(output, ensure_ascii=False))
     return output
 
 
@@ -78,6 +101,7 @@ def main() -> int:
         root = base / "lbrain"
         shutil.copytree(ROOT, root, ignore=shutil.ignore_patterns(".git", "__pycache__"))
         capture_operations = root / "Skills/Kit/lbrain-capture/scripts/operations.py"
+        capture_host = root / "Skills/Kit/lbrain-capture/scripts/native_host.py"
         weave_operations = root / "Skills/Kit/lbrain-weave/scripts/operations.py"
         skill_operations = root / "Skills/Kit/lbrain-skill-manager/scripts/operations.py"
         skill = add_personal_skill(root)
@@ -143,26 +167,46 @@ def main() -> int:
             f"advanced={int(bool(complete['complete_checkpoint_advanced']))}"
         )
 
+        staging = base / "browser-staging"
+        staging.mkdir()
+        (staging / "figure.png").write_bytes(b"synthetic browser image")
         capture_payload: dict[str, object] = {
-            "destination": "source",
+            "schema": "lbrain.capture.v1",
             "title": "Synthetic Writing Evidence",
             "summary": "Fictional evidence for a concrete-opening rule.",
-            "origin": "synthetic://personal-intelligence/writing-evidence",
-            "capture": "full",
-            "content": "A useful opening makes one concrete claim before adding context.",
-            "note": "Evaluate this against the enabled writing Skill.",
+            "origin": "https://example.invalid/authenticated-writing-evidence",
+            "scope": "page",
+            "author": "Synthetic Author",
+            "published_at": "2026-08-11",
+            "content_markdown": (
+                "# Synthetic Writing Evidence\n\n"
+                "A useful opening makes one concrete claim before adding context.\n\n"
+                "![Figure](lbrain-asset://figure)"
+            ),
             "extraction_status": "complete",
+            "assets": [
+                {
+                    "name": "images/figure.png",
+                    "staged_name": "figure.png",
+                    "placeholder": "lbrain-asset://figure",
+                    "media_type": "image/png",
+                }
+            ],
         }
-        captured = operation(capture_operations, "capture.create", root, capture_payload)
-        print(f"CAPTURE status={captured['status']}")
-        source = root / str(captured["target"])
-        source.write_text(
-            source.read_text(encoding="utf-8").replace("weaving: pending", "weaving: woven", 1),
-            encoding="utf-8",
-        )
-        source_link = str(captured["target"]).removesuffix(".md")
-        wiki = root / "Knowledge/Wiki/Concepts/Synthetic-Concrete-Opening.md"
-        wiki.write_text(
+        captured = native_capture(capture_host, root, capture_payload, staging)
+        inbox = root / str(captured["target"])
+        if not str(captured.get("open_uri", "")).startswith("obsidian://open?path="):
+            raise RuntimeError("Capture receipt is not openable in Obsidian")
+        if "synthetic browser image" not in (
+            root / f"Inbox/Captures/_assets/{captured['capture_id']}/v1/files/images/figure.png"
+        ).read_bytes().decode():
+            raise RuntimeError("browser-staged asset was not preserved")
+        print(f"BROWSER CAPTURE status={captured['status']} inbox={int(inbox.is_file())} obsidian=1")
+
+        source_relative = "Knowledge/Sources/Synthetic-Writing-Evidence.md"
+        source_link = source_relative.removesuffix(".md")
+        wiki_relative = "Knowledge/Wiki/Concepts/Synthetic-Concrete-Opening.md"
+        wiki_content = (
             "---\n"
             "type: knowledge\nkind: concept\nsummary: Fictional concrete-opening rule.\n"
             "status: active\nvisibility: private\nsources:\n"
@@ -170,14 +214,31 @@ def main() -> int:
             "created: 2026-08-10\nupdated: 2026-08-10\n"
             "---\n# Synthetic Concrete Opening\n\n"
             f"Make one concrete claim before adding context. Source: [[{source_link}]].\n",
-            encoding="utf-8",
         )
+        weave_payload: dict[str, object] = {
+            "bundles": [{"path": captured["target"], "outcome": "woven", "source_path": source_relative}],
+            "wiki": [{"path": wiki_relative, "content": "".join(wiki_content)}],
+        }
+        weave_preview = operation(weave_operations, "weave.preview", root, weave_payload)
+        woven = operation(
+            weave_operations,
+            "weave.apply",
+            root,
+            {**weave_payload, "plan_hash": weave_preview["plan_hash"]},
+        )
+        source = root / source_relative
+        wiki = root / wiki_relative
+        if inbox.exists() or not source.is_file() or not wiki.is_file():
+            raise RuntimeError("Inbox Bundle was not atomically promoted to Source and Wiki")
+        if not (root / f"Knowledge/Sources/_assets/{captured['capture_id']}/v1/files/images/figure.png").is_file():
+            raise RuntimeError("promoted Source lost its browser-staged asset")
+        print(f"WEAVE status={woven['status']} source=1 wiki=1")
 
         proposal_payload: dict[str, object] = {
             "title": "Improve synthetic writing opening",
             "summary": "Add the concrete-opening rule to the enabled writing Skill.",
             "skill_name": "synthetic-writing",
-            "evidence": [str(captured["target"]), "Knowledge/Wiki/Concepts/Synthetic-Concrete-Opening.md"],
+            "evidence": [source_relative, wiki_relative],
             "rationale": "The woven evidence supplies a specific testable behavior.",
             "behavior_delta": "Require one concrete claim before contextual framing.",
             "expected_diff": "Update instructions and the opening behavior case.",
@@ -222,7 +283,7 @@ def main() -> int:
         applied = operation(skill_operations, "skill.apply", root, apply_payload)
         print(f"SKILL APPLY status={applied['status']}")
 
-        repeated_capture = operation(capture_operations, "capture.create", root, capture_payload)
+        repeated_capture = native_capture(capture_host, root, capture_payload, staging)
         repeated_proposal = operation(weave_operations, "proposal.create", root, proposal_payload)
         repeated_apply = operation(skill_operations, "skill.apply", root, apply_payload)
         print(

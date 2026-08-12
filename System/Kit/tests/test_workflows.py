@@ -37,11 +37,12 @@ class WorkflowSmokeTest(unittest.TestCase):
         self.assertIn("PROJECT CONFIGURE status=applied", result.stdout)
         self.assertIn("CHECKPOINT status=partial advanced=0", result.stdout)
         self.assertIn("CHECKPOINT status=applied advanced=1", result.stdout)
-        self.assertIn("CAPTURE status=applied", result.stdout)
+        self.assertIn("BROWSER CAPTURE status=saved inbox=1 obsidian=1", result.stdout)
+        self.assertIn("WEAVE status=applied source=1 wiki=1", result.stdout)
         self.assertIn("WEAVE proposal=applied", result.stdout)
         self.assertIn("SKILL PREVIEW status=applied version=1.1.0", result.stdout)
         self.assertIn("SKILL APPLY status=applied", result.stdout)
-        self.assertIn("RERUN capture=noop proposal=noop apply=noop", result.stdout)
+        self.assertIn("RERUN capture=already_saved proposal=noop apply=noop", result.stdout)
         self.assertIn("PERSONAL INTELLIGENCE TRACE PASS", result.stdout)
 
     def test_context_pack_intake_to_consumer_tracer(self) -> None:
@@ -206,16 +207,16 @@ class WorkflowSmokeTest(unittest.TestCase):
                 shutil.rmtree(kit / relative)
                 shutil.copytree(ROOT / relative, kit / relative, ignore=shutil.ignore_patterns("__pycache__"))
             with (kit / "System/Rules/Core/visibility.md").open("a", encoding="utf-8") as file:
-                file.write("\nUpgrade marker: v0.4.1.\n")
+                file.write("\nUpgrade marker: v0.5.0.\n")
             git(kit, "add", ".")
-            git(kit, "commit", "-m", "kit: release 0.4.1")
-            git(kit, "tag", "v0.4.1")
+            git(kit, "commit", "-m", "kit: release 0.5.0")
+            git(kit, "tag", "v0.5.0")
 
             git(personal, "fetch", "kit", "--tags")
             git(personal, "switch", "kit-base")
             git(personal, "merge", "--ff-only", "kit/main")
             git(personal, "switch", "main")
-            git(personal, "merge", "--no-ff", "v0.4.1", "-m", "kit: upgrade to v0.4.1")
+            git(personal, "merge", "--no-ff", "v0.5.0", "-m", "kit: upgrade to v0.5.0")
 
             checked = subprocess.run(
                 [sys.executable, str(personal / "System/Kit/check.py"), "--root", str(personal)],
@@ -236,10 +237,11 @@ class WorkflowSmokeTest(unittest.TestCase):
             enabled_text = (personal / "Skills/Enabled.md").read_text(encoding="utf-8")
             self.assertIn("[[Skills/Kit/lbrain-context-pack/SKILL]]", enabled_text)
             self.assertIn("[[Skills/Personal/personal-upgrade/SKILL]]", enabled_text)
-            self.assertEqual((personal / "System/Kit/VERSION").read_text(encoding="utf-8"), "0.4.1\n")
+            self.assertEqual((personal / "System/Kit/VERSION").read_text(encoding="utf-8"), "0.5.0\n")
             self.assertTrue((personal / "System/Kit/MIGRATIONS/0.3.0-to-0.4.0.md").is_file())
             self.assertTrue((personal / "System/Kit/MIGRATIONS/0.4.0-to-0.4.1.md").is_file())
-            self.assertIn("Upgrade marker: v0.4.1", (personal / "System/Rules/Core/visibility.md").read_text(encoding="utf-8"))
+            self.assertTrue((personal / "System/Kit/MIGRATIONS/0.4.1-to-0.5.0.md").is_file())
+            self.assertIn("Upgrade marker: v0.5.0", (personal / "System/Rules/Core/visibility.md").read_text(encoding="utf-8"))
             self.assertTrue(definition.is_file())
             self.assertIn(str(pack_remote), (personal / ".gitmodules").read_text(encoding="utf-8"))
             self.assertIn("personal-pack", git(personal, "submodule", "status"))

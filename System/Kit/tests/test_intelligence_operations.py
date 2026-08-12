@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -27,6 +31,9 @@ from transaction import mutation_locks  # noqa: E402
 
 
 CAPTURE_OPERATIONS = ROOT / "Skills/Kit/lbrain-capture/scripts/operations.py"
+CAPTURE_NATIVE_HOST = ROOT / "Skills/Kit/lbrain-capture/scripts/native_host.py"
+CAPTURE_NATIVE_INSTALLER = ROOT / "Skills/Kit/lbrain-capture/scripts/install_native_host.py"
+CAPTURE_EXTENSION = ROOT / "Skills/Kit/lbrain-capture/browser-extension"
 WEAVE_OPERATIONS = ROOT / "Skills/Kit/lbrain-weave/scripts/operations.py"
 SKILL_OPERATIONS = ROOT / "Skills/Kit/lbrain-skill-manager/scripts/operations.py"
 
@@ -52,6 +59,154 @@ class IntelligenceOperationTest(unittest.TestCase):
         )
         output = json.loads(result.stdout) if result.stdout else {}
         return result, output
+
+    def run_capture_native_host(
+        self,
+        root: Path,
+        payload: dict[str, object],
+        staging_root: Path | None = None,
+    ) -> tuple[subprocess.CompletedProcess[bytes], dict[str, object]]:
+        message = json.dumps(payload).encode("utf-8")
+        command = [sys.executable, str(CAPTURE_NATIVE_HOST), "--root", str(root)]
+        if staging_root is not None:
+            command.extend(("--staging-root", str(staging_root)))
+        result = subprocess.run(
+            command,
+            input=struct.pack("=I", len(message)) + message,
+            capture_output=True,
+            check=False,
+        )
+        if len(result.stdout) < 4:
+            return result, {}
+        offset = 0
+        output: dict[str, object] = {}
+        while offset + 4 <= len(result.stdout):
+            length = struct.unpack("=I", result.stdout[offset : offset + 4])[0]
+            offset += 4
+            output = json.loads(result.stdout[offset : offset + length])
+            offset += length
+        return result, output
+
+    def run_capture_native_stream(
+        self,
+        root: Path,
+        payload: dict[str, object],
+        snapshot: bytes,
+        snapshot_kind: str,
+        staging_root: Path,
+        attachments: dict[str, bytes] | None = None,
+        snapshot_media_type: str | None = None,
+        attachment_media_types: dict[str, str] | None = None,
+    ) -> tuple[subprocess.CompletedProcess[bytes], dict[str, object]]:
+        payload_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        attachments = attachments or {}
+        attachment_media_types = attachment_media_types or {}
+        stream_id = "test-stream"
+        messages: list[dict[str, object]] = [{
+            "protocol": "lbrain.capture.stream.v1",
+            "type": "begin",
+            "acknowledgements": True,
+            "integrity": "sha256-chunks",
+            "stream_id": stream_id,
+            "payload_size": len(payload_bytes),
+            "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+            "snapshot_kind": snapshot_kind,
+            "snapshot_size": len(snapshot),
+            "snapshot_sha256": hashlib.sha256(snapshot).hexdigest(),
+            "snapshot_media_type": snapshot_media_type
+            or ("multipart/related" if snapshot_kind == "mhtml" else "application/octet-stream"),
+            "attachments": [
+                {
+                    "id": asset_id,
+                    "size": len(value),
+                    "sha256": hashlib.sha256(value).hexdigest(),
+                    "media_type": attachment_media_types.get(asset_id, ""),
+                }
+                for asset_id, value in attachments.items()
+            ],
+        }]
+        for channel, value in (
+            ("payload", payload_bytes),
+            ("snapshot", snapshot),
+            *((f"asset:{asset_id}", value) for asset_id, value in attachments.items()),
+        ):
+            for sequence, offset in enumerate(range(0, len(value), 127)):
+                chunk = value[offset : offset + 127]
+                messages.append({
+                    "protocol": "lbrain.capture.stream.v1",
+                    "type": "chunk",
+                    "stream_id": stream_id,
+                    "channel": channel,
+                    "sequence": sequence,
+                    "data": base64.b64encode(chunk).decode("ascii"),
+                    "sha256": hashlib.sha256(chunk).hexdigest(),
+                })
+        messages.append({"protocol": "lbrain.capture.stream.v1", "type": "end", "stream_id": stream_id})
+        framed = b"".join(
+            struct.pack("=I", len(value)) + value
+            for value in (json.dumps(message).encode("utf-8") for message in messages)
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(CAPTURE_NATIVE_HOST),
+                "--root",
+                str(root),
+                "--staging-root",
+                str(staging_root),
+            ],
+            input=framed,
+            capture_output=True,
+            check=False,
+        )
+        if len(result.stdout) < 4:
+            return result, {}
+        offset = 0
+        output: dict[str, object] = {}
+        while offset + 4 <= len(result.stdout):
+            length = struct.unpack("=I", result.stdout[offset : offset + 4])[0]
+            offset += 4
+            output = json.loads(result.stdout[offset : offset + length])
+            offset += length
+        return result, output
+
+    def run_browser_fixtures(self, chrome: Path, fixtures: list[Path]) -> list[dict[str, object]]:
+        node_path = os.environ.get("LBRAIN_NODE_PATH")
+        if not node_path:
+            self.skipTest("LBRAIN_NODE_PATH is not configured for the optional real-browser fixture")
+        script = (
+            "const { chromium } = require('playwright');"
+            "(async () => {"
+            "const browser = await chromium.launch({ headless: true, executablePath: process.argv[1] });"
+            "const results = [];"
+            "for (const uri of process.argv.slice(3)) {"
+            "const page = await browser.newPage();"
+            "await page.goto(uri, { waitUntil: 'domcontentloaded', timeout: 10000 });"
+            "await page.addScriptTag({ path: process.argv[2] });"
+            "results.push(await page.evaluate(() => LBrainCapture.extract('page')));"
+            "await page.close();"
+            "}"
+            "console.log(JSON.stringify(results));"
+            "await browser.close();"
+            "})().catch(error => { console.error(error); process.exit(1); });"
+        )
+        result = subprocess.run(
+            [
+                "node",
+                "-e",
+                script,
+                str(chrome),
+                str(CAPTURE_EXTENSION / "extractor.js"),
+                *(fixture.as_uri() for fixture in fixtures),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+            env={**os.environ, "NODE_PATH": node_path},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
 
     def run_weave_operation(
         self,
@@ -939,11 +1094,11 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertTrue(contains_key({"oauth": {"refresh_token": "opaque"}}, {"cursor"}))
             self.assertTrue(contains_key({"session_token": "opaque"}, {"cursor"}))
 
-    def test_capture_create_saves_one_source_and_deduplicates_retries(self) -> None:
+    def test_capture_create_saves_one_inbox_original_and_deduplicates_retries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = self.copy_repo(Path(temporary))
             payload: dict[str, object] = {
-                "destination": "source",
+                "destination": "inbox",
                 "title": "Synthetic Writing Guide",
                 "summary": "A source about concrete writing behavior.",
                 "origin": "https://example.invalid/writing-guide",
@@ -955,60 +1110,1609 @@ class IntelligenceOperationTest(unittest.TestCase):
 
             result, captured = self.run_capture_operation(root, "capture.create", payload)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(captured["status"], "applied")
-            self.assertEqual(len(captured["affected_paths"]), 1)
-            relative = str(captured["affected_paths"][0])
-            self.assertTrue(relative.startswith("Knowledge/Sources/"))
-            source = root / relative
-            source_text = source.read_text(encoding="utf-8")
-            self.assertIn("type: source", source_text)
-            self.assertIn("weaving: pending", source_text)
-            self.assertIn("https://example.invalid/writing-guide", source_text)
-            self.assertIn("Prefer concrete verbs", source_text)
-            self.assertIn("Consider this for my writing Skill.", source_text)
+            self.assertEqual(captured["status"], "saved")
+            self.assertEqual(len(captured["affected_paths"]), 2)
+            relative = str(captured["target"])
+            self.assertTrue(relative.startswith("Inbox/Captures/"))
+            capture = root / relative
+            capture_text = capture.read_text(encoding="utf-8")
+            self.assertIn("type: note", capture_text)
+            self.assertIn("capture_version: 1", capture_text)
+            self.assertIn("weaving: pending", capture_text)
+            self.assertIn("media_manifest:", capture_text)
+            self.assertIn("https://example.invalid/writing-guide", capture_text)
+            self.assertIn("Prefer concrete verbs", capture_text)
+            self.assertIn("Consider this for my writing Skill.", capture_text)
 
             repeat_result, repeated = self.run_capture_operation(root, "capture.create", payload)
             self.assertEqual(repeat_result.returncode, 0, repeat_result.stderr)
-            self.assertEqual(repeated["status"], "noop")
+            self.assertEqual(repeated["status"], "already_saved")
             self.assertEqual(repeated["target"], relative)
-            matching = list((root / "Knowledge/Sources").glob("*Synthetic-Writing-Guide*.md"))
-            self.assertEqual(matching, [source])
+            matching = list((root / "Inbox/Captures").glob("*Synthetic-Writing-Guide*.md"))
+            self.assertEqual(matching, [capture])
+
+            changed_result, changed = self.run_capture_operation(
+                root,
+                "capture.create",
+                {**payload, "content": "A changed original becomes an immutable second version."},
+            )
+            self.assertEqual(changed_result.returncode, 0, changed_result.stderr)
+            self.assertEqual(changed["status"], "new_version")
+            self.assertEqual(changed["version"], 2)
+            self.assertNotEqual(changed["target"], relative)
+
+            rejected_result, rejected = self.run_capture_operation(
+                root, "capture.create", {**payload, "destination": "source"}
+            )
+            self.assertNotEqual(rejected_result.returncode, 0)
+            self.assertEqual(rejected["status"], "failed")
+            html_result, html_rejected = self.run_capture_native_stream(
+                root,
+                payload,
+                b"<!doctype html><title>Sign in</title>",
+                "binary",
+                staging,
+                snapshot_media_type="text/html",
+            )
+            self.assertNotEqual(html_result.returncode, 0)
+            self.assertEqual(html_rejected["status"], "failed")
+
+            reference_result, reference = self.run_capture_operation(
+                root,
+                "capture.create",
+                {
+                    "destination": "inbox",
+                    "title": "URL-only Reference <!-- lbrain:capture:end -->",
+                    "summary": "A source retained before full extraction.",
+                    "origin": "https://example.invalid/url-only-reference",
+                },
+            )
+            self.assertEqual(reference_result.returncode, 0, reference_result.stderr)
+            self.assertEqual(reference["status"], "saved")
+            reference_text = (root / str(reference["target"])).read_text(encoding="utf-8")
+            self.assertIn(
+                "[https://example.invalid/url-only-reference](https://example.invalid/url-only-reference)",
+                reference_text,
+            )
+            self.assertEqual(reference_text.count("<!-- lbrain:capture:end -->"), 1)
+
+    def test_native_host_saves_idempotent_and_versioned_inbox_bundles(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.copy_repo(Path(temporary))
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "Capture Test"], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.email", "capture@example.invalid"],
+                check=True,
+            )
+            payload: dict[str, object] = {
+                "schema": "lbrain.capture.v1",
+                "title": "Rendered Article",
+                "summary": "A rendered article saved from the authenticated browser tab.",
+                "origin": "https://example.invalid/rendered-article",
+                "scope": "page",
+                "author": "Example Author",
+                "published_at": "2026-08-11T09:00:00+08:00",
+                "content_markdown": "# Rendered Article\n\nThe first saved body.",
+                "extraction_status": "complete",
+                "assets": [],
+            }
+            result, saved = self.run_capture_native_host(root, payload)
+
+            self.assertEqual(result.returncode, 0, (result.stderr.decode(), saved))
+            self.assertEqual(saved["status"], "saved")
+            self.assertRegex(str(saved["operation_id"]), r"^[0-9a-f]{20}$")
+            self.assertEqual(saved["version"], 1)
+            target = str(saved["target"])
+            self.assertTrue(target.startswith("Inbox/Captures/"))
+            note = root / target
+            text = note.read_text(encoding="utf-8")
+            self.assertIn("capture_version: 1", text)
+            self.assertIn("weaving: pending", text)
+            self.assertIn("- Author: Example Author", text)
+            self.assertIn("- Published: 2026-08-11T09:00:00+08:00", text)
+            self.assertIn("The first saved body.", text)
+            self.assertTrue(str(saved["open_uri"]).startswith("obsidian://open?path="))
+            capture_id = str(saved["capture_id"])
+            manifest = root / f"Inbox/Captures/_assets/{capture_id}/v1/manifest.json"
+            self.assertTrue(manifest.is_file())
+            self.assertEqual(json.loads(manifest.read_text(encoding="utf-8"))["assets"], [])
+            self.assertTrue(dict(saved["git"])["committed"])
+            self.assertIn(
+                "capture: Rendered Article",
+                subprocess.run(
+                    ["git", "-C", str(root), "log", "-1", "--format=%s"],
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                ).stdout,
+            )
+
+            repeat_result, repeated = self.run_capture_native_host(root, payload)
+            self.assertEqual(repeat_result.returncode, 0, repeat_result.stderr.decode())
+            self.assertEqual(repeated["status"], "already_saved")
+            self.assertEqual(repeated["target"], target)
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "-C", str(root), "rev-list", "--count", "HEAD"],
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                ).stdout.strip(),
+                "1",
+            )
+
+            changed = {**payload, "content_markdown": "# Rendered Article\n\nA changed second body."}
+            version_result, versioned = self.run_capture_native_host(root, changed)
+            self.assertEqual(version_result.returncode, 0, (version_result.stderr.decode(), versioned))
+            self.assertEqual(versioned["status"], "new_version")
+            self.assertEqual(versioned["version"], 2)
+            self.assertNotEqual(versioned["target"], target)
+            self.assertIn(f"previous_version: {json.dumps(target)}", (root / str(versioned["target"])).read_text())
+            self.assertIn("The first saved body.", note.read_text(encoding="utf-8"))
+
+    def test_native_host_rolls_back_a_bundle_that_fails_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.copy_repo(Path(temporary))
+            result, failed = self.run_capture_native_host(
+                root,
+                {
+                    "schema": "lbrain.capture.v1",
+                    "title": "Invalid Rendered Article",
+                    "summary": "A synthetic capture that must roll back.",
+                    "origin": "https://example.invalid/invalid-rendered-article",
+                    "scope": "page",
+                    "content_markdown": "A missing internal link: [[Does-Not-Exist]].",
+                    "extraction_status": "complete",
+                    "assets": [],
+                },
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed["affected_paths"], [])
+            self.assertEqual(list((root / "Inbox/Captures").glob("*.md")), [root / "Inbox/Captures/README.md"])
+            self.assertFalse(list((root / "Inbox/Captures/_assets").glob("*")))
+
+    def test_native_host_preserves_only_manifest_verified_staged_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = self.copy_repo(base)
+            staging = base / "staging"
+            staging.mkdir()
+            media = b"synthetic-image-bytes"
+            (staging / "cover.png").write_bytes(media)
+            payload: dict[str, object] = {
+                "schema": "lbrain.capture.v1",
+                "title": "Article With Media",
+                "summary": "A rendered article with one staged image.",
+                "origin": "https://example.invalid/article-with-media",
+                "scope": "page",
+                "content_markdown": "An article with ![Cover](lbrain-asset://cover).",
+                "extraction_status": "complete",
+                "assets": [
+                    {
+                        "name": "images/cover.png",
+                        "staged_name": "cover.png",
+                        "placeholder": "lbrain-asset://cover",
+                        "media_type": "image/png",
+                    }
+                ],
+            }
+
+            saved_result, saved = self.run_capture_native_host(root, payload, staging)
+
+            self.assertEqual(saved_result.returncode, 0, (saved_result.stderr.decode(), saved))
+            self.assertFalse(dict(saved["git"])["committed"])
+            self.assertIn("Git repository is unavailable", str(dict(saved["git"])["warning"]))
+            capture_id = str(saved["capture_id"])
+            preserved = root / f"Inbox/Captures/_assets/{capture_id}/v1/files/images/cover.png"
+            self.assertEqual(preserved.read_bytes(), media)
+            manifest = json.loads(
+                (root / f"Inbox/Captures/_assets/{capture_id}/v1/manifest.json").read_text()
+            )
+            self.assertEqual(manifest["assets"][0]["sha256"], hashlib.sha256(media).hexdigest())
+            note = (root / str(saved["target"])).read_text(encoding="utf-8")
+            self.assertIn(
+                f"![Cover](_assets/{capture_id}/v1/files/images/cover.png)",
+                note,
+            )
+            self.assertNotIn("lbrain-asset://", note)
+
+            corrupt = {
+                **payload,
+                "origin": "https://example.invalid/corrupt-media",
+                "assets": [
+                    {
+                        **dict(payload["assets"][0]),
+                        "sha256": "0" * 64,
+                        "size": len(media),
+                    }
+                ],
+            }
+            failed_result, failed = self.run_capture_native_host(root, corrupt, staging)
+            self.assertNotEqual(failed_result.returncode, 0)
+            self.assertEqual(failed["status"], "failed")
+            self.assertFalse(list((root / "Inbox/Captures").glob("*corrupt-media*.md")))
+
+            injected_result, injected = self.run_capture_native_host(
+                root,
+                {
+                    **payload,
+                    "origin": "https://example.invalid/injected-asset-name",
+                    "assets": [{
+                        **dict(payload["assets"][0]),
+                        "name": "images/<!-- lbrain:capture:end -->.png",
+                    }],
+                },
+                staging,
+            )
+            self.assertNotEqual(injected_result.returncode, 0)
+            self.assertEqual(injected["status"], "failed")
+
+            readable_result, readable = self.run_capture_native_host(
+                root,
+                {
+                    **payload,
+                    "origin": "https://example.invalid/readable-asset-name",
+                    "assets": [{
+                        **dict(payload["assets"][0]),
+                        "name": "documents/2026 年度报告 #1).pdf",
+                    }],
+                },
+                staging,
+            )
+            self.assertEqual(readable_result.returncode, 0, (readable_result.stderr.decode(), readable))
+            self.assertTrue(
+                (root / f"Inbox/Captures/_assets/{readable['capture_id']}/v1/files/documents/2026 年度报告 #1).pdf").is_file()
+            )
+            readable_note = (root / str(readable["target"])).read_text(encoding="utf-8")
+            self.assertIn("documents/2026%20%E5%B9%B4%E5%BA%A6%E6%8A%A5%E5%91%8A%20%231%29.pdf", readable_note)
+
+    def test_native_stream_saves_a_generic_page_as_html_without_download_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = self.copy_repo(base)
+            staging = base / "staging"
+            staging.mkdir()
+            image = b"\x89PNG\r\n\x1a\nsynthetic PNG bytes"
+            larger_image = b"\x89PNG\r\n\x1a\nsecond synthetic PNG bytes"
+            late_image = b"\x89PNG\r\n\x1a\nlate PNG bytes"
+            report = b"PK synthetic document bytes"
+            disguised_video = b"FLV\x01 disguised video bytes"
+            boundary = "lbrain-boundary"
+            archive = (
+                "MIME-Version: 1.0\r\n"
+                f'Content-Type: multipart/related; boundary="{boundary}"\r\n\r\n'
+                f"--{boundary}\r\nContent-Type: text/html; charset=utf-8\r\n"
+                "Content-Location: https://alpha.example.invalid/\r\n\r\n"
+                "<html><body><main><h1>Alpha School</h1></main></body></html>\r\n"
+                f"--{boundary}\r\nContent-Type: image/png\r\nContent-Transfer-Encoding: base64\r\n"
+                "Content-Location: https://alpha.example.invalid/hero.png\r\n\r\n"
+                f"{base64.b64encode(image).decode('ascii')}\r\n"
+                f"--{boundary}\r\nContent-Type: image/png\r\nContent-Transfer-Encoding: base64\r\n"
+                "Content-Location: https://alpha.example.invalid/hero.png?size=2\r\n\r\n"
+                f"{base64.b64encode(larger_image).decode('ascii')}\r\n"
+                f"--{boundary}\r\nContent-Type: video/mp4\r\nContent-Transfer-Encoding: base64\r\n"
+                "Content-Location: https://alpha.example.invalid/hero.mp4\r\n\r\n"
+                f"{base64.b64encode(b'video must not persist').decode('ascii')}\r\n"
+                f"--{boundary}--\r\n"
+            ).encode("ascii")
+            payload: dict[str, object] = {
+                "schema": "lbrain.capture.v1",
+                "title": "Alpha School",
+                "summary": "The rendered homepage.",
+                "origin": "https://alpha.example.invalid/",
+                "scope": "page",
+                "author": "",
+                "published_at": "",
+                "capture_kind": "html",
+                "content_markdown": (
+                    "[打开保存的 HTML 快照](lbrain-asset://html-snapshot)\n\n"
+                    "- 原页面：[https://alpha.example.invalid/](https://alpha.example.invalid/)"
+                ),
+                "snapshot_html": (
+                    "<!doctype html><html><head><meta charset=\"utf-8\"></head><body>"
+                    "<main><h1>Alpha School</h1><img src=\"https://alpha.example.invalid/hero.png\"></main>"
+                    "<img src=\"https://alpha.example.invalid/hero.png?size=2\">"
+                    "<a href=\"https://alpha.example.invalid/report.docx?download=1&amp;source=home\">Report</a>"
+                    "<audio src=\"https://alpha.example.invalid/lesson.mp3\"></audio>"
+                    "<svg><image href=\"https://alpha.example.invalid/chart.svg\"></image></svg>"
+                    "</body></html>"
+                ),
+                "extraction_status": "complete",
+                "remote_assets": [{
+                    "id": "hero",
+                    "url": "https://alpha.example.invalid/hero.png",
+                    "name": "images/001-hero.png",
+                    "media_type": "image/png",
+                }, {
+                    "id": "hero-large",
+                    "url": "https://alpha.example.invalid/hero.png?size=2",
+                    "name": "images/002-hero-large.png",
+                    "media_type": "image/png",
+                }, {
+                    "id": "report",
+                    "url": "https://alpha.example.invalid/report.docx?download=1&source=home",
+                    "name": "documents/report.docx",
+                    "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                }, {
+                    "id": "disguised-video",
+                    "url": "https://alpha.example.invalid/hero.mp4",
+                    "name": "documents/hero.bin",
+                    "media_type": "application/octet-stream",
+                }, {
+                    "id": "disguised-flv",
+                    "url": "https://alpha.example.invalid/lesson.bin",
+                    "name": "documents/lesson.bin",
+                    "media_type": "application/octet-stream",
+                }, {
+                    "id": "missing-audio",
+                    "url": "https://alpha.example.invalid/lesson.mp3",
+                    "name": "audio/lesson.mp3",
+                    "media_type": "audio/mpeg",
+                }, {
+                    "id": "missing-svg",
+                    "url": "https://alpha.example.invalid/chart.svg",
+                    "name": "images/chart.svg",
+                    "media_type": "image/svg+xml",
+                }],
+                "assets": [],
+            }
+            original_source_content = f'{payload["content_markdown"]}\0{payload["snapshot_html"]}'
+            source_identity = "\0".join((
+                str(payload["title"]), "", "", original_source_content
+            ))
+            payload["source_content_markdown"] = original_source_content
+            payload["source_content_hash"] = hashlib.sha256(source_identity.encode()).hexdigest()
+
+            result, saved = self.run_capture_native_stream(
+                root,
+                payload,
+                archive,
+                "mhtml",
+                staging,
+                {"report": report, "disguised-flv": disguised_video},
+            )
+
+            self.assertEqual(result.returncode, 0, (result.stderr.decode(), saved))
+            self.assertEqual(saved["status"], "partial")
+            capture_id = str(saved["capture_id"])
+            files = root / f"Inbox/Captures/_assets/{capture_id}/v1/files"
+            self.assertEqual((files / "images/001-hero.png").read_bytes(), image)
+            self.assertEqual((files / "images/002-hero-large.png").read_bytes(), larger_image)
+            self.assertEqual((files / "documents/report.docx").read_bytes(), report)
+            html = (files / "snapshot/page.html").read_text(encoding="utf-8")
+            self.assertIn("../images/001-hero.png", html)
+            self.assertIn("../images/002-hero-large.png", html)
+            self.assertNotIn("../images/001-hero.png?size=2", html)
+            self.assertIn("../documents/report.docx", html)
+            self.assertNotIn("https://alpha.example.invalid/hero.png", html)
+            self.assertNotIn("report.docx?download=1", html)
+            self.assertNotIn("https://alpha.example.invalid/lesson.mp3", html)
+            self.assertNotIn("https://alpha.example.invalid/chart.svg", html)
+            self.assertFalse(list(files.rglob("*.mp4")))
+            self.assertFalse((files / "documents/lesson.bin").exists())
+            note = (root / str(saved["target"])).read_text(encoding="utf-8")
+            self.assertIn("snapshot/page.html", note)
+            self.assertEqual(list(staging.iterdir()), [])
+
+            overlap_payload = {
+                **payload,
+                "origin": "https://alpha.example.invalid/overlap",
+                "content_markdown": (
+                    "![Small](https://alpha.example.invalid/hero.png)\n\n"
+                    "![Large](https://alpha.example.invalid/hero.png?size=missing)\n\n"
+                    "[Download variant](https://alpha.example.invalid/hero.png?download=1)"
+                ),
+                "snapshot_html": (
+                    '<img src="https://alpha.example.invalid/hero.png">'
+                    '<img src="https://alpha.example.invalid/hero.png?size=missing">'
+                    '<a href="https://redirect.example.invalid/?next=https://alpha.example.invalid/hero.png">Redirect</a>'
+                    '<a href="https://alpha.example.invalid/hero.png?download=1">Download</a>'
+                ),
+                "remote_assets": [{
+                    "id": "small",
+                    "url": "https://alpha.example.invalid/hero.png",
+                    "name": "images/small.png",
+                    "media_type": "image/png",
+                }, {
+                    "id": "large",
+                    "url": "https://alpha.example.invalid/hero.png?size=missing",
+                    "name": "images/large.png",
+                    "media_type": "image/png",
+                }],
+            }
+            overlap_payload.pop("source_content_hash", None)
+            overlap_payload.pop("source_content_markdown", None)
+            overlap_result, overlap = self.run_capture_native_stream(
+                root, overlap_payload, archive, "mhtml", staging
+            )
+            self.assertEqual(overlap_result.returncode, 0, (overlap_result.stderr.decode(), overlap))
+            self.assertEqual(overlap["status"], "partial")
+            overlap_files = root / f"Inbox/Captures/_assets/{overlap['capture_id']}/v1/files"
+            overlap_html = (overlap_files / "snapshot/page.html").read_text(encoding="utf-8")
+            self.assertIn("../images/small.png", overlap_html)
+            self.assertIn("about:blank#lbrain-missing-", overlap_html)
+            self.assertNotIn("../images/small.png?size=missing", overlap_html)
+            self.assertIn("?next=https://alpha.example.invalid/hero.png", overlap_html)
+            self.assertIn("https://alpha.example.invalid/hero.png?download=1", overlap_html)
+            overlap_note = (root / str(overlap["target"])).read_text(encoding="utf-8")
+            self.assertNotIn("lbrain-asset://small?size=missing", overlap_note)
+            self.assertIn("https://alpha.example.invalid/hero.png?download=1", overlap_note)
+
+            late_source = "https://alpha.example.invalid/late.png"
+            payload["origin"] = "https://alpha.example.invalid/recovery"
+            payload["content_markdown"] = (
+                "[打开保存的 HTML 快照](lbrain-asset://html-snapshot)\n\n"
+                "- 原页面：[https://alpha.example.invalid/recovery](https://alpha.example.invalid/recovery)"
+            )
+            payload["snapshot_html"] = str(payload["snapshot_html"]).replace(
+                "</main>", f'<img src="{late_source}"></main>'
+            )
+            cast_assets = list(payload["remote_assets"])
+            cast_assets.append({
+                "id": "late",
+                "url": late_source,
+                "name": "images/002-late.png",
+                "media_type": "image/png",
+            })
+            payload["remote_assets"] = cast_assets
+            source_content = f'{payload["content_markdown"]}\0{payload["snapshot_html"]}'
+            payload["source_content_markdown"] = source_content
+            payload["source_content_hash"] = hashlib.sha256(
+                "\0".join((str(payload["title"]), "", "", source_content)).encode()
+            ).hexdigest()
+            first_missing, first_receipt = self.run_capture_native_stream(
+                root, payload, archive, "mhtml", staging, {"report": report, "disguised-flv": disguised_video}
+            )
+            self.assertEqual(first_missing.returncode, 0, (first_missing.stderr.decode(), first_receipt))
+            self.assertEqual(first_receipt["status"], "partial")
+            self.assertEqual(first_receipt["version"], 1)
+            payload["recovery_target"] = first_receipt["target"]
+            payload["expected_hash"] = first_receipt["expected_hash"]
+            recovered_archive = archive.replace(
+                f"--{boundary}--\r\n".encode(),
+                (
+                    f"--{boundary}\r\nContent-Type: image/png\r\nContent-Transfer-Encoding: base64\r\n"
+                    f"Content-Location: {late_source}\r\n\r\n"
+                    f"{base64.b64encode(late_image).decode('ascii')}\r\n--{boundary}--\r\n"
+                ).encode("ascii"),
+            )
+            first_files = root / f"Inbox/Captures/_assets/{first_receipt['capture_id']}/v1/files"
+            first_snapshot = first_files / "snapshot/page.html"
+            original_snapshot = first_snapshot.read_bytes()
+            first_snapshot.write_bytes(original_snapshot + b"\n<!-- user edit -->\n")
+            conflict_result, conflict = self.run_capture_native_stream(
+                root, payload, recovered_archive, "mhtml", staging, {"report": report, "disguised-flv": disguised_video}
+            )
+            self.assertNotEqual(conflict_result.returncode, 0)
+            self.assertEqual(conflict["status"], "failed")
+            self.assertTrue(first_snapshot.read_bytes().endswith(b"<!-- user edit -->\n"))
+            first_snapshot.write_bytes(original_snapshot)
+            recovered_result, recovered = self.run_capture_native_stream(
+                root, payload, recovered_archive, "mhtml", staging, {"report": report, "disguised-flv": disguised_video}
+            )
+            self.assertEqual(recovered_result.returncode, 0, (recovered_result.stderr.decode(), recovered))
+            self.assertEqual(recovered["target"], first_receipt["target"])
+            self.assertEqual(recovered["version"], first_receipt["version"])
+            recovered_files = root / f"Inbox/Captures/_assets/{recovered['capture_id']}/v{recovered['version']}/files"
+            self.assertTrue((recovered_files / "images/002-late.png").is_file())
+            self.assertIn("../images/002-late.png", (recovered_files / "snapshot/page.html").read_text(encoding="utf-8"))
+
+            rotating_origin = "https://alpha.example.invalid/rotating-recovery"
+            first_url, second_url = (
+                "https://alpha.example.invalid/first.png",
+                "https://alpha.example.invalid/second.png",
+            )
+            rotating_payload = {
+                "schema": "lbrain.capture.v1",
+                "title": "Rotating recovery",
+                "summary": "Assets that succeed on different attempts remain linked.",
+                "origin": rotating_origin,
+                "scope": "page",
+                "capture_kind": "html",
+                "content_markdown": "[HTML](lbrain-asset://html-snapshot)",
+                "snapshot_html": f'<img src="{first_url}"><img src="{second_url}">',
+                "extraction_status": "complete",
+                "remote_assets": [
+                    {"id": "first", "url": first_url, "name": "images/first.png", "media_type": "image/png"},
+                    {"id": "second", "url": second_url, "name": "images/second.png", "media_type": "image/png"},
+                ],
+                "assets": [],
+            }
+            rotating_source = (
+                f'{rotating_payload["content_markdown"]}\0{rotating_payload["snapshot_html"]}'
+            )
+            rotating_payload["source_content_markdown"] = rotating_source
+            rotating_payload["source_content_hash"] = hashlib.sha256(
+                "\0".join((
+                    str(rotating_payload["title"]), "", "", rotating_source
+                )).encode()
+            ).hexdigest()
+
+            def image_archive(source: str, body: bytes) -> bytes:
+                return (
+                    "MIME-Version: 1.0\r\n"
+                    f'Content-Type: multipart/related; boundary="{boundary}"\r\n\r\n'
+                    f"--{boundary}\r\nContent-Type: image/png\r\nContent-Transfer-Encoding: base64\r\n"
+                    f"Content-Location: {source}\r\n\r\n"
+                    f"{base64.b64encode(body).decode('ascii')}\r\n--{boundary}--\r\n"
+                ).encode("ascii")
+
+            rotating_first_result, rotating_first = self.run_capture_native_stream(
+                root, rotating_payload, image_archive(first_url, image), "mhtml", staging
+            )
+            self.assertEqual(rotating_first_result.returncode, 0, rotating_first)
+            self.assertEqual(rotating_first["status"], "partial")
+            rotating_payload.update({
+                "recovery_target": rotating_first["target"],
+                "expected_hash": rotating_first["expected_hash"],
+            })
+            rotating_retry_result, rotating_retry = self.run_capture_native_stream(
+                root, rotating_payload, image_archive(second_url, late_image), "mhtml", staging
+            )
+            self.assertEqual(rotating_retry_result.returncode, 0, rotating_retry)
+            self.assertEqual(rotating_retry["status"], "saved")
+            rotating_files = root / (
+                f"Inbox/Captures/_assets/{rotating_retry['capture_id']}/v1/files"
+            )
+            rotating_html = (rotating_files / "snapshot/page.html").read_text(encoding="utf-8")
+            self.assertIn("../images/first.png", rotating_html)
+            self.assertIn("../images/second.png", rotating_html)
+            self.assertNotIn("lbrain-missing", rotating_html)
+
+            encoded_source = "https://alpha.example.invalid/a%2Fb.png"
+            slash_archive = (
+                "MIME-Version: 1.0\r\n"
+                f'Content-Type: multipart/related; boundary="{boundary}"\r\n\r\n'
+                f"--{boundary}\r\nContent-Type: image/png\r\nContent-Transfer-Encoding: base64\r\n"
+                "Content-Location: https://alpha.example.invalid/a/b.png\r\n\r\n"
+                f"{base64.b64encode(image).decode('ascii')}\r\n--{boundary}--\r\n"
+            ).encode("ascii")
+            collision_result, collision = self.run_capture_native_stream(
+                root,
+                {
+                    "schema": "lbrain.capture.v1",
+                    "title": "Distinct encoded asset",
+                    "summary": "Reserved URL escapes remain distinct.",
+                    "origin": "https://alpha.example.invalid/encoded-asset",
+                    "scope": "page",
+                    "content_markdown": f"![Asset]({encoded_source})",
+                    "capture_kind": "article",
+                    "extraction_status": "complete",
+                    "remote_assets": [{
+                        "id": "encoded",
+                        "url": encoded_source,
+                        "name": "images/encoded.png",
+                        "media_type": "image/png",
+                    }],
+                    "assets": [],
+                },
+                slash_archive,
+                "mhtml",
+                staging,
+            )
+            self.assertEqual(collision_result.returncode, 0, (collision_result.stderr.decode(), collision))
+            self.assertEqual(collision["status"], "partial")
+            collision_files = root / f"Inbox/Captures/_assets/{collision['capture_id']}/v1/files"
+            self.assertFalse((collision_files / "images/encoded.png").exists())
+
+    def test_native_stream_rejects_disclosure_inside_html_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = self.copy_repo(base)
+            staging = base / "staging"
+            staging.mkdir()
+            payload = {
+                "schema": "lbrain.capture.v1",
+                "title": "Unsafe snapshot",
+                "summary": "A generic page.",
+                "origin": "https://example.invalid/unsafe",
+                "scope": "page",
+                "content_markdown": "[HTML](lbrain-asset://html-snapshot)",
+                "snapshot_html": '<main>api_key="fixture-hardcoded-secret-12345"</main>',
+                "capture_kind": "html",
+                "extraction_status": "complete",
+                "remote_assets": [],
+                "assets": [],
+            }
+            result, rejected = self.run_capture_native_stream(
+                root, payload, b"", "none", staging
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(rejected["status"], "failed")
+            self.assertFalse(list((root / "Inbox/Captures").glob("*Unsafe*")))
+
+            payload["origin"] = "https://example.invalid/unsafe-svg"
+            payload["snapshot_html"] = ""
+            payload["content_markdown"] = "![SVG](lbrain-asset://unsafe-svg)"
+            payload["remote_assets"] = [{
+                "id": "unsafe-svg",
+                "url": "https://example.invalid/unsafe.svg",
+                "name": "images/unsafe.svg",
+                "media_type": "image/svg+xml",
+            }]
+            svg_result, svg_rejected = self.run_capture_native_stream(
+                root,
+                payload,
+                b"",
+                "none",
+                staging,
+                {"unsafe-svg": b'<svg xmlns="http://www.w3.org/2000/svg"><text api_key="fixture-hardcoded-secret-12345">x</text></svg>'},
+            )
+            self.assertNotEqual(svg_result.returncode, 0)
+            self.assertEqual(svg_rejected["status"], "failed")
+
+            payload["origin"] = "https://example.invalid/active-svg"
+            active_svg = (
+                b"<!--" + b"x" * 5000 + b"-->"
+                b'<?xml-stylesheet href="https://attacker.invalid/style.css"?>'
+                b'<svg xmlns="http://www.w3.org/2000/svg"><rect fill="url(\'https://attacker.invalid/pattern.svg#x\')"/></svg>'
+            )
+            active_result, active = self.run_capture_native_stream(
+                root,
+                payload,
+                b"",
+                "none",
+                staging,
+                {"unsafe-svg": active_svg},
+                attachment_media_types={"unsafe-svg": "text/plain"},
+            )
+            self.assertEqual(active_result.returncode, 0, (active_result.stderr.decode(), active))
+            self.assertEqual(active["status"], "partial")
+            self.assertFalse(list((root / "Inbox/Captures/_assets").rglob("unsafe.svg")))
+
+    def test_native_stream_saves_direct_pdf_and_rejects_disguised_video(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = self.copy_repo(base)
+            staging = base / "staging"
+            staging.mkdir()
+            payload = {
+                "schema": "lbrain.capture.v1",
+                "title": "Direct report",
+                "summary": "The original PDF.",
+                "origin": "https://example.invalid/report.pdf",
+                "scope": "page",
+                "content_markdown": "[Original PDF](lbrain-asset://direct-document)",
+                "capture_kind": "document",
+                "extraction_status": "complete",
+                "remote_assets": [{
+                    "id": "direct-document",
+                    "url": "https://example.invalid/report.pdf",
+                    "name": "documents/report.pdf",
+                    "media_type": "application/pdf",
+                }],
+                "assets": [],
+            }
+            saved_result, saved = self.run_capture_native_stream(
+                root,
+                payload,
+                b"%PDF-1.7\nsynthetic report",
+                "binary",
+                staging,
+                snapshot_media_type="text/plain",
+            )
+            self.assertEqual(saved_result.returncode, 0, (saved_result.stderr.decode(), saved))
+            files = root / f"Inbox/Captures/_assets/{saved['capture_id']}/v1/files"
+            self.assertTrue((files / "documents/report.pdf").is_file())
+            manifest = json.loads((files.parent / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["assets"][0]["media_type"], "application/pdf")
+            note = (root / str(saved["target"])).read_text(encoding="utf-8")
+            self.assertIn("Extracted PDF text", note)
+
+            payload["origin"] = "https://example.invalid/disguised.pdf"
+            rejected_result, rejected = self.run_capture_native_stream(
+                root, payload, b"FLV\x01 disguised video", "binary", staging
+            )
+            self.assertNotEqual(rejected_result.returncode, 0)
+            self.assertEqual(rejected["status"], "failed")
+
+    def test_chrome_extension_extracts_rendered_article_with_minimal_permissions(self) -> None:
+        manifest = json.loads((CAPTURE_EXTENSION / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["manifest_version"], 3)
+        self.assertEqual(
+            set(manifest["permissions"]),
+            {"activeTab", "contextMenus", "nativeMessaging", "notifications", "pageCapture", "scripting", "storage"},
+        )
+        self.assertNotIn("history", manifest["permissions"])
+        self.assertNotIn("tabs", manifest["permissions"])
+        self.assertNotIn("downloads", manifest["permissions"])
+        self.assertEqual(manifest.get("host_permissions", []), [])
+        self.assertEqual(set(manifest.get("optional_host_permissions", [])), {"http://*/*", "https://*/*"})
+        self.assertNotIn("<all_urls>", json.dumps(manifest))
+        self.assertNotIn("chrome.downloads", (CAPTURE_EXTENSION / "service_worker.js").read_text(encoding="utf-8"))
+
+        chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        if not chrome.is_file():
+            candidate = shutil.which("google-chrome") or shutil.which("chromium")
+            if not candidate:
+                self.skipTest("Chrome or Chromium is not installed")
+            chrome = Path(candidate)
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            fixture = directory / "rendered.html"
+            fixture.write_text(
+                "<!doctype html><html><head>"
+                '<title>Fallback title</title><meta name="author" content="Example Author">'
+                '<link rel="canonical" href="https://example.invalid/authenticated-article">'
+                "</head><body><nav>Navigation noise</nav><article>"
+                "<h1>Authenticated Article</h1><p>Opening <strong>claim</strong>.</p><p>"
+                + ("Long authenticated article paragraph. " * 20) + "</p>"
+                "<blockquote>Quoted evidence.</blockquote><ul><li>First item</li><li>Second item</li></ul>"
+                '<figure><img data-src="https://cdn.example.invalid/figure.png" alt="Figure"><figcaption>Figure caption</figcaption></figure>'
+                "<table><tr><th>Metric</th><th>Value</th></tr><tr><td>Saved</td><td>Yes</td></tr></table>"
+                '<pre><code>print("saved")</code></pre></article><aside>Recommendation noise</aside>'
+                "</body></html>",
+                encoding="utf-8",
+            )
+            wechat_fixture = directory / "wechat.html"
+            wechat_fixture.write_text(
+                "<!doctype html><html><head><title>WeChat</title>"
+                '<link rel="canonical" href="https://example.invalid/wechat-article"></head><body>'
+                '<div id="activity-name">微信文章标题</div>'
+                '<div id="js_name">示例作者</div><div id="publish_time">2026-08-11</div>'
+                '<div id="js_content"><p>第一段<strong>重点</strong>。</p>'
+                '<p><img data-src="https://mmbiz.example.invalid/example.jpg" alt="配图"></p>'
+                '<blockquote>原文引用。</blockquote></div><div class="recommendations">推荐噪声</div>'
+                "</body></html>",
+                encoding="utf-8",
+            )
+            x_article_fixture = directory / "x-article.html"
+            x_article_fixture.write_text(
+                "<!doctype html><html><head><title>X</title></head><body>"
+                '<article data-testid="twitterArticleReadView"><div data-testid="User-Name">'
+                '<span>Article Author</span><a href="https://x.com/articleauthor">@articleauthor</a></div>'
+                '<h1>Long-form X Article</h1><p>Article opening.</p>'
+                '<figure><img data-src="https://pbs.example.invalid/article.png" alt="Article figure">'
+                '<figcaption>Article caption</figcaption></figure></article><div>Timeline noise</div>'
+                "</body></html>",
+                encoding="utf-8",
+            )
+            x_thread_fixture = directory / "x-thread.html"
+            x_thread_fixture.write_text(
+                "<!doctype html><html><head><title>X Thread</title></head><body><main>"
+                '<article data-testid="tweet"><div data-testid="User-Name"><span>Alice</span>'
+                '<a href="https://x.com/alice/status/100"><time datetime="2026-08-11T01:00:00Z">Aug 11</time></a></div>'
+                '<div data-testid="tweetText">First author post.</div>'
+                '<div data-testid="quoteTweet">Quoted Bob: useful evidence.</div><div role="group">Action noise</div></article>'
+                '<article data-testid="tweet"><div data-testid="User-Name"><span>Alice</span>'
+                '<a href="https://x.com/alice/status/101"><time datetime="2026-08-11T01:05:00Z">Aug 11</time></a></div>'
+                '<div>回复 <a href="https://x.com/alice">@alice</a></div>'
+                '<div data-testid="tweetText">Second author post.</div></article>'
+                '<article data-testid="tweet"><div data-testid="User-Name"><span>Alice</span>'
+                '<a href="https://x.com/alice/status/102"><time datetime="2026-08-11T01:06:00Z">Aug 11</time></a></div>'
+                '<div>回复 <a href="https://x.com/alice">@alice</a></div>'
+                '<div data-testid="tweetPhoto"><img src="https://pbs.example.invalid/thread-photo.png" alt="Media-only reply"></div></article>'
+                '<article data-testid="tweet"><div data-testid="User-Name"><span>Alice</span>'
+                '<a href="https://x.com/alice/status/103"><time datetime="2026-08-11T01:07:00Z">Aug 11</time></a></div>'
+                '<div data-testid="tweetText">Recommended same-author post.</div>'
+                '<div data-testid="quoteTweet">Quoted <a href="https://x.com/alice">@alice</a>.</div></article>'
+                '<article data-testid="tweet"><div data-testid="User-Name"><span>Reply User</span>'
+                '<a href="https://x.com/replier/status/200"><time datetime="2026-08-11T01:06:00Z">Aug 11</time></a></div>'
+                '<div data-testid="tweetText">Unrelated reply.</div></article></main></body></html>',
+                encoding="utf-8",
+            )
+            media_fixture = directory / "media.html"
+            media_fixture.write_text(
+                "<!doctype html><html><head><title>Media article</title>"
+                '<link rel="canonical" href="https://video.example.invalid/watch/123"></head><body><article>'
+                "<h1>Media article</h1><p>Body with "
+                '<a href="https://cdn.example.invalid/report.pdf">a PDF</a> and '
+                '<a href="https://cdn.example.invalid/download?id=signed" type="application/pdf">a signed PDF</a> and '
+                '<a href="https://cdn.example.invalid/brief.docx">a document</a>, '
+                '<a href="https://cdn.example.invalid/notes.rtf">RTF</a>, and '
+                '<a href="https://cdn.example.invalid/notes.odt">ODT</a>.</p>'
+                '<video src="blob:https://video.example.invalid/runtime-stream">'
+                '<track kind="subtitles" src="https://video.example.invalid/captions.vtt" label="English">'
+                '</video><audio src="https://video.example.invalid/soundtrack.mp3"></audio>'
+                '<ytd-transcript-renderer><p>Page transcript sentence.</p></ytd-transcript-renderer>'
+                "</article></body></html>",
+                encoding="utf-8",
+            )
+            generic_fixture = directory / "generic.html"
+            generic_fixture.write_text(
+                "<!doctype html><html><head><title>Alpha School</title>"
+                '<meta property="og:type" content="article"><link rel="canonical" href="https://alpha.example.invalid/"></head><body>'
+                "<header><h1>Alpha School</h1></header><nav>Course navigation</nav><main><p>Choose a course.</p>"
+                '<article class="course-card"><h1>Course card</h1><p>' + ("Course features and pricing. " * 24)
+                + "</p><p>Choose this course.</p></article>"
+                '<img src="https://alpha.example.invalid/hero.png" onerror="leak()">'
+                '<svg><image href="https://alpha.example.invalid/chart.svg"></image></svg>'
+                '<svg xmlns:xlink="http://www.w3.org/1999/xlink"><image xlink:href="https://alpha.example.invalid/xlink-chart.svg"></image></svg>'
+                '<svg><symbol id="local-symbol"><path d="M0 0"></path></symbol>'
+                '<use href="#local-symbol"></use><use href="https://alpha.example.invalid/icons.svg#home"></use></svg>'
+                '<audio src="https://alpha.example.invalid/lesson.mp3"></audio>'
+                '<a href="javascript:alert(1)">unsafe link</a>'
+                '<form><input value="private form value"></form><script>privateRuntimeState()</script>'
+                "</main></body></html>",
+                encoding="utf-8",
+            )
+            main_article_fixture = directory / "main-article.html"
+            main_article_fixture.write_text(
+                "<!doctype html><html><head><title>Main article</title>"
+                '<meta property="og:type" content="article"></head><body><main><h1>Main Story</h1>'
+                "<p>Opening paragraph.</p><p>" + ("Long story body. " * 30) + "</p></main></body></html>",
+                encoding="utf-8",
+            )
+            captured, wechat, x_article, x_thread, media_capture, generic, main_article = self.run_browser_fixtures(
+                chrome,
+                [fixture, wechat_fixture, x_article_fixture, x_thread_fixture, media_fixture, generic_fixture, main_article_fixture],
+            )
+            self.assertEqual(captured["capture_kind"], "article")
+            self.assertEqual(captured["title"], "Authenticated Article")
+            self.assertEqual(captured["author"], "Example Author")
+            self.assertEqual(captured["origin"], "https://example.invalid/authenticated-article")
+            self.assertIn("Opening **claim**.", captured["content_markdown"])
+            self.assertIn("> Quoted evidence.", captured["content_markdown"])
+            self.assertIn("- First item", captured["content_markdown"])
+            self.assertIn("![Figure](https://cdn.example.invalid/figure.png)", captured["content_markdown"])
+            self.assertIn("Figure caption", captured["content_markdown"])
+            self.assertIn("| Metric | Value |", captured["content_markdown"])
+            self.assertNotIn("Navigation noise", captured["content_markdown"])
+            self.assertNotIn("Recommendation noise", captured["content_markdown"])
+            self.assertEqual(wechat["title"], "微信文章标题")
+            self.assertEqual(wechat["author"], "示例作者")
+            self.assertEqual(wechat["published_at"], "2026-08-11")
+            self.assertEqual(wechat["origin"], "https://example.invalid/wechat-article")
+            self.assertIn("第一段**重点**。", wechat["content_markdown"])
+            self.assertIn("![配图](https://mmbiz.example.invalid/example.jpg)", wechat["content_markdown"])
+            self.assertEqual(wechat["remote_assets"][0]["url"], "https://mmbiz.example.invalid/example.jpg")
+            self.assertNotIn("推荐噪声", wechat["content_markdown"])
+            self.assertEqual(x_article["title"], "Long-form X Article")
+            self.assertEqual(x_article["author"], "Article Author")
+            self.assertIn("Article opening.", x_article["content_markdown"])
+            self.assertIn("Article caption", x_article["content_markdown"])
+            self.assertNotIn("Timeline noise", x_article["content_markdown"])
+            self.assertEqual(x_thread["title"], "Alice — Thread")
+            self.assertEqual(x_thread["author"], "Alice")
+            self.assertEqual(x_thread["origin"], "https://x.com/alice/status/100")
+            self.assertIn("First author post.", x_thread["content_markdown"])
+            self.assertIn("Quoted Bob: useful evidence.", x_thread["content_markdown"])
+            self.assertIn("Second author post.", x_thread["content_markdown"])
+            self.assertIn("Media-only reply", x_thread["content_markdown"])
+            self.assertNotIn("Unrelated reply.", x_thread["content_markdown"])
+            self.assertNotIn("Recommended same-author post.", x_thread["content_markdown"])
+            self.assertNotIn("Action noise", x_thread["content_markdown"])
+            remote = {asset["url"] for asset in media_capture["remote_assets"]}
+            self.assertIn("https://cdn.example.invalid/report.pdf", remote)
+            self.assertIn("https://cdn.example.invalid/download?id=signed", remote)
+            self.assertIn("https://cdn.example.invalid/brief.docx", remote)
+            self.assertIn("https://cdn.example.invalid/notes.rtf", remote)
+            self.assertIn("https://cdn.example.invalid/notes.odt", remote)
+            self.assertIn("https://video.example.invalid/captions.vtt", remote)
+            self.assertNotIn("https://video.example.invalid/soundtrack.mp3", remote)
+            self.assertFalse(any(value.endswith((".mp4", ".mov", ".webm")) for value in remote))
+            self.assertIn("Page transcript sentence.", media_capture["content_markdown"])
+            self.assertIn("https://video.example.invalid/watch/123", media_capture["content_markdown"])
+            self.assertNotIn("blob:https://", media_capture["content_markdown"])
+            self.assertEqual(media_capture["capture_kind"], "article")
+            self.assertTrue(media_capture["has_video"])
+            self.assertEqual(generic["capture_kind"], "html")
+            self.assertIn("lbrain-asset://html-snapshot", generic["content_markdown"])
+            self.assertIn("<main>", generic["snapshot_html"])
+            self.assertNotIn("<script", generic["snapshot_html"])
+            self.assertNotIn("private form value", generic["snapshot_html"])
+            self.assertNotIn("onerror", generic["snapshot_html"])
+            self.assertNotIn("javascript:", generic["snapshot_html"])
+            self.assertNotIn("icons.svg", generic["snapshot_html"])
+            self.assertIn('href="#local-symbol"', generic["snapshot_html"])
+            generic_media = {asset["url"] for asset in generic["remote_assets"]}
+            self.assertIn("https://alpha.example.invalid/chart.svg", generic_media)
+            self.assertIn("https://alpha.example.invalid/xlink-chart.svg", generic_media)
+            self.assertIn("xlink-chart.svg", generic["snapshot_html"])
+            self.assertIn("https://alpha.example.invalid/lesson.mp3", generic_media)
+            self.assertEqual(main_article["capture_kind"], "article")
+            self.assertEqual(main_article["title"], "Main Story")
+            self.assertIn("Long story body.", main_article["content_markdown"])
+
+    def test_extension_builds_direct_pdf_capture_without_saving_video_binary(self) -> None:
+        script = (
+            "const fs=require('fs');"
+            "global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}},onConnect:{addListener(){}},lastError:null},"
+            "contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},"
+            "action:{onClicked:{addListener(){}}},windows:{onRemoved:{addListener(){}}},"
+            "notifications:{onButtonClicked:{addListener(){}}}};"
+            "eval(fs.readFileSync(process.argv[1],'utf8'));"
+            "(async()=>{const pdf=LBrainCaptureWorker.directCapture({url:'https://example.invalid/report.pdf',title:'Annual Report'});"
+            "const video=LBrainCaptureWorker.directCapture({url:'https://example.invalid/movie.mp4',title:'Recorded talk'});"
+            "const signed=LBrainCaptureWorker.directCapture({url:'https://example.invalid/download?id=signed',title:'Signed report',mimeType:'application/pdf'});"
+            "const readable=LBrainCaptureWorker.directCapture({url:'https://example.invalid/2026%20%E5%B9%B4%E6%8A%A5.pdf',title:'Readable report'});"
+            "const prepared=await LBrainCaptureWorker.preparePayload(pdf);"
+            "console.log(JSON.stringify([pdf,video,signed,readable,prepared,LBrainCaptureWorker.previewFor(pdf)]));})().catch(error=>{console.error(error);process.exit(1)});"
+        )
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pdf, video, signed, readable, prepared, preview = json.loads(result.stdout)
+        self.assertEqual(pdf["remote_assets"][0]["media_type"], "application/pdf")
+        self.assertIn("lbrain-asset://direct-document", pdf["content_markdown"])
+        self.assertEqual(video["remote_assets"], [])
+        self.assertIn("https://example.invalid/movie.mp4", video["content_markdown"])
+        self.assertEqual(signed["remote_assets"][0]["media_type"], "application/pdf")
+        self.assertTrue(str(signed["remote_assets"][0]["name"]).endswith(".pdf"))
+        self.assertEqual(readable["remote_assets"][0]["name"], "documents/2026 年报.pdf")
+        source_identity = "\0".join((pdf["title"], pdf["author"], pdf["published_at"], pdf["content_markdown"]))
+        self.assertEqual(prepared["source_content_hash"], hashlib.sha256(source_identity.encode()).hexdigest())
+        self.assertEqual(prepared["source_content_markdown"], pdf["content_markdown"])
+        self.assertEqual(preview["details"][0], ["保存内容", "原始文档"])
+
+    def test_extension_cancelled_confirmation_has_no_native_write(self) -> None:
+        script = (
+            "const fs=require('fs');let handler;let messageHandler,connectHandler;let nativeWrites=0;let calls=0,delivered;const cached={};"
+            "global.caches={async open(){return{async put(key,response){cached[key]=await response.text()},"
+            "async match(key){return cached[key]===undefined?undefined:new Response(cached[key])},async delete(key){delete cached[key]}}}};"
+            "global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(fn){messageHandler=fn}},onConnect:{addListener(fn){connectHandler=fn}},"
+            "getURL(value){return 'chrome-extension://test/'+value},lastError:null,connectNative(){nativeWrites++;}},"
+            "contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},"
+            "action:{onClicked:{addListener(fn){handler=fn}}},"
+            "storage:{local:{async get(){return{}},async remove(){},async set(){}}},"
+            "scripting:{async executeScript(){calls++;if(calls===1)return[{result:'text/html'}];if(calls===2)return[{}];"
+            "return[{result:{schema:'lbrain.capture.v1',title:'Alpha School',summary:'Home',"
+            "origin:'https://alpha.example.invalid/',scope:'page',author:'',published_at:'',"
+            "content_markdown:'[HTML](lbrain-asset://html-snapshot)',capture_kind:'html',snapshot_html:'<main>Alpha</main>',"
+            "preview_characters:5,extraction_status:'complete',remote_assets:[],assets:[]}}]}},"
+            "windows:{async create(options){const id=new URL(options.url).searchParams.get('id');let listener;"
+            "const port={name:'lbrain-confirm',onMessage:{addListener(fn){listener=fn}},postMessage(message){delivered=message}};"
+            "queueMicrotask(()=>{connectHandler(port);listener({type:'ready',id})});return{id:9}},onRemoved:{addListener(){}}},permissions:{async remove(){}},"
+            "notifications:{async create(){throw new Error('unexpected notification')},onButtonClicked:{addListener(){}}}};"
+            "eval(fs.readFileSync(process.argv[1],'utf8'));"
+            "handler({id:7,url:'https://alpha.example.invalid/',title:'Alpha School'}).then(()=>{"
+            "console.log(JSON.stringify({nativeWrites,calls,cached:Object.keys(cached).length,kind:delivered.preview.details[0][1]}))"
+            "}).catch(error=>{console.error(error);process.exit(1)});"
+        )
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            {"nativeWrites": 0, "calls": 3, "cached": 0, "kind": "HTML 快照"},
+        )
+
+    def test_extension_stream_waits_for_each_native_ack(self) -> None:
+        script = (
+            "const fs=require('fs');const nativeSetTimeout=setTimeout;global.setTimeout=(fn,ms)=>nativeSetTimeout(fn,ms===120000?50:ms);"
+            "let messageHandler;let disconnectHandler;let inFlight=false;let overlap=false;let chunks=0;let hashes=true;"
+            "const port={onMessage:{addListener(fn){messageHandler=fn}},onDisconnect:{addListener(fn){disconnectHandler=fn}},"
+            "postMessage(message){if(message.type==='chunk'){if(inFlight)overlap=true;inFlight=true;chunks++;hashes=hashes&&/^[0-9a-f]{64}$/.test(message.sha256);"
+            "setTimeout(()=>{inFlight=false;messageHandler({type:'ack',channel:message.channel,sequence:message.sequence})},1)}"
+            "if(message.type==='end')setTimeout(()=>messageHandler({status:'saved',target:'Inbox/Captures/example.md',capture_id:'id',version:1}),80)}};"
+            "global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}},onConnect:{addListener(){}},lastError:null,connectNative(){return port}},"
+            "contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},"
+            "windows:{onRemoved:{addListener(){}}},notifications:{onButtonClicked:{addListener(){}}}};"
+            "eval(fs.readFileSync(process.argv[1],'utf8'));"
+            "const bytes=new Blob([new Uint8Array(900000)]);"
+            "LBrainCaptureWorker.streamCapture({schema:'lbrain.capture.v1'},{kind:'binary',mediaType:'application/pdf',bytes,attachments:[]})"
+            ".then(result=>console.log(JSON.stringify({status:result.status,chunks,overlap,hashes})))"
+            ".catch(error=>{console.error(error);process.exit(1)});"
+        )
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["status"], "saved")
+        self.assertGreaterEqual(output["chunks"], 4)
+        self.assertFalse(output["overlap"])
+        self.assertTrue(output["hashes"])
+
+    def test_extension_confirmation_releases_only_new_permissions(self) -> None:
+        script = (
+            "const fs=require('fs');const listeners={},nodes={},cached={};let decision,requested,closed=0,cachedAtDecision=false,reserved=false,reservedBeforePermissions=true;"
+            "for(const id of ['#title','#summary','#details','#save','#cancel'])nodes[id]={textContent:'',disabled:false,"
+            "addEventListener(type,fn){listeners[id+type]=fn},append(){}};"
+            "global.document={querySelector(id){return nodes[id]},createElement(){return{textContent:''}}};"
+            "global.location={search:'?id=stored'};global.window={close(){closed++}};"
+            "global.caches={async open(){return{async put(key,response){cached[key]=await response.text()},async delete(key){delete cached[key]}}}};"
+            "global.chrome={runtime:{getURL(value){return 'chrome-extension://test/'+value},connect(){return{onMessage:{addListener(fn){"
+            "queueMicrotask(()=>fn({type:'preview',preview:{title:'Saved',summary:'',permission_origins:['https://existing.invalid/*','https://new.invalid/*'],details:[]},"
+            "capture:{schema:'lbrain.capture.v1'},tab:{id:7}}))}},postMessage(){},disconnect(){}}},"
+            "async sendMessage(message){if(message.type==='confirmation.reserve')reserved=true;decision=message;cachedAtDecision=Object.keys(cached).length===1;return{status:'saved'}}},"
+            "permissions:{async contains({origins}){reservedBeforePermissions=reservedBeforePermissions&&reserved;return origins[0].includes('existing')},async request({origins}){requested=origins;return true},"
+            "async remove(){throw new Error('worker owns permission cleanup')}}};"
+            "eval(fs.readFileSync(process.argv[1],'utf8'));setTimeout(async()=>{await listeners['#saveclick']();"
+            "console.log(JSON.stringify({requested,release:decision.release_origins,closed,cachedAtDecision,reservedBeforePermissions}))},0);"
+        )
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "confirm.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["requested"], ["https://new.invalid/*"])
+        self.assertEqual(output["release"], ["https://new.invalid/*"])
+        self.assertEqual(output["closed"], 1)
+        self.assertTrue(output["cachedAtDecision"])
+        self.assertTrue(output["reservedBeforePermissions"])
+
+    def test_bundle_extracts_pdf_and_subtitle_text_and_recovers_partial_media(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = self.copy_repo(base)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "Capture Test"], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.email", "capture@example.invalid"], check=True
+            )
+            staging = base / "staging"
+            tools = base / "tools"
+            staging.mkdir()
+            tools.mkdir()
+            (tools / "pdftotext").write_text("#!/bin/sh\nprintf 'Searchable PDF sentence.\\n'\n", encoding="utf-8")
+            (tools / "pdftotext").chmod(0o755)
+            (staging / "report.pdf").write_bytes(b"%PDF synthetic fixture")
+            (staging / "captions.vtt").write_text(
+                "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nFirst subtitle line.\n",
+                encoding="utf-8",
+            )
+            partial_payload: dict[str, object] = {
+                "schema": "lbrain.capture.v1",
+                "title": "Research Media",
+                "summary": "A PDF and transcript saved with a recoverable image.",
+                "origin": "https://example.invalid/research-media",
+                "scope": "page",
+                "content_markdown": (
+                    "## Original analysis\n\nPreserve this source heading exactly once.\n\n"
+                    "Literal marker: <!-- lbrain:capture:end -->\n\n"
+                    "[PDF](lbrain-asset://pdf)\n\n[Subtitles](lbrain-asset://captions)\n\n"
+                    "![Diagram](https://cdn.example.invalid/diagram.png)"
+                ),
+                "source_content_markdown": (
+                    "## Original analysis\n\nPreserve this source heading exactly once.\n\n"
+                    "Literal marker: <!-- lbrain:capture:end -->\n\n"
+                    "[PDF](https://cdn.example.invalid/report.pdf)\n\n"
+                    "[Subtitles](https://cdn.example.invalid/captions.vtt)\n\n"
+                    "![Diagram](https://cdn.example.invalid/diagram.png)"
+                ),
+                "extraction_status": "partial",
+                "assets": [
+                    {"name": "documents/report.pdf", "staged_name": "report.pdf", "placeholder": "lbrain-asset://pdf", "media_type": "application/pdf"},
+                    {"name": "transcripts/captions.vtt", "staged_name": "captions.vtt", "placeholder": "lbrain-asset://captions", "media_type": "text/vtt"},
+                ],
+            }
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{tools}{os.pathsep}{old_path}"
+            try:
+                initial_result, initial = self.run_capture_native_host(root, partial_payload, staging)
+            finally:
+                os.environ["PATH"] = old_path
+            self.assertEqual(initial_result.returncode, 0, (initial_result.stderr.decode(), initial))
+            self.assertEqual(initial["status"], "partial")
+            note = root / str(initial["target"])
+            initial_note = note.read_text(encoding="utf-8")
+            self.assertIn("Searchable PDF sentence.", initial_note)
+            self.assertIn("First subtitle line.", initial_note)
+            edited = initial_note.replace("visibility: private", "visibility: private\ntags: [research]")
+            edited += "\n## Research notes\n\nKeep this user note.\n"
+            note.write_text(edited, encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "--", str(initial["target"])], check=True)
+
+            (staging / "diagram.png").write_bytes(b"diagram bytes")
+            complete_payload = {
+                **partial_payload,
+                "content_markdown": (
+                    "## Original analysis\n\nPreserve this source heading exactly once.\n\n"
+                    "Literal marker: <!-- lbrain:capture:end -->\n\n"
+                    "[PDF](https://cdn.example.invalid/report.pdf)\n\n"
+                    "[Subtitles](https://cdn.example.invalid/captions.vtt)\n\n"
+                    "![Diagram](lbrain-asset://diagram)\n\n## Capture warnings\n\n"
+                    "- Media could not be preserved: https://cdn.example.invalid/report.pdf\n"
+                    "- Media could not be preserved: https://cdn.example.invalid/captions.vtt"
+                ),
+                "extraction_status": "complete",
+                "recovery_target": initial["target"],
+                "expected_hash": initial["expected_hash"],
+                "failed_remote_assets": [
+                    {"id": "pdf", "url": "https://cdn.example.invalid/report.pdf"},
+                    {"id": "captions", "url": "https://cdn.example.invalid/captions.vtt"},
+                ],
+                "assets": [
+                    {"name": "images/diagram.png", "staged_name": "diagram.png", "placeholder": "lbrain-asset://diagram", "media_type": "image/png"},
+                ],
+            }
+            os.environ["PATH"] = f"{tools}{os.pathsep}{old_path}"
+            try:
+                recovered_result, recovered = self.run_capture_native_host(root, complete_payload, staging)
+            finally:
+                os.environ["PATH"] = old_path
+            self.assertEqual(recovered_result.returncode, 0, (recovered_result.stderr.decode(), recovered))
+            self.assertEqual(recovered["status"], "saved")
+            self.assertEqual(recovered["version"], 1)
+            self.assertEqual(recovered["target"], initial["target"])
+            self.assertFalse(dict(recovered["git"])["committed"])
+            staged_note = subprocess.run(
+                ["git", "-C", str(root), "show", f":{initial['target']}"],
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout
+            self.assertEqual(staged_note, edited)
+            recovered_note = note.read_text(encoding="utf-8")
+            self.assertIn("tags: [research]", recovered_note)
+            self.assertIn("Keep this user note.", recovered_note)
+            self.assertIn("extraction_status: complete", recovered_note)
+            self.assertIn("Searchable PDF sentence.", recovered_note)
+            self.assertIn("First subtitle line.", recovered_note)
+            self.assertEqual(recovered_note.count("Searchable PDF sentence."), 1)
+            self.assertEqual(recovered_note.count("First subtitle line."), 1)
+            self.assertEqual(recovered_note.count("Preserve this source heading exactly once."), 1)
+            self.assertEqual(recovered_note.count("<!-- lbrain:capture:end -->"), 1)
+            self.assertIn("&lt;!-- lbrain:capture:end -->", recovered_note)
+            self.assertNotIn("https://cdn.example.invalid/report.pdf", recovered_note)
+            self.assertNotIn("https://cdn.example.invalid/captions.vtt", recovered_note)
+            self.assertIn("_assets/", recovered_note)
+            manifest = json.loads(
+                (root / f"Inbox/Captures/_assets/{initial['capture_id']}/v1/manifest.json").read_text()
+            )
+            self.assertEqual({asset["name"] for asset in manifest["assets"]}, {
+                "documents/report.pdf", "transcripts/captions.vtt", "images/diagram.png"
+            })
+
+    def test_changed_partial_retry_creates_an_immutable_new_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.copy_repo(Path(temporary))
+            initial_payload = {
+                "schema": "lbrain.capture.v1",
+                "title": "Changing Article",
+                "summary": "First rendered state.",
+                "origin": "https://example.invalid/changing-article",
+                "scope": "page",
+                "author": "Example Author",
+                "published_at": "2026-08-11",
+                "content_markdown": "The first rendered body.",
+                "extraction_status": "partial",
+                "assets": [],
+            }
+            first_result, first = self.run_capture_native_host(root, initial_payload, root)
+            self.assertEqual(first_result.returncode, 0, (first_result.stderr.decode(), first))
+            first_note = root / str(first["target"])
+            first_text = first_note.read_text(encoding="utf-8")
+
+            changed_payload = {
+                **initial_payload,
+                "summary": "A changed rendered state.",
+                "content_markdown": "The page now contains a different body.",
+                "source_content_markdown": "The page now contains a different body.",
+                "extraction_status": "complete",
+                "recovery_target": first["target"],
+                "expected_hash": first["expected_hash"],
+            }
+            changed_result, changed = self.run_capture_native_host(root, changed_payload, root)
+
+            self.assertEqual(changed_result.returncode, 0, (changed_result.stderr.decode(), changed))
+            self.assertEqual(changed["status"], "new_version")
+            self.assertEqual(changed["version"], 2)
+            self.assertNotEqual(changed["target"], first["target"])
+            self.assertEqual(first_note.read_text(encoding="utf-8"), first_text)
+            self.assertIn(
+                "The page now contains a different body.",
+                (root / str(changed["target"])).read_text(encoding="utf-8"),
+            )
+
+    def test_changed_asset_bytes_create_a_new_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = self.copy_repo(base)
+            staging = base / "staging"
+            staging.mkdir()
+            asset = staging / "image.png"
+            asset.write_bytes(b"first image bytes")
+            payload = {
+                "schema": "lbrain.capture.v1",
+                "title": "Changing Image",
+                "summary": "The page text stays stable while image bytes change.",
+                "origin": "https://example.invalid/changing-image",
+                "scope": "page",
+                "content_markdown": "![Image](lbrain-asset://image)",
+                "source_content_markdown": "![Image](https://cdn.example.invalid/image)",
+                "extraction_status": "partial",
+                "assets": [{
+                    "name": "images/image.png",
+                    "staged_name": "image.png",
+                    "placeholder": "lbrain-asset://image",
+                    "media_type": "image/png",
+                }],
+            }
+            first_result, first = self.run_capture_native_host(root, payload, staging)
+            self.assertEqual(first_result.returncode, 0, (first_result.stderr.decode(), first))
+            asset.write_bytes(b"second image bytes")
+            retry_result, retry = self.run_capture_native_host(
+                root,
+                {
+                    **payload,
+                    "extraction_status": "complete",
+                    "recovery_target": first["target"],
+                    "expected_hash": first["expected_hash"],
+                },
+                staging,
+            )
+            self.assertEqual(retry_result.returncode, 0, (retry_result.stderr.decode(), retry))
+            self.assertEqual(retry["status"], "new_version")
+            self.assertEqual(retry["version"], 2)
+            capture_id = str(first["capture_id"])
+            self.assertEqual(
+                (root / f"Inbox/Captures/_assets/{capture_id}/v1/files/images/image.png").read_bytes(),
+                b"first image bytes",
+            )
+            self.assertEqual(
+                (root / f"Inbox/Captures/_assets/{capture_id}/v2/files/images/image.png").read_bytes(),
+                b"second image bytes",
+            )
+
+    def test_capture_recovery_conflict_preserves_both_asset_states(self) -> None:
+        spec = importlib.util.spec_from_file_location("capture_operations_recovery", CAPTURE_OPERATIONS)
+        assert spec and spec.loader
+        operations = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(operations)
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = self.copy_repo(base)
+            staging = base / "staging"
+            staging.mkdir()
+            (staging / "old.png").write_bytes(b"old asset")
+            initial_payload = {
+                "schema": "lbrain.capture.v1",
+                "title": "Recovery Conflict",
+                "summary": "Both asset states remain recoverable after a concurrent edit.",
+                "origin": "https://example.invalid/recovery-conflict",
+                "scope": "page",
+                "content_markdown": "![Old](lbrain-asset://old)\n\n![New](https://cdn.example.invalid/new.png)",
+                "source_content_markdown": "![Old](https://cdn.example.invalid/old.png)\n\n![New](https://cdn.example.invalid/new.png)",
+                "extraction_status": "partial",
+                "assets": [{
+                    "name": "images/old.png",
+                    "staged_name": "old.png",
+                    "placeholder": "lbrain-asset://old",
+                    "media_type": "image/png",
+                }],
+            }
+            with mock.patch.object(operations, "validate", return_value=(True, "ok")), mock.patch.object(
+                operations, "capture_git_commit", return_value={"committed": False, "warning": None}
+            ):
+                initial = operations.capture_bundle(root, initial_payload, staging)
+            note = root / str(initial["target"])
+            existing = note.read_text(encoding="utf-8")
+            (staging / "new.png").write_bytes(b"new asset")
+            retry_payload = {
+                **initial_payload,
+                "content_markdown": "![Old](lbrain-asset://old)\n\n![New](lbrain-asset://new)",
+                "extraction_status": "complete",
+                "recovery_target": initial["target"],
+                "expected_hash": initial["expected_hash"],
+                "assets": [{
+                    "name": "images/new.png",
+                    "staged_name": "new.png",
+                    "placeholder": "lbrain-asset://new",
+                    "media_type": "image/png",
+                }],
+            }
+            original_write = operations.atomic_write
+
+            def concurrent_write(
+                operation_root: Path, path: Path, content: str, expected: object = operations.UNCHANGED
+            ) -> None:
+                original_write(operation_root, path, content, expected)
+                if path == note and expected == existing:
+                    path.write_text(content + "\nConcurrent user note.\n", encoding="utf-8")
+
+            with mock.patch.object(operations, "validate", return_value=(False, "synthetic failure")), mock.patch.object(
+                operations, "atomic_write", side_effect=concurrent_write
+            ), mock.patch.object(
+                operations, "capture_git_commit", return_value={"committed": False, "warning": None}
+            ):
+                with self.assertRaises(operations.OperationError) as raised:
+                    operations.capture_bundle(root, retry_payload, staging)
+
+            self.assertIn("asset states preserved", str(raised.exception))
+            self.assertIn("Concurrent user note.", note.read_text(encoding="utf-8"))
+            capture_id = str(initial["capture_id"])
+            current = root / f"Inbox/Captures/_assets/{capture_id}/v1/files/images"
+            self.assertEqual({path.name for path in current.iterdir()}, {"old.png", "new.png"})
+            backups = list((root / f"Inbox/Captures/_assets/{capture_id}").glob(".v1.backup.*"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual((backups[0] / "files/images/old.png").read_bytes(), b"old asset")
+
+    def test_new_capture_rollback_conflict_preserves_its_assets(self) -> None:
+        spec = importlib.util.spec_from_file_location("capture_operations_new_conflict", CAPTURE_OPERATIONS)
+        assert spec and spec.loader
+        operations = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(operations)
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = self.copy_repo(base)
+            staging = base / "staging"
+            staging.mkdir()
+            (staging / "image.png").write_bytes(b"captured asset")
+            payload = {
+                "schema": "lbrain.capture.v1",
+                "title": "New Capture Conflict",
+                "summary": "Keep assets when a concurrently edited note cannot be removed.",
+                "origin": "https://example.invalid/new-capture-conflict",
+                "scope": "page",
+                "content_markdown": "![Image](lbrain-asset://image)",
+                "extraction_status": "complete",
+                "assets": [{
+                    "name": "images/image.png",
+                    "staged_name": "image.png",
+                    "placeholder": "lbrain-asset://image",
+                    "media_type": "image/png",
+                }],
+            }
+            original_write = operations.atomic_write
+
+            def concurrent_write(
+                operation_root: Path, path: Path, content: str, expected: object = operations.UNCHANGED
+            ) -> None:
+                original_write(operation_root, path, content, expected)
+                if expected is None and path.suffix == ".md":
+                    path.write_text(content + "\nConcurrent user note.\n", encoding="utf-8")
+
+            with mock.patch.object(operations, "validate", return_value=(False, "synthetic failure")), mock.patch.object(
+                operations, "atomic_write", side_effect=concurrent_write
+            ):
+                with self.assertRaises(operations.OperationError) as raised:
+                    operations.capture_bundle(root, payload, staging)
+
+            self.assertIn("captured assets preserved", str(raised.exception))
+            notes = list((root / "Inbox/Captures").glob("*New-Capture-Conflict*.md"))
+            self.assertEqual(len(notes), 1)
+            self.assertIn("Concurrent user note.", notes[0].read_text(encoding="utf-8"))
+            capture_id = operations.bundle_capture_id(str(payload["origin"]), "page")
+            self.assertEqual(
+                (root / f"Inbox/Captures/_assets/{capture_id}/v1/files/images/image.png").read_bytes(),
+                b"captured asset",
+            )
+
+    def test_new_capture_validation_preserves_a_concurrently_edited_asset(self) -> None:
+        spec = importlib.util.spec_from_file_location("capture_operations_asset_conflict", CAPTURE_OPERATIONS)
+        assert spec and spec.loader
+        operations = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(operations)
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = self.copy_repo(base)
+            staging = base / "staging"
+            staging.mkdir()
+            (staging / "image.png").write_bytes(b"captured asset")
+            payload = {
+                "schema": "lbrain.capture.v1",
+                "title": "Concurrent asset",
+                "summary": "Validation must not delete a changed captured asset.",
+                "origin": "https://example.invalid/concurrent-asset",
+                "scope": "page",
+                "content_markdown": "![Image](lbrain-asset://image)",
+                "extraction_status": "complete",
+                "assets": [{
+                    "name": "images/image.png",
+                    "staged_name": "image.png",
+                    "placeholder": "lbrain-asset://image",
+                    "media_type": "image/png",
+                }],
+            }
+            capture_id = operations.bundle_capture_id(str(payload["origin"]), "page")
+            saved_asset = root / f"Inbox/Captures/_assets/{capture_id}/v1/files/images/image.png"
+
+            def conflicting_validation(_: Path) -> tuple[bool, str]:
+                saved_asset.write_bytes(b"concurrent user edit")
+                return False, "synthetic failure"
+
+            with mock.patch.object(operations, "validate", side_effect=conflicting_validation):
+                with self.assertRaises(operations.OperationError) as raised:
+                    operations.capture_bundle(root, payload, staging)
+
+            self.assertIn("captured assets preserved", str(raised.exception))
+            self.assertEqual(saved_asset.read_bytes(), b"concurrent user edit")
+            self.assertFalse(list((root / "Inbox/Captures").glob("*Concurrent-asset*.md")))
+
+    def test_capture_rejects_a_symlinked_vault_destination_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = self.copy_repo(base)
+            outside = base / "outside"
+            outside.mkdir()
+            (root / "Inbox/Captures/_assets").symlink_to(outside, target_is_directory=True)
+
+            result, failed = self.run_capture_native_host(
+                root,
+                {
+                    "schema": "lbrain.capture.v1",
+                    "title": "Escaped Capture",
+                    "summary": "Must fail before any external write.",
+                    "origin": "https://example.invalid/escaped-capture",
+                    "scope": "page",
+                    "content_markdown": "Synthetic body.",
+                    "extraction_status": "complete",
+                    "assets": [],
+                },
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertFalse(list((root / "Inbox/Captures").glob("*Escaped-Capture*.md")))
+
+    def test_pdf_text_falls_back_to_local_ocr(self) -> None:
+        spec = importlib.util.spec_from_file_location("capture_operations_pdf", CAPTURE_OPERATIONS)
+        assert spec and spec.loader
+        operations = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(operations)
+        with tempfile.TemporaryDirectory() as temporary:
+            pdf = Path(temporary) / "scan.pdf"
+            pdf.write_bytes(b"%PDF scanned fixture")
+
+            def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                if command[0] == "pdftotext":
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                if command[0] == "pdftoppm":
+                    Path(f"{command[-1]}-1.png").write_bytes(b"page")
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                output = kwargs["stdout"]
+                assert hasattr(output, "write")
+                output.write(b"OCR recovered sentence.\n")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with mock.patch.object(operations.shutil, "which", side_effect=lambda name: name), mock.patch.object(
+                operations.subprocess, "run", side_effect=run
+            ):
+                text, method = operations.local_pdf_text(pdf)
+            self.assertEqual(method, "ocr")
+            self.assertEqual(text, "OCR recovered sentence.")
+
+    def test_capture_binary_assets_use_git_lfs_without_a_remote(self) -> None:
+        if shutil.which("git-lfs") is None:
+            self.skipTest("git-lfs is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = self.copy_repo(base)
+            staging = base / "staging"
+            staging.mkdir()
+            (staging / "image.png").write_bytes(b"synthetic binary image")
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "Capture Test"], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.email", "capture@example.invalid"], check=True
+            )
+            result, saved = self.run_capture_native_host(
+                root,
+                {
+                    "schema": "lbrain.capture.v1",
+                    "title": "LFS Image",
+                    "summary": "A binary capture tracked by Git LFS.",
+                    "origin": "https://example.invalid/lfs-image",
+                    "scope": "page",
+                    "content_markdown": "![Image](lbrain-asset://image)",
+                    "extraction_status": "complete",
+                    "assets": [{
+                        "name": "images/image.png",
+                        "staged_name": "image.png",
+                        "placeholder": "lbrain-asset://image",
+                        "media_type": "image/png",
+                    }],
+                },
+                staging,
+            )
+            self.assertEqual(result.returncode, 0, (result.stderr.decode(), saved))
+            asset = next(path for path in saved["affected_paths"] if str(path).endswith("image.png"))
+            committed = subprocess.run(
+                ["git", "-C", str(root), "show", f"HEAD:{asset}"],
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout
+            self.assertTrue(committed.startswith("version https://git-lfs.github.com/spec/v1"))
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "-C", str(root), "remote"], text=True, capture_output=True, check=True
+                ).stdout,
+                "",
+            )
+
+    def test_native_host_installer_registers_and_removes_the_developer_extension(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "config"
+            extension_id = "abcdefghijklmnopabcdefghijklmnop"
+            installed = subprocess.run(
+                [
+                    sys.executable,
+                    str(CAPTURE_NATIVE_INSTALLER),
+                    "install",
+                    "--root",
+                    str(ROOT),
+                    "--extension-id",
+                    extension_id,
+                    "--config-root",
+                    str(config),
+                    "--staging-root",
+                    str(config / "Staging"),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            receipt = json.loads(installed.stdout)
+            manifest = Path(str(receipt["manifest"]))
+            launcher = Path(str(receipt["launcher"]))
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            self.assertEqual(data["name"], "io.lbrain.capture")
+            self.assertEqual(data["allowed_origins"], [f"chrome-extension://{extension_id}/"])
+            self.assertEqual(Path(data["path"]), launcher)
+            self.assertTrue(launcher.stat().st_mode & 0o100)
+            self.assertIn(str(CAPTURE_NATIVE_HOST), launcher.read_text(encoding="utf-8"))
+            self.assertIn(str(ROOT), launcher.read_text(encoding="utf-8"))
+
+            removed = subprocess.run(
+                [
+                    sys.executable,
+                    str(CAPTURE_NATIVE_INSTALLER),
+                    "uninstall",
+                    "--config-root",
+                    str(config),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(removed.returncode, 0, removed.stderr)
+            self.assertFalse(manifest.exists())
+            self.assertFalse(launcher.exists())
 
     def test_capture_create_reuses_a_matching_source_in_a_category(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = self.copy_repo(Path(temporary))
             payload: dict[str, object] = {
-                "destination": "source",
+                "destination": "inbox",
                 "title": "Categorized Writing Guide",
                 "summary": "A previously categorized source.",
                 "origin": "https://example.invalid/categorized-writing-guide",
                 "capture": "full",
-                "content": "Write to discover new ideas.",
+                "content": "Write to discover new ideas.\n\n## Provenance notes\n\nThis heading belongs to the article.",
                 "extraction_status": "complete",
             }
-            first_result, first = self.run_capture_operation(root, "capture.create", payload)
-            self.assertEqual(first_result.returncode, 0, first_result.stderr)
             existing = root / "Knowledge/Sources/Methodology/Categorized-Writing-Guide.md"
             existing.parent.mkdir(parents=True, exist_ok=True)
-            created = root / str(first["target"])
-            created.write_text(
-                "\n".join(
-                    line for line in created.read_text(encoding="utf-8").splitlines()
-                    if not line.startswith("capture_id:")
-                ) + "\n",
+            existing.write_text(
+                "---\ntype: source\nsummary: A previously categorized source.\nstatus: active\n"
+                "visibility: private\norigin: https://example.invalid/categorized-writing-guide\n"
+                "capture: full\nweaving: skip\n"
+                "created: 2026-08-11\nupdated: 2026-08-11\n---\n# Categorized Writing Guide\n\n"
+                "## Capture\n\nWrite to discover new ideas.\n\n## Provenance notes\n\n"
+                "This heading belongs to the article.\n\n## Provenance notes\n\n"
+                "- Origin: https://example.invalid/categorized-writing-guide\n",
                 encoding="utf-8",
             )
-            created.rename(existing)
 
             result, captured = self.run_capture_operation(root, "capture.create", payload)
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(captured["status"], "noop")
+            self.assertEqual(captured["status"], "already_saved")
             self.assertEqual(
                 captured["target"],
                 "Knowledge/Sources/Methodology/Categorized-Writing-Guide.md",
             )
-            self.assertFalse(list((root / "Knowledge/Sources").glob("*Categorized-Writing-Guide*.md")))
+            self.assertFalse(list((root / "Inbox/Captures").glob("*Categorized-Writing-Guide*.md")))
+
+            changed_result, changed = self.run_capture_operation(
+                root,
+                "capture.create",
+                {**payload, "content": "Write"},
+            )
+            self.assertEqual(changed_result.returncode, 0, changed_result.stderr)
+            self.assertEqual(changed["status"], "saved")
+            self.assertTrue(str(changed["target"]).startswith("Inbox/Captures/"))
 
     def test_capture_create_preserves_failed_extraction_and_rejects_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1017,7 +2721,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                 root,
                 "capture.create",
                 {
-                    "destination": "source",
+                    "destination": "inbox",
                     "title": "Unavailable Article",
                     "summary": "A reference retained after extraction failure.",
                     "origin": "https://example.invalid/unavailable",
@@ -1031,13 +2735,13 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(failed["status"], "partial")
             source = root / str(failed["target"])
             source_text = source.read_text(encoding="utf-8")
-            self.assertIn("capture: reference", source_text)
+            self.assertIn("type: note", source_text)
             self.assertIn("extraction_status: failed", source_text)
             self.assertIn("Original content was not available", source_text)
             self.assertIn("Retry this source later.", source_text)
 
             recovered_payload = {
-                "destination": "source",
+                "destination": "inbox",
                 "title": "Unavailable Article",
                 "summary": "The recovered article.",
                 "origin": "https://example.invalid/unavailable",
@@ -1045,35 +2749,62 @@ class IntelligenceOperationTest(unittest.TestCase):
                 "content": "Recovered source body.",
                 "note": "Extraction succeeded on retry.",
                 "extraction_status": "complete",
-                "expected_hash": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "expected_hash": failed["expected_hash"],
             }
-            source.write_text(
+            edited = (
                 source.read_text(encoding="utf-8").replace(
                     "status: active\n",
                     "status: active\ntags:\n  - preserve-me\n",
                     1,
                 )
-                + "\n## Research notes\n\nPreserve this user-authored section.\n",
+                + "\n## Research notes\n\nPreserve this user-authored section.\n"
+            )
+            edited = edited.replace(
+                "\n---\n<!-- lbrain:title:start -->",
+                "\n---\n# Personal notes\n\n<!-- lbrain:title:start -->",
+                1,
+            )
+            source.write_text(
+                edited.replace(
+                    "Original content was not available at capture time.",
+                    "A concurrent edit changed the managed Capture body.",
+                ),
                 encoding="utf-8",
             )
-            recovered_payload["expected_hash"] = hashlib.sha256(source.read_bytes()).hexdigest()
+            stale_result, stale = self.run_capture_operation(root, "capture.create", recovered_payload)
+            self.assertNotEqual(stale_result.returncode, 0)
+            self.assertIn("changed after its recovery receipt", stale["error"])
+            source.write_text(
+                edited.replace(
+                    "# Unavailable Article",
+                    "# Unavailable Article\n\n<!-- lbrain:capture:start -->\nInjected\n<!-- lbrain:capture:end -->",
+                ),
+                encoding="utf-8",
+            )
+            marker_result, marker_failure = self.run_capture_operation(
+                root, "capture.create", recovered_payload
+            )
+            self.assertNotEqual(marker_result.returncode, 0)
+            self.assertIn("managed sections are incomplete", marker_failure["error"])
+            source.write_text(edited, encoding="utf-8")
             recovered_result, recovered = self.run_capture_operation(
                 root, "capture.create", recovered_payload
             )
             self.assertEqual(recovered_result.returncode, 0, recovered_result.stderr)
-            self.assertEqual(recovered["status"], "applied")
+            self.assertEqual(recovered["status"], "saved")
             self.assertEqual(recovered["target"], failed["target"])
             recovered_text = source.read_text(encoding="utf-8")
             self.assertIn("extraction_status: complete", recovered_text)
             self.assertIn("Recovered source body.", recovered_text)
             self.assertIn("tags:\n  - preserve-me", recovered_text)
+            self.assertIn("# Personal notes", recovered_text)
             self.assertIn("Preserve this user-authored section.", recovered_text)
 
             repeat_result, repeated = self.run_capture_operation(
                 root, "capture.create", recovered_payload
             )
             self.assertEqual(repeat_result.returncode, 0, repeat_result.stderr)
-            self.assertEqual(repeated["status"], "noop")
+            self.assertEqual(repeated["status"], "already_saved")
 
             bearer = "Authorization: Bearer " + (
                 "fixture-token-"
@@ -1640,7 +3371,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                 },
             )
             self.assertEqual(code_result.returncode, 0, code_result.stderr)
-            self.assertEqual(code_capture["status"], "applied")
+            self.assertEqual(code_capture["status"], "saved")
             fenced_token = "```text\n" + "ghp_" + "abcdefghijklmnopqrstuvwxyz123456\n```\n"
             self.assertTrue(contains_document_secret(fenced_token))
             fenced_result, fenced_failure = self.run_capture_operation(
@@ -1679,7 +3410,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                 root,
                 "capture.create",
                 {
-                    "destination": "source",
+                    "destination": "inbox",
                     "title": "Unsafe origin",
                     "summary": "Must not echo the origin.",
                     "origin": sensitive_origin,
@@ -1707,6 +3438,261 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("another LBrain mutation", output["error"])
             self.assertFalse(list((root / "Inbox").glob("*Locked-Capture*.md")))
+
+    def test_atomic_weave_promotes_bundles_updates_wiki_and_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.copy_repo(Path(temporary))
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "Weave Test"], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.email", "weave@example.invalid"], check=True
+            )
+
+            def capture(title: str, origin: str, content: str) -> dict[str, object]:
+                result, saved = self.run_capture_native_host(
+                    root,
+                    {
+                        "schema": "lbrain.capture.v1",
+                        "title": title,
+                        "summary": f"Original source for {title}.",
+                        "origin": origin,
+                        "scope": "page",
+                        "content_markdown": content,
+                        "extraction_status": "complete",
+                        "assets": [],
+                    },
+                )
+                self.assertEqual(result.returncode, 0, (result.stderr.decode(), saved))
+                return saved
+
+            woven = capture("Woven Original", "https://example.invalid/woven", "Original woven claim.")
+            skipped = capture("Reference Only", "https://example.invalid/reference", "Useful raw reference.")
+            pending = capture("Read Later", "https://example.invalid/read-later", "Still awaiting a decision.")
+            rejected = capture("Rejected Original", "https://example.invalid/rejected", "Noise to archive.")
+            wiki_content = (
+                "---\ntype: knowledge\nkind: concept\nsummary: A tested woven concept.\n"
+                "status: active\nvisibility: private\nsources:\n"
+                '  - "[[Knowledge/Sources/Woven-Original]]"\n'
+                "created: 2026-08-11\nupdated: 2026-08-11\n---\n"
+                "# Woven Concept\n\n## Synthesis\n\nA source-grounded conclusion.\n\n"
+                "## Evidence and uncertainty\n\nSupported by [[Knowledge/Sources/Woven-Original]].\n"
+            )
+            payload: dict[str, object] = {
+                "bundles": [
+                    {"path": woven["target"], "outcome": "woven", "source_path": "Knowledge/Sources/Woven-Original.md"},
+                    {"path": skipped["target"], "outcome": "skip", "source_path": "Knowledge/Sources/Reference-Only.md"},
+                    {"path": pending["target"], "outcome": "pending"},
+                    {"path": rejected["target"], "outcome": "rejected", "reason": "Outside the retained research scope."},
+                ],
+                "wiki": [{"path": "Knowledge/Wiki/Concepts/Woven-Concept.md", "content": wiki_content}],
+            }
+
+            preview_result, preview = self.run_weave_operation(root, "weave.preview", payload)
+            self.assertEqual(preview_result.returncode, 0, (preview_result.stderr, preview))
+            self.assertEqual(preview["status"], "preview")
+            self.assertEqual(preview["conflicts"], [])
+            self.assertEqual({item["outcome"] for item in preview["bundles"]}, {"woven", "skip", "pending", "rejected"})
+
+            apply_result, applied = self.run_weave_operation(
+                root, "weave.apply", {**payload, "plan_hash": preview["plan_hash"]}
+            )
+            self.assertEqual(apply_result.returncode, 0, (apply_result.stderr, applied))
+            self.assertEqual(applied["status"], "applied")
+            self.assertTrue(dict(applied["git"])["committed"])
+            woven_source = root / "Knowledge/Sources/Woven-Original.md"
+            self.assertTrue(woven_source.is_file())
+            self.assertIn("type: source", woven_source.read_text())
+            self.assertIn("weaving: woven", woven_source.read_text())
+            self.assertTrue(
+                (root / f"Knowledge/Sources/_assets/{woven['capture_id']}/v1/manifest.json").is_file()
+            )
+            self.assertFalse(
+                (root / f"Inbox/Captures/_assets/{woven['capture_id']}/v1/manifest.json").exists()
+            )
+            self.assertIn("weaving: skip", (root / "Knowledge/Sources/Reference-Only.md").read_text())
+            self.assertTrue((root / str(pending["target"])).is_file())
+            archived = root / f"Archives/Sources/{Path(str(rejected['target'])).name}"
+            self.assertIn("Outside the retained research scope.", archived.read_text())
+            self.assertTrue(
+                (root / f"Archives/Sources/_assets/{rejected['capture_id']}/v1/manifest.json").is_file()
+            )
+            archived_result, archived_repeat = self.run_capture_native_host(
+                root,
+                {
+                    "schema": "lbrain.capture.v1",
+                    "title": "Rejected Original",
+                    "summary": "Original source for Rejected Original.",
+                    "origin": "https://example.invalid/rejected",
+                    "scope": "page",
+                    "content_markdown": "Noise to archive.",
+                    "extraction_status": "complete",
+                    "assets": [],
+                },
+            )
+            self.assertEqual(archived_result.returncode, 0, (archived_result.stderr.decode(), archived_repeat))
+            self.assertEqual(archived_repeat["status"], "already_saved")
+            self.assertEqual(archived_repeat["target"], archived.relative_to(root).as_posix())
+            self.assertTrue((root / "Knowledge/Wiki/Concepts/Woven-Concept.md").is_file())
+            self.assertFalse((root / str(woven["target"])).exists())
+            self.assertEqual(applied["skill_improvement"], "review_after_success")
+
+            repeated_result, repeated_preview = self.run_weave_operation(root, "weave.preview", payload)
+            self.assertEqual(repeated_result.returncode, 0, repeated_result.stderr)
+            self.assertEqual(repeated_preview["status"], "noop")
+            noop_result, noop = self.run_weave_operation(
+                root, "weave.apply", {**payload, "plan_hash": repeated_preview["plan_hash"]}
+            )
+            self.assertEqual(noop_result.returncode, 0, noop_result.stderr)
+            self.assertEqual(noop["status"], "noop")
+
+            version_result, versioned = self.run_capture_native_host(
+                root,
+                {
+                    "schema": "lbrain.capture.v1",
+                    "title": "Woven Original",
+                    "summary": "A changed source version.",
+                    "origin": "https://example.invalid/woven",
+                    "scope": "page",
+                    "content_markdown": "A new version stays pending.",
+                    "extraction_status": "complete",
+                    "assets": [],
+                },
+            )
+            self.assertEqual(version_result.returncode, 0, (version_result.stderr.decode(), versioned))
+            self.assertEqual(versioned["version"], 2)
+            self.assertTrue(str(versioned["target"]).startswith("Inbox/Captures/"))
+            self.assertIn("Original woven claim.", woven_source.read_text())
+
+    def test_weave_git_commit_preserves_existing_staged_content(self) -> None:
+        spec = importlib.util.spec_from_file_location("weave_operations_git", WEAVE_OPERATIONS)
+        assert spec and spec.loader
+        operations = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(operations)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "Weave Test"], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.email", "weave@example.invalid"], check=True
+            )
+            note = root / "note.md"
+            note.write_text("initial\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "note.md"], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "initial"], check=True)
+            note.write_text("user staged\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "note.md"], check=True)
+            note.write_text("operation result\n", encoding="utf-8")
+
+            result = operations.weave_git_commit(root, ["note.md"], 1)
+
+            self.assertFalse(result["committed"])
+            staged = subprocess.run(
+                ["git", "-C", str(root), "show", ":note.md"], text=True, capture_output=True, check=True
+            ).stdout
+            self.assertEqual(staged, "user staged\n")
+            self.assertEqual(note.read_text(encoding="utf-8"), "operation result\n")
+
+            intent = root / "intent.md"
+            intent.write_text("user intent\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "-N", "intent.md"], check=True)
+            before = subprocess.run(
+                ["git", "-C", str(root), "ls-files", "--debug", "--", "intent.md"],
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout
+            intent.write_text("operation result\n", encoding="utf-8")
+
+            intent_result = operations.weave_git_commit(root, ["intent.md"], 1)
+
+            self.assertFalse(intent_result["committed"])
+            after = subprocess.run(
+                ["git", "-C", str(root), "ls-files", "--debug", "--", "intent.md"],
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout
+            self.assertEqual(after, before)
+            self.assertEqual(intent.read_text(encoding="utf-8"), "operation result\n")
+
+    def test_weave_rejects_a_symlinked_destination_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = self.copy_repo(base)
+            saved_result, saved = self.run_capture_native_host(
+                root,
+                {
+                    "schema": "lbrain.capture.v1",
+                    "title": "Symlink Weave",
+                    "summary": "Must remain inside the selected Vault.",
+                    "origin": "https://example.invalid/symlink-weave",
+                    "scope": "page",
+                    "content_markdown": "Synthetic source.",
+                    "extraction_status": "complete",
+                    "assets": [],
+                },
+            )
+            self.assertEqual(saved_result.returncode, 0, (saved_result.stderr.decode(), saved))
+            outside = base / "outside"
+            outside.mkdir()
+            (root / "Knowledge/Sources/Escape").symlink_to(outside, target_is_directory=True)
+            payload = {
+                "bundles": [{
+                    "path": saved["target"],
+                    "outcome": "skip",
+                    "source_path": "Knowledge/Sources/Escape/Symlink-Weave.md",
+                }],
+                "wiki": [],
+            }
+            preview_result, preview = self.run_weave_operation(root, "weave.preview", payload)
+            self.assertNotEqual(preview_result.returncode, 0)
+            self.assertEqual(preview["status"], "failed")
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertTrue((root / str(saved["target"])).is_file())
+
+    def test_atomic_weave_rolls_back_every_resource_when_validation_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.copy_repo(Path(temporary))
+            saved_result, saved = self.run_capture_native_host(
+                root,
+                {
+                    "schema": "lbrain.capture.v1",
+                    "title": "Rollback Source",
+                    "summary": "A source used to prove atomic rollback.",
+                    "origin": "https://example.invalid/weave-rollback",
+                    "scope": "page",
+                    "content_markdown": "Original content must survive.",
+                    "extraction_status": "complete",
+                    "assets": [],
+                },
+            )
+            self.assertEqual(saved_result.returncode, 0, (saved_result.stderr.decode(), saved))
+            wiki_content = (
+                "---\ntype: knowledge\nkind: concept\nsummary: rollback fixture\nstatus: active\n"
+                "visibility: private\nsources:\n  - \"[[Knowledge/Sources/Rollback-Source]]\"\n"
+                "created: 2026-08-11\nupdated: 2026-08-11\n---\n# Rollback Wiki\n\n"
+                "## Synthesis\n\nMust roll back.\n\n## Evidence and uncertainty\n\n"
+                "[[Knowledge/Sources/Rollback-Source]]\n"
+            )
+            payload: dict[str, object] = {
+                "bundles": [{
+                    "path": saved["target"], "outcome": "woven", "source_path": "Knowledge/Sources/Rollback-Source.md"
+                }],
+                "wiki": [{"path": "Knowledge/Wiki/Concepts/Rollback-Wiki.md", "content": wiki_content}],
+            }
+            preview_result, preview = self.run_weave_operation(root, "weave.preview", payload)
+            self.assertEqual(preview_result.returncode, 0, (preview_result.stderr, preview))
+            spec = importlib.util.spec_from_file_location("weave_operations_rollback", WEAVE_OPERATIONS)
+            assert spec and spec.loader
+            operations = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(operations)
+            operations.validate = lambda _: (False, "synthetic validation failure")
+            failed = operations.weave_apply(root, {**payload, "plan_hash": preview["plan_hash"]})
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed["rollback"], {"performed": True, "ok": True})
+            self.assertTrue((root / str(saved["target"])).is_file())
+            self.assertFalse((root / "Knowledge/Sources/Rollback-Source.md").exists())
+            self.assertFalse((root / "Knowledge/Wiki/Concepts/Rollback-Wiki.md").exists())
 
     def test_proposal_create_targets_enabled_personal_skill_and_deduplicates(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>确认保存到 LBrain</title>
+  <style>
+    :root { color-scheme: light dark; font: 15px/1.5 system-ui, sans-serif; }
+    body { margin: 0; padding: 24px; }
+    h1 { margin: 0 0 8px; font-size: 20px; }
+    #summary { margin: 0 0 20px; color: #666; }
+    dl { display: grid; grid-template-columns: 80px 1fr; gap: 10px 12px; margin: 0; }
+    dt { color: #777; }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 28px; }
+    button { min-width: 88px; padding: 9px 14px; border: 1px solid #aaa; border-radius: 8px; font: inherit; }
+    #save { color: white; background: #315efb; border-color: #315efb; }
+    @media (prefers-color-scheme: dark) { #summary, dt { color: #aaa; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1 id="title">准备保存…</h1>
+    <p id="summary"></p>
+    <dl id="details"></dl>
+  </main>
+  <footer>
+    <button id="cancel" type="button">取消</button>
+    <button id="save" type="button">确认保存</button>
+  </footer>
+  <script src="confirm.js"></script>
+</body>
+</html>

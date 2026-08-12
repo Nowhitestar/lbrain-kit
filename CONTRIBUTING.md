@@ -5,7 +5,7 @@ Contributions should improve the public Kit: contracts, templates, Core Skills, 
 
 Before opening a change:
 
-1. Keep the Kit pure Markdown plus Python standard-library tooling.
+1. Keep the canonical Kit Markdown-first and Python tooling standard-library only. A first-party browser adapter may use dependency-free browser-native JavaScript; optional local extractors and Git LFS integration must fail safely when unavailable.
 2. Preserve the Kit/Seeded/User ownership boundary.
 3. Add or update the smallest runnable test for non-trivial logic.
 4. Run `python3 -m unittest discover -s System/Kit/tests -v` and `python3 System/Kit/check.py`.

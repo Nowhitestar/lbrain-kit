@@ -4,6 +4,7 @@
 
 - “把这三份资料编织成一个可复用的概念笔记。” → update or create one source-grounded Wiki note.
 - “Connect these interview notes and show disagreements.” → preserve conflicting claims and cite each Source.
+- “编织这些 Capture。” → preview the exact Source/Wiki transaction and immediately apply that same conflict-free plan; do not ask for another confirmation.
 
 ## Should not trigger
 
@@ -13,6 +14,9 @@
 ## Integrity case
 
 - A desired conclusion lacks a Source → label it as inference or leave it unresolved; do not invent evidence.
+- One write in a multi-Bundle/multi-Wiki transaction fails → restore every Inbox note, asset directory, Source, and Wiki to its pre-Weave state.
+- A selected Bundle is `pending` or `deferred` → keep it in Inbox; `skip` promotes only the original, and `rejected` archives it with a reason.
+- The origin of a woven Source is captured again with changed content → keep the immutable new version in Inbox until the user explicitly weaves it.
 
 ## Skill Improvement case
 

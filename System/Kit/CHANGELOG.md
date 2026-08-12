@@ -3,6 +3,15 @@
 
 All notable Kit-owned changes are documented here. Kit releases follow semantic versioning; Personal Skills carry their own versions.
 
+## 0.5.0 — 2026-08-11
+
+- Added a first-party Manifest V3 Web Clipper that previews the exact capture type before any write, streams the current authenticated rendered page directly to an on-demand local Native Messaging Host, and never uses Downloads, browsing history, permanent site permissions, a daemon, local port, cloud model, or automatic push.
+- Added durable Inbox Capture Bundles with stable identity, immutable versions, SHA-256 manifests, Git LFS assets, Obsidian-relative media, no-op receipts, partial recovery, local `capture:` commits, and fail-safe path/disk/symlink validation.
+- Preserved authenticated articles, WeChat articles, X Articles and first-author Threads, direct PDFs, non-video document attachments, images, audio, webpage subtitles/transcripts, video origin links, and sanitized offline HTML snapshots for non-article pages; video binaries remain excluded while bounded streaming uses available disk space instead of a fixed media-size ceiling.
+- Added hash-bound `weave.preview`/`weave.apply` transactions that atomically promote woven or skipped Bundles, archive rejected originals with reasons, leave pending/deferred originals in Inbox, update multiple Wiki notes/backlinks, roll back on failure, and attempt local `weave:` commits.
+- Upgraded the Personal Intelligence Tracer to prove the framed browser message → Inbox → Obsidian receipt → Source/Wiki → Skill Improvement lifecycle and idempotent replay.
+- Kept Chrome Web Store distribution, videos without existing-subtitle local transcription, and a general MCP Capture/plugin protocol for later milestones.
+
 ## 0.4.1 — 2026-08-11
 
 - Fixed the public-content validator so static pagination placeholders, empty or zero cursor initialization, getter key references, and explanatory docstrings remain valid while concrete opaque cursor values are still rejected.

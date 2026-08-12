@@ -7,7 +7,7 @@ Ownership determines what an upgrade may replace. It is independent of Git autho
 
 Kit releases may update these paths:
 
-- root `README.md`, `AGENTS.md`, `LICENSE`, `.gitignore`, `CONTRIBUTING.md`, and `SECURITY.md`;
+- root `README.md`, `AGENTS.md`, `LICENSE`, `.gitignore`, `.gitattributes`, `CONTRIBUTING.md`, and `SECURITY.md`;
 - every semantic directory `README.md`;
 - all of `System/Kit/`, `System/Rules/Core/`, and `System/Templates/Core/`;
 - all of `Skills/Kit/`.

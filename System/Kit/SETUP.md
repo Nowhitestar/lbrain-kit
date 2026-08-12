@@ -11,7 +11,7 @@ cd <your-lbrain-directory>
 git remote rename origin kit
 git remote set-url --push kit DISABLED
 git branch -m main kit-base
-git switch -c main v0.4.1
+git switch -c main v0.5.0
 ```
 
 `kit-base` follows the public Kit. `main` is the private personal context history. The disabled push URL prevents an accidental push of personal context to the public Kit.
@@ -111,7 +111,7 @@ Before merging, read `CHANGELOG.md` and the release file under `MIGRATIONS/`. Re
 - preserve User-owned files;
 - preserve personalized Seeded files and apply any suggested seeded change manually.
 
-The 0.2.0 migration requires preserving `Skills/Enabled.md` personalization while adding the seventh mandatory Core Skill entry. The 0.3.0 migration moves Skill lifecycle metadata into `lbrain.json` and optionally adds OpenClaw to personalized runtime selections. The 0.4.0 migration adds deterministic Personal Intelligence writes without requiring a bulk rewrite of existing Projects, Sources, Proposals, or Personal Skills. The 0.4.1 migration only patches validator compatibility and requires no personal-content rewrite. Later migrations state their own exact Seeded reconciliation, if any.
+The 0.2.0 migration requires preserving `Skills/Enabled.md` personalization while adding the seventh mandatory Core Skill entry. The 0.3.0 migration moves Skill lifecycle metadata into `lbrain.json` and optionally adds OpenClaw to personalized runtime selections. The 0.4.0 migration adds deterministic Personal Intelligence writes without requiring a bulk rewrite of existing Projects, Sources, Proposals, or Personal Skills. The 0.4.1 migration only patches validator compatibility. The 0.5.0 migration adds optional developer-mode browser Capture and atomic Inbox-to-Source Weave without rewriting existing personal content. Later migrations state their own exact Seeded reconciliation, if any.
 
 Do not commit or push an upgrade until validation passes and the staged change list confirms that no Seeded or User-owned content was unintentionally replaced. After committing, `git diff HEAD^1..HEAD -- <path>` remains available for a targeted ownership review.
 

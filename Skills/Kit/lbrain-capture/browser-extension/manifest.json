@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "LBrain Web Clipper",
+  "version": "0.2.0",
+  "description": "Save the current rendered page to a local LBrain Capture Bundle.",
+  "permissions": [
+    "activeTab",
+    "contextMenus",
+    "nativeMessaging",
+    "notifications",
+    "pageCapture",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "action": {
+    "default_title": "Save to LBrain"
+  }
+}

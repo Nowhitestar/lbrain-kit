@@ -163,7 +163,7 @@ Kit v0.4.0 exposes six deterministic operations through the Core Skill scripts. 
 | --- | --- |
 | `project.configure` | Preview one human-readable v1 Context Intake Profile and matching Proposal, then apply only that already accepted Proposal while preserving an existing legacy Profile body. |
 | `project.checkpoint` | Reconcile the canonical `source: anchor` rows, append one idempotent complete or partial Intake run, and advance the complete checkpoint only when every required row succeeds. |
-| `capture.create` | Save or reuse one private Source/Inbox item with provenance, extraction state, validation, and rollback. |
+| `capture.create` | Save or reuse one private Inbox original with provenance, extraction state, validation, and rollback. Source promotion belongs to explicit Weave. |
 | `proposal.create` | Create one evidence-linked Skill Improvement Proposal for an enabled active Personal Skill. |
 | `skill.preview` | Validate and persist one immutable exact diff, semantic version change, base hash, proposed hash, approved runtime plan, and preview hash. |
 | `skill.apply` | Apply only an already accepted Proposal containing the approved exact preview hash, refresh only the runtime destinations bound into that preview, validate, roll back on failure, and make a replay a no-op. |

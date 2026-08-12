@@ -2,8 +2,17 @@
 
 ## Should trigger
 
-- “把这篇文章记到我的 LBrain，之后再处理。” → create a private Source or Inbox capture with provenance.
-- “保存这个链接，我晚点再读。” → use `capture.create` once; retain the URL and optional note even if extraction fails.
+- “把这篇文章记到我的 LBrain，之后再处理。” → create a private Inbox Capture with provenance.
+- “保存这个链接，我晚点再读。” → use `capture.create` once; retain the URL and optional note in Inbox even if extraction fails.
+- Browser saves a rendered page while no Agent is running → the Native Host writes one validated Capture Bundle and returns a brief receipt.
+- Browser cannot identify an article, direct file, or supported video page → preview “HTML snapshot”; only after confirmation preserve one sanitized offline HTML file and its non-video media without writing Downloads.
+- A partial retry sees unchanged page text but redownloads only missing media → recover the same version and retain every previously verified asset.
+- A partial retry sees changed rendered source content → keep the old version immutable and create the next Capture Version.
+- Browser saves a WeChat Official Account article → preserve `#js_content`, title, author, date, lazy-loaded body images, and the canonical origin; exclude recommendations and page chrome.
+- Browser saves an X Article → preserve the long-form article, author, figures, captions, and origin; exclude surrounding timeline content.
+- Browser saves an X Thread → preserve consecutive posts by the first author and quoted posts within them; exclude unrelated replies and action controls.
+- Browser saves a direct PDF → preserve the original binary and locally extracted searchable text; use local OCR when the PDF has no text layer and report `partial` when extraction is unavailable.
+- Browser saves an article with document links and a video → preserve non-video attachments and subtitle files, retain the original video link and rendered transcript, and never download the video binary.
 - “Remember this idea; I am not sure where it belongs.” → create an Inbox capture, not a confirmed Wiki claim.
 - “每天扫描我已经连接的工作来源，把 AgentKey 作为重点形成 Context。” → inventory every enabled source, confirm the schedule, and run full-source Context Intake with target-focused reporting.
 - “帮我为市场研究建一个每周收集资料的项目。” → discover available connectors, ask unresolved setup questions together, preview one non-code Project and Intake Profile, then apply through `project.configure` after one confirmation.
@@ -17,8 +26,13 @@
 ## Safety case
 
 - Input contains an API key → refuse to store the secret and capture only a safe redacted note if requested.
-- The same article is saved twice → return the existing Source or a safe provenance update; never create an equivalent second note.
-- A failed managed extraction later succeeds → recover the same capture only when its exact prior hash still matches; preserve unrecognized metadata, user-authored sections, and concurrent edits instead of overwriting them.
+- The same article is saved twice → return `already_saved`; never create an equivalent second Bundle or Git commit.
+- A captured origin changes → create an immutable linked Capture Version in Inbox; never overwrite the prior original or user annotations.
+- Bundle validation fails after staging → remove the staged Bundle and leave no partial Capture files.
+- One authenticated image is absent from the page snapshot → save the readable article as `partial`, keep the failed remote reference, and preserve every successfully verified image locally.
+- User cancels the pre-save confirmation → create no Inbox file, temporary download, or Native Host request.
+- A partial browser Bundle is retried → replace only its managed asset manifest and Capture/provenance sections after the exact managed-section recovery hash matches; exclude and retain unknown frontmatter and user-authored sections.
+- A failed managed extraction later succeeds → recover the same capture only when its exact managed-section recovery hash still matches; preserve unrecognized metadata and user-authored sections excluded from that hash, and reject concurrent managed edits.
 - Another write operation holds the LBrain transaction lock → fail closed without changing any canonical note.
 - A scheduled run finds an Identity claim → create an Identity Proposal; never confirm it in the background.
 - One enabled connector fails → report the run as partial with connector, error, and freshness; never call the scan complete.
