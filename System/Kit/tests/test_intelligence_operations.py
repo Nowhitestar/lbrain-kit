@@ -2081,7 +2081,8 @@ class IntelligenceOperationTest(unittest.TestCase):
                 '<audio src="https://alpha.example.invalid/lesson.mp3"></audio>'
                 '<a href="javascript:alert(1)">unsafe link</a>'
                 '<form><input value="private form value"></form><script>privateRuntimeState()</script>'
-                "</main></body></html>",
+                '</main><aside class="recommendations"><ytd-transcript-renderer>Unrelated promo transcript.</ytd-transcript-renderer></aside>'
+                "</body></html>",
                 encoding="utf-8",
             )
             main_article_fixture = directory / "main-article.html"
@@ -2132,8 +2133,15 @@ class IntelligenceOperationTest(unittest.TestCase):
             transcript_fixture.write_text(
                 '<!doctype html><html><head><title>Training replay</title>'
                 '<link rel="canonical" href="https://training.example/replay/7"></head><body><main>'
-                '<h1>Training replay</h1><div data-testid="transcript"><div class="segment">Replay cue.</div></div>'
+                '<h1>Training replay</h1><div data-lbrain-transcript><div class="segment">Replay cue.</div></div>'
                 '</main></body></html>', encoding="utf-8",
+            )
+            interview_fixture = directory / "interview.html"
+            interview_fixture.write_text(
+                '<!doctype html><html><head><title>Interview transcript</title></head><body><main>'
+                '<h1>Interview transcript</h1><p>' + ('Editorial introduction and context. ' * 25) + '</p>'
+                '<section itemprop="transcript"><p>Alice: First answer.</p><p>Bob: Follow-up question.</p></section>'
+                '<p>' + ('Editorial conclusion and analysis. ' * 20) + '</p></main></body></html>', encoding="utf-8",
             )
             plain_article_fixture = directory / "plain-article.html"
             plain_article_fixture.write_text(
@@ -2198,6 +2206,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                 unknown_video,
                 youtube_video,
                 transcript_video,
+                interview,
             ) = self.run_browser_fixtures(
                 chrome,
                 [
@@ -2208,6 +2217,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                     unknown_video_fixture,
                     youtube_fixture,
                     transcript_fixture,
+                    interview_fixture,
                 ],
             )
             self.assertEqual(captured["capture_kind"], "article")
@@ -2274,6 +2284,7 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertNotIn("javascript:", generic["snapshot_html"])
             self.assertNotIn("<base", generic["snapshot_html"])
             self.assertNotIn("icons.svg", generic["snapshot_html"])
+            self.assertNotIn("Unrelated promo transcript.", generic["content_markdown"])
             self.assertIn('href="#local-symbol"', generic["snapshot_html"])
             generic_media = {asset["url"] for asset in generic["remote_assets"]}
             self.assertIn("https://alpha.example.invalid/chart.svg", generic_media)
@@ -2316,6 +2327,9 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(transcript_video["capture_kind"], "video")
             self.assertIn("https://training.example/replay/7", transcript_video["content_markdown"])
             self.assertEqual(transcript_video["content_markdown"].count("Replay cue."), 1)
+            self.assertEqual(interview["capture_kind"], "article")
+            self.assertFalse(interview["has_video"])
+            self.assertIn("Alice: First answer.", interview["content_markdown"])
 
     def test_extension_builds_direct_pdf_capture_without_saving_video_binary(self) -> None:
         script = (

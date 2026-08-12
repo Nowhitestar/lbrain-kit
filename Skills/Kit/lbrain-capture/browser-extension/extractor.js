@@ -37,7 +37,7 @@
       || ""
   );
   const children = (node, renderer) => Array.from(node.childNodes).map(renderer).join("");
-  const transcriptSelector = "ytd-transcript-renderer, [data-testid='transcript'], [itemprop='transcript'], [data-lbrain-transcript]";
+  const transcriptSelector = "ytd-transcript-renderer, [data-testid='transcript'], [data-lbrain-transcript]";
 
   function inline(node) {
     if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || "";
@@ -416,9 +416,10 @@
       || url(document.querySelector("link[rel='canonical']")?.getAttribute("href") || "")
       || url(location.href);
     const genericPage = scope === "page" && !wechat && !xArticle && !thread && !semanticArticle;
-    const mediaRoot = genericPage ? document.body : root;
+    const mediaRoot = genericPage ? document.body.cloneNode(true) : root;
+    if (genericPage) mediaRoot.querySelectorAll(NOISE).forEach((node) => node.remove());
     const supportedVideoHost = /(^|\.)((youtube\.com)|(youtu\.be)|(bilibili\.com))$/i.test(location.hostname);
-    const transcriptPresent = Boolean(mediaRoot.querySelector("ytd-transcript-renderer, [data-testid='transcript'], [itemprop='transcript']"));
+    const transcriptPresent = Boolean(mediaRoot.querySelector(transcriptSelector));
     const videoDetails = videoMarkdown(mediaRoot, supportedVideoHost || transcriptPresent ? canonical : "");
     const rendered = `${block(root).trim()}${videoDetails}`
       .replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
