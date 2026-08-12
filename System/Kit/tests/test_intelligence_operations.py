@@ -1146,17 +1146,6 @@ class IntelligenceOperationTest(unittest.TestCase):
             )
             self.assertNotEqual(rejected_result.returncode, 0)
             self.assertEqual(rejected["status"], "failed")
-            html_result, html_rejected = self.run_capture_native_stream(
-                root,
-                payload,
-                b"<!doctype html><title>Sign in</title>",
-                "binary",
-                staging,
-                snapshot_media_type="text/html",
-            )
-            self.assertNotEqual(html_result.returncode, 0)
-            self.assertEqual(html_rejected["status"], "failed")
-
             reference_result, reference = self.run_capture_operation(
                 root,
                 "capture.create",
@@ -1808,6 +1797,16 @@ class IntelligenceOperationTest(unittest.TestCase):
             )
             self.assertNotEqual(rejected_result.returncode, 0)
             self.assertEqual(rejected["status"], "failed")
+            html_result, html_rejected = self.run_capture_native_stream(
+                root,
+                payload,
+                b"<!doctype html><title>Sign in</title>",
+                "binary",
+                staging,
+                snapshot_media_type="text/html",
+            )
+            self.assertNotEqual(html_result.returncode, 0)
+            self.assertEqual(html_rejected["status"], "failed")
 
     def test_chrome_extension_extracts_rendered_article_with_minimal_permissions(self) -> None:
         manifest = json.loads((CAPTURE_EXTENSION / "manifest.json").read_text(encoding="utf-8"))
@@ -1936,9 +1935,45 @@ class IntelligenceOperationTest(unittest.TestCase):
                 "<p>Opening paragraph.</p><p>" + ("Long story body. " * 30) + "</p></main></body></html>",
                 encoding="utf-8",
             )
-            captured, wechat, x_article, x_thread, media_capture, generic, main_article = self.run_browser_fixtures(
+            product_fixture = directory / "product.html"
+            product_fixture.write_text(
+                "<!doctype html><html><head><title>Plans</title><meta property=\"og:type\" content=\"website\"></head>"
+                '<body><header><h1>Plans</h1></header><main><article class="pricing-plan" itemscope '
+                'itemtype="https://schema.org/Product"><h1>Pro Plan</h1><p>'
+                + ("Pricing and subscription details. " * 30)
+                + "</p><p>Annual billing.</p><p>Choose this plan.</p></article></main></body></html>",
+                encoding="utf-8",
+            )
+            plain_article_fixture = directory / "plain-article.html"
+            plain_article_fixture.write_text(
+                "<!doctype html><html><head><title>Research Note</title></head><body><main><h1>Research Note</h1>"
+                "<p>Opening.</p><p>" + ("Detailed research argument. " * 45)
+                + "</p><p>Conclusion.</p></main></body></html>",
+                encoding="utf-8",
+            )
+            interposed_thread_fixture = directory / "interposed-thread.html"
+            interposed_thread_fixture.write_text(
+                '<!doctype html><html><body><main><article data-testid="tweet"><div data-testid="User-Name">'
+                '<span>Alice</span><a href="https://x.com/alice/status/300"><time datetime="2026-08-11T01:00:00Z">1</time></a></div>'
+                '<div data-testid="tweetText">First chain post.</div></article>'
+                '<article data-testid="tweet"><div data-testid="User-Name"><span>Bob</span>'
+                '<a href="https://x.com/bob/status/400"><time datetime="2026-08-11T01:01:00Z">2</time></a></div>'
+                '<div data-testid="tweetText">Interposed reply.</div></article>'
+                '<article data-testid="tweet" data-in-reply-to-status-id="300"><div data-testid="User-Name"><span>Alice</span>'
+                '<a href="https://x.com/alice/status/301"><time datetime="2026-08-11T01:02:00Z">3</time></a></div>'
+                '<div data-testid="tweetText">Second chain post.</div></article></main></body></html>',
+                encoding="utf-8",
+            )
+            (
+                captured, wechat, x_article, x_thread, media_capture, generic, main_article,
+                product, plain_article, interposed_thread,
+            ) = self.run_browser_fixtures(
                 chrome,
-                [fixture, wechat_fixture, x_article_fixture, x_thread_fixture, media_fixture, generic_fixture, main_article_fixture],
+                [
+                    fixture, wechat_fixture, x_article_fixture, x_thread_fixture, media_fixture,
+                    generic_fixture, main_article_fixture, product_fixture, plain_article_fixture,
+                    interposed_thread_fixture,
+                ],
             )
             self.assertEqual(captured["capture_kind"], "article")
             self.assertEqual(captured["title"], "Authenticated Article")
@@ -1990,6 +2025,7 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(media_capture["capture_kind"], "article")
             self.assertTrue(media_capture["has_video"])
             self.assertEqual(generic["capture_kind"], "html")
+            self.assertEqual(generic["title"], "Alpha School")
             self.assertIn("lbrain-asset://html-snapshot", generic["content_markdown"])
             self.assertIn("<main>", generic["snapshot_html"])
             self.assertNotIn("<script", generic["snapshot_html"])
@@ -2006,6 +2042,13 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(main_article["capture_kind"], "article")
             self.assertEqual(main_article["title"], "Main Story")
             self.assertIn("Long story body.", main_article["content_markdown"])
+            self.assertEqual(product["capture_kind"], "html")
+            self.assertEqual(product["title"], "Plans")
+            self.assertEqual(plain_article["capture_kind"], "article")
+            self.assertEqual(plain_article["title"], "Research Note")
+            self.assertIn("First chain post.", interposed_thread["content_markdown"])
+            self.assertIn("Second chain post.", interposed_thread["content_markdown"])
+            self.assertNotIn("Interposed reply.", interposed_thread["content_markdown"])
 
     def test_extension_builds_direct_pdf_capture_without_saving_video_binary(self) -> None:
         script = (
@@ -2138,6 +2181,38 @@ class IntelligenceOperationTest(unittest.TestCase):
         self.assertEqual(output["closed"], 1)
         self.assertTrue(output["cachedAtDecision"])
         self.assertTrue(output["reservedBeforePermissions"])
+
+    def test_extension_save_reservation_survives_worker_restart(self) -> None:
+        script = (
+            "const fs=require('fs'),vm=require('vm'),{webcrypto}=require('crypto');const shared={};"
+            "function worker(){let handler;const session={async get(key){return{[key]:shared[key]}},"
+            "async set(value){Object.assign(shared,value)},async remove(key){delete shared[key]}};"
+            "const chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},"
+            "onMessage:{addListener(fn){handler=fn}},onConnect:{addListener(){}},lastError:null,"
+            "getURL(value){return 'chrome-extension://test/'+value}},contextMenus:{removeAll(){},create(){},"
+            "onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},windows:{onRemoved:{addListener(){}}},"
+            "notifications:{onButtonClicked:{addListener(){}}},storage:{session,local:{async get(){return{}},async set(){},async remove(){}}}};"
+            "const caches={async open(){return{async match(){return undefined},async delete(){}}},async delete(){}};"
+            "const context={chrome,caches,crypto:webcrypto,URL,TextEncoder,Blob,Response,setTimeout,clearTimeout,console};"
+            "vm.createContext(context);vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),context);return handler}"
+            "function send(handler,message){return new Promise(resolve=>handler(message,{},resolve))}"
+            "(async()=>{const reserved=await send(worker(),{type:'confirmation.reserve',id:'capture-1'});"
+            "const decided=await send(worker(),{type:'confirmation.decide',id:'capture-1'});"
+            "console.log(JSON.stringify({reserved:reserved.reserved,error:decided.error,stale:Boolean(shared['lbrain-save-reservation-v1'])}))})()"
+            ".catch(error=>{console.error(error);process.exit(1)});"
+        )
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertTrue(output["reserved"])
+        self.assertIn("confirmation is no longer available", output["error"])
+        self.assertNotIn("owns the save slot", output["error"])
+        self.assertFalse(output["stale"])
 
     def test_bundle_extracts_pdf_and_subtitle_text_and_recovers_partial_media(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -3562,6 +3637,64 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(versioned["version"], 2)
             self.assertTrue(str(versioned["target"]).startswith("Inbox/Captures/"))
             self.assertIn("Original woven claim.", woven_source.read_text())
+
+    def test_weave_rejects_assets_changed_after_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = self.copy_repo(base)
+            staging = base / "staging"
+            staging.mkdir()
+            (staging / "evidence.png").write_bytes(b"approved asset bytes")
+            capture_result, captured = self.run_capture_native_host(
+                root,
+                {
+                    "schema": "lbrain.capture.v1",
+                    "title": "Asset evidence",
+                    "summary": "A Capture with preview-bound media.",
+                    "origin": "https://example.invalid/asset-evidence",
+                    "scope": "page",
+                    "content_markdown": "![Evidence](lbrain-asset://evidence)",
+                    "extraction_status": "complete",
+                    "assets": [{
+                        "name": "images/evidence.png",
+                        "staged_name": "evidence.png",
+                        "placeholder": "lbrain-asset://evidence",
+                        "media_type": "image/png",
+                    }],
+                },
+                staging,
+            )
+            self.assertEqual(capture_result.returncode, 0, captured)
+            payload = {
+                "bundles": [{
+                    "path": captured["target"],
+                    "outcome": "woven",
+                    "source_path": "Knowledge/Sources/Asset-Evidence.md",
+                }],
+                "wiki": [{
+                    "path": "Knowledge/Wiki/Concepts/Asset-Evidence.md",
+                    "content": (
+                        "---\ntype: knowledge\nkind: concept\nsummary: Asset evidence.\n"
+                        "status: active\nvisibility: private\nsources:\n"
+                        '  - "[[Knowledge/Sources/Asset-Evidence]]"\n'
+                        "created: 2026-08-12\nupdated: 2026-08-12\n---\n"
+                        "# Asset Evidence\n\nSupported by [[Knowledge/Sources/Asset-Evidence]].\n"
+                    ),
+                }],
+            }
+            preview_result, preview = self.run_weave_operation(root, "weave.preview", payload)
+            self.assertEqual(preview_result.returncode, 0, preview)
+            stored_asset = root / (
+                f"Inbox/Captures/_assets/{captured['capture_id']}/v1/files/images/evidence.png"
+            )
+            stored_asset.write_bytes(b"changed after preview")
+            apply_result, rejected = self.run_weave_operation(
+                root, "weave.apply", {**payload, "plan_hash": preview["plan_hash"]}
+            )
+            self.assertNotEqual(apply_result.returncode, 0)
+            self.assertEqual(rejected["status"], "failed")
+            self.assertTrue((root / str(captured["target"])).is_file())
+            self.assertEqual(stored_asset.read_bytes(), b"changed after preview")
 
     def test_weave_git_commit_preserves_existing_staged_content(self) -> None:
         spec = importlib.util.spec_from_file_location("weave_operations_git", WEAVE_OPERATIONS)

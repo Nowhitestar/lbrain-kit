@@ -4,6 +4,7 @@ const SELECTION = "lbrain-save-selection";
 const STREAM_PROTOCOL = "lbrain.capture.stream.v1";
 const CHUNK_BYTES = 384 * 1024;
 const CONFIRMATION_CACHE = "lbrain-confirmations-v1";
+const SAVE_RESERVATION = "lbrain-save-reservation-v1";
 const confirmations = new Map();
 const confirmationWindows = new Map();
 let saveReservation = null;
@@ -444,6 +445,17 @@ async function deleteConfirmation(id) {
 
 async function clearConfirmations() {
   await caches.delete(CONFIRMATION_CACHE);
+  await chrome.storage.session.remove(SAVE_RESERVATION);
+}
+
+async function releaseSaveReservation(id) {
+  if (saveReservation === id) saveReservation = null;
+  try {
+    const stored = (await chrome.storage.session.get(SAVE_RESERVATION))[SAVE_RESERVATION];
+    if (stored?.id === id) await chrome.storage.session.remove(SAVE_RESERVATION);
+  } catch (_) {
+    // Reservation expiry remains the crash-safe fallback.
+  }
 }
 
 async function confirmCapture(tab, capture) {
@@ -482,15 +494,29 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === "confirmation.reserve") {
       if (saveReservation) throw new Error("Another LBrain capture is already being saved.");
       saveReservation = message.id;
+      try {
+        const stored = (await chrome.storage.session.get(SAVE_RESERVATION))[SAVE_RESERVATION];
+        if (stored?.id && stored.id !== message.id && Date.now() - stored.created < 10 * 60 * 1000) {
+          throw new Error("Another LBrain capture is already being saved.");
+        }
+        await chrome.storage.session.set({ [SAVE_RESERVATION]: { id: message.id, created: Date.now() } });
+      } catch (error) {
+        saveReservation = null;
+        throw error;
+      }
       return { reserved: true };
     }
     if (message.type === "confirmation.release") {
-      if (saveReservation === message.id) saveReservation = null;
+      await releaseSaveReservation(message.id);
       confirmationWindows.delete(message.id);
       return { released: true };
     }
     if (message.type !== "confirmation.decide") return undefined;
-    if (saveReservation !== message.id) throw new Error("This capture no longer owns the save slot.");
+    if (saveReservation !== message.id) {
+      const stored = (await chrome.storage.session.get(SAVE_RESERVATION))[SAVE_RESERVATION];
+      if (stored?.id !== message.id) throw new Error("This capture no longer owns the save slot.");
+      saveReservation = message.id;
+    }
     try {
       const pending = await storedCapture(message.id);
       if (!pending || typeof pending !== "object" || !pending.capture || !pending.tab) {
@@ -508,7 +534,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         confirmationWindows.delete(message.id);
       }
     } finally {
-      saveReservation = null;
+      await releaseSaveReservation(message.id);
     }
   })().then(sendResponse, (error) => sendResponse({ error: error instanceof Error ? error.message : String(error) }));
   return true;
@@ -538,7 +564,9 @@ chrome.windows.onRemoved.addListener((windowId) => {
   for (const [id, savedWindowId] of confirmationWindows) {
     if (savedWindowId !== windowId) continue;
     confirmationWindows.delete(id);
-    if (saveReservation === id) saveReservation = null;
+    if (saveReservation === id) {
+      releaseSaveReservation(id).catch(() => {});
+    }
   }
   for (const [id, pending] of confirmations) {
     if (pending.windowId === windowId) {

@@ -57,6 +57,35 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def asset_tree_digest(root: Path, lines: list[str]) -> str:
+    manifest_value = metadata_value(lines, "media_manifest")
+    manifest = PurePosixPath(manifest_value)
+    if (
+        manifest.is_absolute()
+        or ".." in manifest.parts
+        or manifest.parts[:3] != ("Inbox", "Captures", "_assets")
+        or manifest.name != "manifest.json"
+    ):
+        raise OperationError("Capture Bundle has an invalid media manifest")
+    directory = root.joinpath(*manifest.parent.parts)
+    assert_safe_target(root, directory / "manifest.json")
+    if not directory.is_dir():
+        raise OperationError("Capture Bundle assets are missing")
+    value = hashlib.sha256()
+    for current, directories, files in os.walk(directory, followlinks=False):
+        directories.sort()
+        files.sort()
+        for name in files:
+            path = Path(current) / name
+            if path.is_symlink():
+                raise OperationError("Capture Bundle assets must not contain symlinks")
+            value.update(path.relative_to(directory).as_posix().encode() + b"\0")
+            with path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    value.update(chunk)
+    return value.hexdigest()
+
+
 def assert_safe_target(root: Path, path: Path) -> None:
     try:
         load_kit_helper(root, "file_transaction", "assert_safe_target")(root, path)
@@ -224,6 +253,7 @@ def weave_preview(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
                     "action": action,
                     "destination": destination.as_posix(),
                     "before_hash": digest(content),
+                    "asset_hash": asset_tree_digest(root, lines),
                     "reason": reason.strip(),
                 }
             )
@@ -344,6 +374,8 @@ def weave_apply(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
             if digest(original) != plan["before_hash"]:
                 raise OperationError("Capture Bundle changed after preview")
             lines, _ = note_frontmatter(original)
+            if asset_tree_digest(root, lines) != plan["asset_hash"]:
+                raise OperationError("Capture Bundle assets changed after preview")
             capture_id = metadata_value(lines, "capture_id")
             version = metadata_value(lines, "capture_version")
             asset_source_relative = source_relative.parent / "_assets" / capture_id / f"v{version}"

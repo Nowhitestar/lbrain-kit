@@ -147,7 +147,7 @@
     let previous = null;
     for (const tweet of tweets) {
       const status = xStatus(tweet);
-      if (!status || status.handle !== handle) break;
+      if (!status || status.handle !== handle) continue;
       if (previous) {
         const tweetContent = tweet.querySelector(
           "[data-testid='tweetText'], [data-testid='tweetPhoto'], [data-testid='videoPlayer'], video"
@@ -331,8 +331,12 @@
     const publishedMetadata = Boolean(document.querySelector("meta[property='article:published_time']"));
     const articleMetadata = publishedMetadata
       || Boolean(document.querySelector("meta[property='og:type'][content='article' i]"));
-    const cardLike = (node) => /(?:^|[-_\s])(card|catalog|course|item|product|teaser|tile)(?:$|[-_\s])/i
-      .test(`${node?.id || ""} ${node?.className || ""}`);
+    const cardLike = (node) => {
+      const schema = node?.getAttribute("itemtype") || "";
+      return /(?:^|[-_\s])(card|catalog|course|item|plan|pricing|product|teaser|tile)(?:$|[-_\s])/i
+        .test(`${node?.id || ""} ${node?.className || ""}`)
+        || /schema\.org\/(?:Product|Offer|Course)(?:$|[/#])/i.test(schema);
+    };
     const articleRoot = (node) => {
       if (!node || !node.querySelector("h1") || node.querySelectorAll("p").length < 2) return false;
       const length = text(node).length;
@@ -340,7 +344,10 @@
       if (node.tagName === "MAIN" || node.getAttribute("role") === "main") {
         const longestParagraph = Math.max(...Array.from(node.querySelectorAll("p"), (item) => text(item).length));
         if (cardLike(node.querySelector("h1")?.closest("article"))) return false;
-        return articleMetadata && node.querySelectorAll("h1").length === 1 && longestParagraph >= 120 && length >= 350;
+        return node.querySelectorAll("h1").length === 1
+          && longestParagraph >= 120
+          && length >= (articleMetadata ? 350 : 800)
+          && node.querySelectorAll("article").length <= 1;
       }
       if (cardLike(node)) return false;
       const pageMain = node.closest("main, [role='main']");
@@ -350,8 +357,7 @@
       if (!publishedMetadata && !editorial && node.querySelectorAll("p").length < 3) return false;
       return length >= (publishedMetadata ? 250 : 500);
     };
-    const candidates = Array.from(document.querySelectorAll("article"));
-    if (articleMetadata) candidates.push(...document.querySelectorAll("main, [role='main']"));
+    const candidates = Array.from(document.querySelectorAll("article, main, [role='main']"));
     const semanticArticle = candidates.find(articleRoot);
     const source = scope === "selection"
       ? selectedRoot()
@@ -363,7 +369,10 @@
     const xOwner = xAuthor(xArticle || tweets[0]);
     const title = (wechat ? text(document.querySelector("#activity-name")) : "")
       || (thread ? `${xOwner || firstStatus.handle} — Thread` : "")
-      || text(heading) || document.querySelector("meta[property='og:title']")?.content || document.title.trim();
+      || (xArticle || semanticArticle ? text(heading) : "")
+      || document.querySelector("meta[property='og:title']")?.content
+      || document.title.trim()
+      || text(heading);
     const author = (wechat ? text(document.querySelector("#js_name")) : "")
       || xOwner
       || document.querySelector("meta[name='author'], meta[property='article:author']")?.content?.trim()
