@@ -1964,7 +1964,11 @@ class IntelligenceOperationTest(unittest.TestCase):
                 '<div data-testid="quoteTweet">Quoted <a href="https://x.com/alice/status/102">previous post</a>.</div></article>'
                 '<article data-testid="tweet"><div data-testid="User-Name"><span>Reply User</span>'
                 '<a href="https://x.com/replier/status/200"><time datetime="2026-08-11T01:06:00Z">Aug 11</time></a></div>'
-                '<div data-testid="tweetText">Unrelated reply.</div></article></main></body></html>',
+                '<div data-testid="tweetText">Unrelated reply.</div></article>'
+                '<article data-testid="tweet" data-in-reply-to-status-id="999"><div data-testid="User-Name"><span>Alice</span>'
+                '<a href="https://x.com/alice/status/104"><time datetime="2026-08-11T01:08:00Z">Aug 11</time></a></div>'
+                '<div>Replying to <a href="https://x.com/bob">@bob</a> and <a href="https://x.com/alice">@alice</a></div>'
+                '<div data-testid="tweetText">Reply to another chain.</div></article></main></body></html>',
                 encoding="utf-8",
             )
             media_fixture = directory / "media.html"
@@ -2107,6 +2111,7 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertIn("Second author post.", x_thread["content_markdown"])
             self.assertIn("Media-only reply", x_thread["content_markdown"])
             self.assertNotIn("Unrelated reply.", x_thread["content_markdown"])
+            self.assertNotIn("Reply to another chain.", x_thread["content_markdown"])
             self.assertNotIn("Recommended same-author post.", x_thread["content_markdown"])
             self.assertNotIn("Action noise", x_thread["content_markdown"])
             remote = {asset["url"] for asset in media_capture["remote_assets"]}

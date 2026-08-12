@@ -174,7 +174,8 @@
             && new URL(url(link.getAttribute("href") || "")).pathname.toLowerCase() === `/${handle}`);
         const chronological = !previous.publishedAt || !status.publishedAt
           || Date.parse(status.publishedAt) >= Date.parse(previous.publishedAt);
-        if ((!accepted.has(replyTarget) && !selfReply) || !chronological) continue;
+        const related = replyTarget ? accepted.has(replyTarget) : selfReply;
+        if (!related || !chronological) continue;
         root.append(document.createElement("hr"));
       }
       root.append(tweet.cloneNode(true));
