@@ -311,10 +311,11 @@
     return `\n\n## Video\n\n${lines.join("\n")}${transcript ? `\n\n## Transcript\n\n${transcript}` : ""}`;
   }
 
-  function htmlSnapshot(root, title) {
+  function htmlSnapshot(root, title, stripAudio = false) {
     const copy = renderedClone(root);
     copy.querySelectorAll("base, script, style, noscript, template, form, input, textarea, select, button, iframe, object, embed, [aria-hidden='true'], [hidden]")
       .forEach((node) => node.remove());
+    if (stripAudio) copy.querySelectorAll("audio").forEach((node) => node.remove());
     const allowed = new Set(["alt", "class", "colspan", "datetime", "height", "href", "id", "open", "poster", "rowspan", "src", "title", "width", "xlink:href"]);
     const safeUrl = (value) => {
       try {
@@ -460,7 +461,7 @@
       content_markdown: content,
       capture_kind: captureKind,
       has_video: containsVideo,
-      snapshot_html: captureKind === "html" ? htmlSnapshot(mediaRoot, title) : "",
+      snapshot_html: captureKind === "html" ? htmlSnapshot(mediaRoot, title, containsVideo) : "",
       preview_characters: rendered.length,
       extraction_status: "complete",
       remote_assets: media(captureKind === "html" ? mediaRoot : root, containsVideo),

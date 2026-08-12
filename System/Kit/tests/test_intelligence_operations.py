@@ -2337,6 +2337,7 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(unknown_video["capture_kind"], "html")
             self.assertTrue(unknown_video["has_video"])
             self.assertIn("https://training.example/lesson.mp4", unknown_video["content_markdown"])
+            self.assertNotIn("lesson-audio.mp3", unknown_video["snapshot_html"])
             self.assertFalse(any(asset["media_type"].startswith(("audio/", "video/")) for asset in unknown_video["remote_assets"]))
             self.assertIn("https://training.example/lesson.vtt", {asset["url"] for asset in unknown_video["remote_assets"]})
             self.assertEqual(youtube_video["capture_kind"], "video")
