@@ -178,13 +178,16 @@ class IntelligenceOperationTest(unittest.TestCase):
         if not node_path:
             self.skipTest("LBRAIN_NODE_PATH is not configured for the optional real-browser fixture")
         script = (
-            "const { chromium } = require('playwright');"
+            "const fs = require('fs');const { chromium } = require('playwright');"
             "(async () => {"
             "const browser = await chromium.launch({ headless: true, executablePath: process.argv[1] });"
             "const results = [];"
             "for (const uri of process.argv.slice(3)) {"
             "const page = await browser.newPage();"
-            "await page.goto(uri, { waitUntil: 'domcontentloaded', timeout: 10000 });"
+            "let target=uri;if(uri.includes('youtube-fixture')){const body=fs.readFileSync(new URL(uri));"
+            "await page.route('https://www.youtube.com/**',route=>route.fulfill({contentType:'text/html',body}));"
+            "target='https://www.youtube.com/watch?v=abc'}"
+            "await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 10000 });"
             "await page.addScriptTag({ path: process.argv[2] });"
             "results.push(await page.evaluate(() => LBrainCapture.extract('page')));"
             "await page.close();"
@@ -2116,6 +2119,12 @@ class IntelligenceOperationTest(unittest.TestCase):
                 'src="https://training.example/lesson.vtt"></video>'
                 '<audio src="https://training.example/lesson-audio.mp3"></audio></div></body></html>', encoding="utf-8",
             )
+            youtube_fixture = directory / "youtube-fixture.html"
+            youtube_fixture.write_text(
+                '<!doctype html><html><head><title>Restricted video</title></head><body><main>'
+                '<h1>Restricted video</h1><p>Sign in to confirm your age.</p><p>This content is restricted.</p>'
+                '<audio src="https://ads.example/audio-only.m4a"></audio></main></body></html>', encoding="utf-8",
+            )
             plain_article_fixture = directory / "plain-article.html"
             plain_article_fixture.write_text(
                 "<!doctype html><html><head><title>Research Note</title></head><body><main><h1>Research Note</h1>"
@@ -2175,6 +2184,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                 product, plain_article, interposed_thread, timeline, chinese_article, editorial_product,
                 product_article,
                 unknown_video,
+                youtube_video,
             ) = self.run_browser_fixtures(
                 chrome,
                 [
@@ -2183,6 +2193,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                     interposed_thread_fixture, timeline_fixture, chinese_article_fixture, editorial_product_fixture,
                     product_article_fixture,
                     unknown_video_fixture,
+                    youtube_fixture,
                 ],
             )
             self.assertEqual(captured["capture_kind"], "article")
@@ -2279,6 +2290,10 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertIn("https://training.example/lesson.mp4", unknown_video["content_markdown"])
             self.assertFalse(any(asset["media_type"].startswith(("audio/", "video/")) for asset in unknown_video["remote_assets"]))
             self.assertIn("https://training.example/lesson.vtt", {asset["url"] for asset in unknown_video["remote_assets"]})
+            self.assertEqual(youtube_video["capture_kind"], "video")
+            self.assertTrue(youtube_video["has_video"])
+            self.assertIn("https://www.youtube.com/watch?v=abc", youtube_video["content_markdown"])
+            self.assertFalse(any(asset["media_type"].startswith(("audio/", "video/")) for asset in youtube_video["remote_assets"]))
 
     def test_extension_builds_direct_pdf_capture_without_saving_video_binary(self) -> None:
         script = (

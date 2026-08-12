@@ -404,11 +404,12 @@
       || url(location.href);
     const genericPage = scope === "page" && !wechat && !xArticle && !thread && !semanticArticle;
     const mediaRoot = genericPage ? document.body : root;
-    const videoDetails = videoMarkdown(mediaRoot);
+    const supportedVideoHost = /(^|\.)((youtube\.com)|(youtu\.be)|(bilibili\.com))$/i.test(location.hostname);
+    const videoDetails = videoMarkdown(mediaRoot)
+      || (supportedVideoHost ? `\n\n## Video\n\n- Original video: [${canonical}](${canonical})` : "");
     const rendered = `${block(root).trim()}${videoDetails}`
       .replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
     if (!title || !rendered) throw new Error("The rendered page did not contain a readable title and body.");
-    const supportedVideoHost = /(^|\.)((youtube\.com)|(youtu\.be)|(bilibili\.com))$/i.test(location.hostname);
     const containsVideo = supportedVideoHost
       || Boolean(mediaRoot.querySelector("video, ytd-transcript-renderer, [data-testid='transcript'], [itemprop='transcript']"));
     const videoPage = supportedVideoHost
