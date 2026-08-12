@@ -2128,6 +2128,13 @@ class IntelligenceOperationTest(unittest.TestCase):
                 '<div class="segment">Second transcript cue.</div></ytd-transcript-renderer></ytd-wrapper>'
                 '</main></body></html>', encoding="utf-8",
             )
+            transcript_fixture = directory / "transcript-only.html"
+            transcript_fixture.write_text(
+                '<!doctype html><html><head><title>Training replay</title>'
+                '<link rel="canonical" href="https://training.example/replay/7"></head><body><main>'
+                '<h1>Training replay</h1><div data-testid="transcript"><div class="segment">Replay cue.</div></div>'
+                '</main></body></html>', encoding="utf-8",
+            )
             plain_article_fixture = directory / "plain-article.html"
             plain_article_fixture.write_text(
                 "<!doctype html><html><head><title>Research Note</title></head><body><main><h1>Research Note</h1>"
@@ -2190,6 +2197,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                 product_article,
                 unknown_video,
                 youtube_video,
+                transcript_video,
             ) = self.run_browser_fixtures(
                 chrome,
                 [
@@ -2199,6 +2207,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                     product_article_fixture,
                     unknown_video_fixture,
                     youtube_fixture,
+                    transcript_fixture,
                 ],
             )
             self.assertEqual(captured["capture_kind"], "article")
@@ -2304,6 +2313,9 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(youtube_video["content_markdown"].count("Second transcript cue."), 1)
             self.assertIn("First transcript cue.\nSecond transcript cue.", youtube_video["content_markdown"])
             self.assertFalse(any(asset["media_type"].startswith(("audio/", "video/")) for asset in youtube_video["remote_assets"]))
+            self.assertEqual(transcript_video["capture_kind"], "video")
+            self.assertIn("https://training.example/replay/7", transcript_video["content_markdown"])
+            self.assertEqual(transcript_video["content_markdown"].count("Replay cue."), 1)
 
     def test_extension_builds_direct_pdf_capture_without_saving_video_binary(self) -> None:
         script = (
