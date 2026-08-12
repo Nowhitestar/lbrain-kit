@@ -355,7 +355,7 @@
       if (node.querySelector("video") && length >= 50) return true;
       if (node.tagName === "MAIN" || node.getAttribute("role") === "main") {
         const longestParagraph = Math.max(...Array.from(node.querySelectorAll("p"), (item) => text(item).length));
-        if (!articleMetadata && Array.from(node.querySelectorAll("[id], [class], [itemtype]")).some(cardLike)) return false;
+        if (Array.from(node.querySelectorAll("[id], [class], [itemtype]")).some(cardLike)) return false;
         let container = node.querySelector("h1");
         while (container && container !== node.parentElement) {
           if (cardLike(container)) return false;

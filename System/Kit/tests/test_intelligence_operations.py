@@ -2016,7 +2016,7 @@ class IntelligenceOperationTest(unittest.TestCase):
             )
             product_fixture = directory / "product.html"
             product_fixture.write_text(
-                "<!doctype html><html><head><title>Plans</title><meta property=\"og:type\" content=\"website\"></head>"
+                "<!doctype html><html><head><title>Plans</title><meta property=\"og:type\" content=\"article\"></head>"
                 '<body><header><h1>Plans</h1></header><main><h1>Choose your plan</h1>'
                 '<div class="pricing-plan" itemscope itemtype="https://schema.org/Product"><h2>Pro Plan</h2><p>'
                 + ("Pricing and subscription details. " * 30)
