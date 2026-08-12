@@ -1907,13 +1907,35 @@ class IntelligenceOperationTest(unittest.TestCase):
                     "media_type": "application/msword",
                 }],
             }
-            legacy_body = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + 'api_key = "fixture-legacy-secret-12345"'.encode("utf-16le")
+            legacy_body = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1x" + 'api_key = "fixture-legacy-secret-12345"'.encode("utf-16le")
             legacy_result, legacy = self.run_capture_native_stream(
                 root, legacy_payload, legacy_body, "binary", staging,
                 snapshot_media_type="application/msword",
             )
             self.assertNotEqual(legacy_result.returncode, 0)
             self.assertEqual(legacy["status"], "failed")
+
+            image_payload = {
+                **payload,
+                "origin": "https://example.invalid/secret.jpg",
+                "content_markdown": "![Original image](lbrain-asset://direct-document)",
+                "remote_assets": [{
+                    **payload["remote_assets"][0],
+                    "url": "https://example.invalid/secret.jpg",
+                    "name": "images/secret.jpg",
+                    "media_type": "image/jpeg",
+                }],
+            }
+            image_result, image_rejected = self.run_capture_native_stream(
+                root,
+                image_payload,
+                b'\xff\xd8\xff\xe1api_key = "fixture-image-secret-12345"',
+                "binary",
+                staging,
+                snapshot_media_type="image/jpeg",
+            )
+            self.assertNotEqual(image_result.returncode, 0)
+            self.assertEqual(image_rejected["status"], "failed")
 
             payload["origin"] = "https://example.invalid/disguised.pdf"
             rejected_result, rejected = self.run_capture_native_stream(
@@ -2067,11 +2089,22 @@ class IntelligenceOperationTest(unittest.TestCase):
             product_fixture = directory / "product.html"
             product_fixture.write_text(
                 "<!doctype html><html><head><title>Plans</title><meta property=\"og:type\" content=\"article\"></head>"
-                '<body><header><h1>Plans</h1></header><main><h1>Choose your plan</h1>'
-                '<div class="pricing-plan" itemscope itemtype="https://schema.org/Product"><h2>Pro Plan</h2><p>'
-                + ("Pricing and subscription details. " * 30)
-                + "</p><p>Annual billing.</p><p>Choose this plan.</p></div></main></body></html>",
+                '<body><header><h1>Plans</h1></header><main><h1>Choose your plan</h1><video src="decorative.mp4"></video>'
+                + "".join(
+                    '<div class="pricing-plan" itemscope itemtype="https://schema.org/Product">'
+                    f'<h2>{name} Plan</h2><p>' + ("Pricing and subscription details. " * 12)
+                    + "</p><p>Annual billing.</p><p>Choose this plan.</p></div>"
+                    for name in ("Pro", "Team", "Enterprise")
+                )
+                + "</main></body></html>",
                 encoding="utf-8",
+            )
+            product_article_fixture = directory / "product-article.html"
+            product_article_fixture.write_text(
+                '<!doctype html><html><head><title>Subscription</title><meta property="og:type" content="article"></head>'
+                '<body><article><h1>Pro subscription</h1><section itemscope itemtype="https://schema.org/Product"><h2>Pro</h2><p>'
+                + ('Pricing and feature catalog. ' * 30)
+                + '</p><p>Annual billing.</p></section></article></body></html>', encoding="utf-8",
             )
             plain_article_fixture = directory / "plain-article.html"
             plain_article_fixture.write_text(
@@ -2130,12 +2163,14 @@ class IntelligenceOperationTest(unittest.TestCase):
             (
                 captured, wechat, x_article, x_thread, media_capture, generic, main_article,
                 product, plain_article, interposed_thread, timeline, chinese_article, editorial_product,
+                product_article,
             ) = self.run_browser_fixtures(
                 chrome,
                 [
                     fixture, wechat_fixture, x_article_fixture, x_thread_fixture, media_fixture,
                     generic_fixture, main_article_fixture, product_fixture, plain_article_fixture,
                     interposed_thread_fixture, timeline_fixture, chinese_article_fixture, editorial_product_fixture,
+                    product_article_fixture,
                 ],
             )
             self.assertEqual(captured["capture_kind"], "article")
@@ -2224,6 +2259,7 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(chinese_article["title"], "研究札记")
             self.assertEqual(editorial_product["capture_kind"], "article")
             self.assertIn("Independent editorial evidence", editorial_product["content_markdown"])
+            self.assertEqual(product_article["capture_kind"], "html")
 
     def test_extension_builds_direct_pdf_capture_without_saving_video_binary(self) -> None:
         script = (
@@ -2329,6 +2365,41 @@ class IntelligenceOperationTest(unittest.TestCase):
         self.assertGreaterEqual(output["chunks"], 4)
         self.assertFalse(output["overlap"])
         self.assertTrue(output["hashes"])
+
+    def test_native_receiver_does_not_hold_every_attachment_open(self) -> None:
+        script = r'''
+import hashlib, importlib.util, io, json, resource, struct, sys, tempfile
+from pathlib import Path
+host = Path(sys.argv[1])
+sys.path.insert(0, str(host.parent))
+spec = importlib.util.spec_from_file_location("capture_host_fd", host)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+resource.setrlimit(resource.RLIMIT_NOFILE, (64, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))
+payload = b"{}"
+empty = hashlib.sha256(b"").hexdigest()
+attachments = [{"id": f"a{i}", "size": 0, "sha256": empty, "media_type": "image/png"} for i in range(130)]
+first = {"protocol": module.STREAM_PROTOCOL, "type": "begin", "acknowledgements": True,
+    "integrity": "sha256-chunks", "stream_id": "fd", "payload_size": len(payload),
+    "payload_sha256": hashlib.sha256(payload).hexdigest(), "snapshot_size": 0, "snapshot_sha256": empty,
+    "snapshot_kind": "none", "snapshot_media_type": "application/octet-stream",
+    "attachments": attachments}
+chunk = json.dumps({"protocol": module.STREAM_PROTOCOL, "type": "chunk", "stream_id": "fd",
+    "channel": "payload", "sequence": 0, "data": "e30=", "sha256": hashlib.sha256(payload).hexdigest()}).encode()
+end = json.dumps({"protocol": module.STREAM_PROTOCOL, "type": "end", "stream_id": "fd"}).encode()
+framed = io.BytesIO(struct.pack("=I", len(chunk)) + chunk + struct.pack("=I", len(end)) + end)
+with tempfile.TemporaryDirectory() as temporary:
+    result = module.receive_stream(first, framed, io.BytesIO(), Path(temporary))
+    print(len(result[-1]))
+'''
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(CAPTURE_NATIVE_HOST)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "130")
 
     def test_extension_confirmation_releases_only_new_permissions(self) -> None:
         script = (

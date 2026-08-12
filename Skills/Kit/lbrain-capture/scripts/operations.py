@@ -76,6 +76,7 @@ def reject_binary_secret_file(root: Path, path: Path, media_type: str) -> None:
                 root,
                 body.decode("latin-1"),
                 body[: len(body) - len(body) % 2].decode("utf-16le", errors="ignore"),
+                body[1 : len(body) - (len(body) - 1) % 2].decode("utf-16le", errors="ignore"),
             )
             tail = body[-128 * 1024:]
 
@@ -1431,7 +1432,7 @@ def capture_bundle(
             "application/json", "application/xhtml+xml", "image/svg+xml"
         }:
             reject_secret_file(root, Path(asset["_source"]))
-        elif media_type.startswith("application/"):
+        else:
             reject_binary_secret_file(root, Path(asset["_source"]), media_type)
     content, enrichment_incomplete = enriched_bundle_content(content, assets)
     if enrichment_incomplete and extraction_status == "complete":

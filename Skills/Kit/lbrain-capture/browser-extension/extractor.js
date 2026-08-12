@@ -352,14 +352,14 @@
       if (!node || !node.querySelector("h1") || node.querySelectorAll("p").length < 2) return false;
       const length = text(node).length;
       const editorial = node.querySelector("blockquote, figure, pre, table, time[datetime], [itemprop='author'], [rel='author']");
+      const cardNodes = Array.from(node.querySelectorAll("[id], [class], [itemtype]")).filter(cardLike);
+      const cardLength = cardNodes
+        .filter((item) => !cardNodes.some((other) => other !== item && other.contains(item)))
+        .reduce((total, item) => total + text(item).length, 0);
+      if (cardLike(node) || cardLength >= length / 2) return false;
       if (node.querySelector("video") && length >= 50) return true;
       if (node.tagName === "MAIN" || node.getAttribute("role") === "main") {
         const longestParagraph = Math.max(...Array.from(node.querySelectorAll("p"), (item) => text(item).length));
-        const cardLength = Math.max(0, ...Array.from(
-          node.querySelectorAll("[id], [class], [itemtype]"),
-          (item) => cardLike(item) ? text(item).length : 0
-        ));
-        if (cardLength >= length / 2) return false;
         let container = node.querySelector("h1");
         while (container && container !== node.parentElement) {
           if (cardLike(container)) return false;
@@ -370,7 +370,6 @@
           && length >= (articleMetadata || editorial ? 350 : 800)
           && node.querySelectorAll("article").length <= 1;
       }
-      if (cardLike(node)) return false;
       const pageMain = node.closest("main, [role='main']");
       if (!publishedMetadata && pageMain
         && pageMain.querySelectorAll("h1").length > node.querySelectorAll("h1").length) return false;
@@ -407,7 +406,7 @@
       .replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
     if (!title || !rendered) throw new Error("The rendered page did not contain a readable title and body.");
     const videoPage = /(^|\.)((youtube\.com)|(youtu\.be)|(bilibili\.com))$/i.test(location.hostname)
-      || Boolean(root.querySelector("video, ytd-transcript-renderer, [data-testid='transcript'], [itemprop='transcript']"));
+      || Boolean(root.querySelector("ytd-transcript-renderer, [data-testid='transcript'], [itemprop='transcript']"));
     const articlePage = Boolean(wechat || xArticle || thread || semanticArticle);
     const captureKind = scope === "selection"
       ? "selection"

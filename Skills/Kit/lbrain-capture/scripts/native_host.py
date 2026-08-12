@@ -598,52 +598,50 @@ def receive_stream(
     counts = dict.fromkeys(paths, 0)
     sequences = dict.fromkeys(paths, 0)
     hashes = {channel: hashlib.sha256() for channel in paths}
-    files = {channel: path.open("wb") for channel, path in paths.items()}
-    try:
-        while True:
-            message = read_message(stream)
-            if message.get("protocol") != STREAM_PROTOCOL or message.get("stream_id") != stream_id:
-                raise OperationError("capture stream identity changed")
-            if message.get("type") == "end":
-                break
-            if message.get("type") != "chunk" or message.get("channel") not in files:
-                raise OperationError("capture stream message is invalid")
-            channel = str(message["channel"])
-            if message.get("sequence") != sequences[channel]:
-                raise OperationError("capture stream chunk is out of order")
-            data = message.get("data")
-            if not isinstance(data, str):
-                raise OperationError("capture stream chunk data is invalid")
-            try:
-                chunk = base64.b64decode(data, validate=True)
-            except (ValueError, binascii.Error) as error:
-                raise OperationError("capture stream chunk is not valid base64") from error
-            if not chunk:
-                raise OperationError("capture stream chunk must not be empty")
-            chunk_hash = message.get("sha256")
-            if chunk_integrity and (
-                not isinstance(chunk_hash, str)
-                or not re.fullmatch(r"[0-9a-f]{64}", chunk_hash)
-                or hashlib.sha256(chunk).hexdigest() != chunk_hash
-            ):
-                raise OperationError("capture stream chunk hash mismatch")
-            counts[channel] += len(chunk)
-            if counts[channel] > expected[channel]:
-                raise OperationError("capture stream is larger than declared")
-            files[channel].write(chunk)
-            hashes[channel].update(chunk)
-            if acknowledgements:
-                write_message(responses, {
-                    "protocol": STREAM_PROTOCOL,
-                    "type": "ack",
-                    "stream_id": stream_id,
-                    "channel": channel,
-                    "sequence": sequences[channel],
-                })
-            sequences[channel] += 1
-    finally:
-        for file in files.values():
-            file.close()
+    for path in paths.values():
+        path.touch()
+    while True:
+        message = read_message(stream)
+        if message.get("protocol") != STREAM_PROTOCOL or message.get("stream_id") != stream_id:
+            raise OperationError("capture stream identity changed")
+        if message.get("type") == "end":
+            break
+        if message.get("type") != "chunk" or message.get("channel") not in paths:
+            raise OperationError("capture stream message is invalid")
+        channel = str(message["channel"])
+        if message.get("sequence") != sequences[channel]:
+            raise OperationError("capture stream chunk is out of order")
+        data = message.get("data")
+        if not isinstance(data, str):
+            raise OperationError("capture stream chunk data is invalid")
+        try:
+            chunk = base64.b64decode(data, validate=True)
+        except (ValueError, binascii.Error) as error:
+            raise OperationError("capture stream chunk is not valid base64") from error
+        if not chunk:
+            raise OperationError("capture stream chunk must not be empty")
+        chunk_hash = message.get("sha256")
+        if chunk_integrity and (
+            not isinstance(chunk_hash, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", chunk_hash)
+            or hashlib.sha256(chunk).hexdigest() != chunk_hash
+        ):
+            raise OperationError("capture stream chunk hash mismatch")
+        counts[channel] += len(chunk)
+        if counts[channel] > expected[channel]:
+            raise OperationError("capture stream is larger than declared")
+        with paths[channel].open("ab") as output:
+            output.write(chunk)
+        hashes[channel].update(chunk)
+        if acknowledgements:
+            write_message(responses, {
+                "protocol": STREAM_PROTOCOL,
+                "type": "ack",
+                "stream_id": stream_id,
+                "channel": channel,
+                "sequence": sequences[channel],
+            })
+        sequences[channel] += 1
     if counts != expected:
         raise OperationError("capture stream is incomplete")
     if hashes["payload"].hexdigest() != payload_hash:
