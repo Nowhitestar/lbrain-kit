@@ -2123,7 +2123,9 @@ class IntelligenceOperationTest(unittest.TestCase):
             youtube_fixture.write_text(
                 '<!doctype html><html><head><title>Restricted video</title></head><body><main>'
                 '<h1>Restricted video</h1><p>Sign in to confirm your age.</p><p>This content is restricted.</p>'
-                '<audio src="https://ads.example/audio-only.m4a"></audio></main></body></html>', encoding="utf-8",
+                '<audio src="https://ads.example/audio-only.m4a"></audio>'
+                '<ytd-transcript-renderer><p>Visible transcript sentence.</p></ytd-transcript-renderer>'
+                '</main></body></html>', encoding="utf-8",
             )
             plain_article_fixture = directory / "plain-article.html"
             plain_article_fixture.write_text(
@@ -2293,6 +2295,7 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(youtube_video["capture_kind"], "video")
             self.assertTrue(youtube_video["has_video"])
             self.assertIn("https://www.youtube.com/watch?v=abc", youtube_video["content_markdown"])
+            self.assertEqual(youtube_video["content_markdown"].count("Visible transcript sentence."), 1)
             self.assertFalse(any(asset["media_type"].startswith(("audio/", "video/")) for asset in youtube_video["remote_assets"]))
 
     def test_extension_builds_direct_pdf_capture_without_saving_video_binary(self) -> None:

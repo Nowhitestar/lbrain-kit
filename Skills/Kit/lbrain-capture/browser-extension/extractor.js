@@ -93,6 +93,7 @@
     if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || "";
     if (node.nodeType !== Node.ELEMENT_NODE) return "";
     const tag = node.tagName;
+    if (node.matches?.("ytd-transcript-renderer, [data-testid='transcript'], [itemprop='transcript'], [data-lbrain-transcript]")) return "";
     if (/^H[1-6]$/.test(tag)) return `${"#".repeat(Number(tag[1]))} ${inline(node).trim()}\n\n`;
     if (tag === "P") return `${inline(node).trim()}\n\n`;
     if (tag === "UL" || tag === "OL") return `${list(node, tag === "OL")}\n`;
@@ -268,7 +269,7 @@
       .map(([source, folder, mediaType], index) => asset(source, index, folder, mediaType));
   }
 
-  function videoMarkdown(root) {
+  function videoMarkdown(root, fallback = "") {
     const lines = [];
     for (const video of root.querySelectorAll("video")) {
       const direct = url(video.currentSrc || video.getAttribute("src") || video.querySelector("source")?.getAttribute("src") || "");
@@ -280,6 +281,9 @@
         const href = url(track.getAttribute("src") || "");
         if (href) lines.push(`- ${track.getAttribute("label") || "Subtitles"}: [subtitle file](${href})`);
       }
+    }
+    if (fallback && !lines.some((line) => line.startsWith("- Original video:"))) {
+      lines.unshift(`- Original video: [${fallback}](${fallback})`);
     }
     const transcript = text(root.querySelector("[data-testid='transcript'], [itemprop='transcript'], [data-lbrain-transcript], ytd-transcript-renderer"));
     if (!lines.length && !transcript) return "";
@@ -405,8 +409,7 @@
     const genericPage = scope === "page" && !wechat && !xArticle && !thread && !semanticArticle;
     const mediaRoot = genericPage ? document.body : root;
     const supportedVideoHost = /(^|\.)((youtube\.com)|(youtu\.be)|(bilibili\.com))$/i.test(location.hostname);
-    const videoDetails = videoMarkdown(mediaRoot)
-      || (supportedVideoHost ? `\n\n## Video\n\n- Original video: [${canonical}](${canonical})` : "");
+    const videoDetails = videoMarkdown(mediaRoot, supportedVideoHost ? canonical : "");
     const rendered = `${block(root).trim()}${videoDetails}`
       .replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
     if (!title || !rendered) throw new Error("The rendered page did not contain a readable title and body.");
