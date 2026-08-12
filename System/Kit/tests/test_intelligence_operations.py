@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+import zlib
 from pathlib import Path
 from unittest import mock
 
@@ -1844,6 +1845,37 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertNotEqual(secret_result.returncode, 0)
             self.assertEqual(secret["status"], "failed")
 
+            if shutil.which("pdftotext"):
+                stream = zlib.compress(b'BT /F1 12 Tf 72 720 Td (api_key = "fixture-compressed-secret-12345") Tj ET')
+                objects = [
+                    b"<< /Type /Catalog /Pages 2 0 R >>",
+                    b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                    b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+                    f"<< /Length {len(stream)} /Filter /FlateDecode >>\nstream\n".encode() + stream + b"\nendstream",
+                    b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+                ]
+                compressed_pdf = bytearray(b"%PDF-1.4\n")
+                offsets = [0]
+                for index, body in enumerate(objects, 1):
+                    offsets.append(len(compressed_pdf))
+                    compressed_pdf.extend(f"{index} 0 obj\n".encode() + body + b"\nendobj\n")
+                xref = len(compressed_pdf)
+                compressed_pdf.extend(f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode())
+                compressed_pdf.extend(b"".join(f"{offset:010d} 00000 n \n".encode() for offset in offsets[1:]))
+                compressed_pdf.extend(
+                    f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+                )
+                compressed_result, compressed = self.run_capture_native_stream(
+                    root,
+                    {**payload, "origin": "https://example.invalid/compressed-secret.pdf"},
+                    bytes(compressed_pdf),
+                    "binary",
+                    staging,
+                    snapshot_media_type="application/pdf",
+                )
+                self.assertNotEqual(compressed_result.returncode, 0)
+                self.assertEqual(compressed["status"], "failed")
+
             office = io.BytesIO()
             with zipfile.ZipFile(office, "w") as archive:
                 archive.writestr("word/document.xml", '<w:t>api_key = "fixture-office-secret-12345"</w:t>')
@@ -1864,6 +1896,24 @@ class IntelligenceOperationTest(unittest.TestCase):
             )
             self.assertNotEqual(office_result.returncode, 0)
             self.assertEqual(office_rejected["status"], "failed")
+
+            legacy_payload = {
+                **office_payload,
+                "origin": "https://example.invalid/secret.doc",
+                "remote_assets": [{
+                    **office_payload["remote_assets"][0],
+                    "url": "https://example.invalid/secret.doc",
+                    "name": "documents/secret.doc",
+                    "media_type": "application/msword",
+                }],
+            }
+            legacy_body = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + 'api_key = "fixture-legacy-secret-12345"'.encode("utf-16le")
+            legacy_result, legacy = self.run_capture_native_stream(
+                root, legacy_payload, legacy_body, "binary", staging,
+                snapshot_media_type="application/msword",
+            )
+            self.assertNotEqual(legacy_result.returncode, 0)
+            self.assertEqual(legacy["status"], "failed")
 
             payload["origin"] = "https://example.invalid/disguised.pdf"
             rejected_result, rejected = self.run_capture_native_stream(
@@ -2067,15 +2117,25 @@ class IntelligenceOperationTest(unittest.TestCase):
                 '<p>' + ('第二段继续解释取舍、限制与后续行动，形成清晰完整的文章结构。' * 8) + '</p>'
                 '</main></body></html>', encoding="utf-8",
             )
+            editorial_product_fixture = directory / "editorial-product.html"
+            editorial_product_fixture.write_text(
+                '<!doctype html><html><head><title>Product analysis</title>'
+                '<meta property="og:type" content="article"><meta property="article:published_time" content="2026-08-11">'
+                '</head><body><main><h1>Product analysis</h1><p>'
+                + ('Independent editorial evidence and analysis. ' * 40)
+                + '</p><figure><figcaption>Evidence</figcaption></figure>'
+                '<aside itemscope itemtype="https://schema.org/Product"><h2>Related product</h2><p>Small recommendation.</p></aside>'
+                '<p>Final editorial conclusion.</p></main></body></html>', encoding="utf-8",
+            )
             (
                 captured, wechat, x_article, x_thread, media_capture, generic, main_article,
-                product, plain_article, interposed_thread, timeline, chinese_article,
+                product, plain_article, interposed_thread, timeline, chinese_article, editorial_product,
             ) = self.run_browser_fixtures(
                 chrome,
                 [
                     fixture, wechat_fixture, x_article_fixture, x_thread_fixture, media_fixture,
                     generic_fixture, main_article_fixture, product_fixture, plain_article_fixture,
-                    interposed_thread_fixture, timeline_fixture, chinese_article_fixture,
+                    interposed_thread_fixture, timeline_fixture, chinese_article_fixture, editorial_product_fixture,
                 ],
             )
             self.assertEqual(captured["capture_kind"], "article")
@@ -2162,6 +2222,8 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertNotIn("/status/500", timeline["content_markdown"])
             self.assertEqual(chinese_article["capture_kind"], "article")
             self.assertEqual(chinese_article["title"], "研究札记")
+            self.assertEqual(editorial_product["capture_kind"], "article")
+            self.assertIn("Independent editorial evidence", editorial_product["content_markdown"])
 
     def test_extension_builds_direct_pdf_capture_without_saving_video_binary(self) -> None:
         script = (

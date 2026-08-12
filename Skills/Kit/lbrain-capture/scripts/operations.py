@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from contextlib import contextmanager
 from datetime import date
@@ -66,25 +67,48 @@ def reject_secret_file(root: Path, path: Path) -> None:
         raise OperationError("text Capture Bundle asset is not valid UTF-8") from error
 
 
-def reject_binary_secret_file(root: Path, path: Path) -> None:
+def reject_binary_secret_file(root: Path, path: Path, media_type: str) -> None:
     def scan(source: BinaryIO) -> None:
-        tail = ""
+        tail = b""
         for chunk in iter(lambda: source.read(128 * 1024), b""):
-            text = tail + chunk.decode("latin-1")
-            reject_secrets(root, text)
-            tail = text[-128 * 1024:]
+            body = tail + chunk
+            reject_secrets(
+                root,
+                body.decode("latin-1"),
+                body[: len(body) - len(body) % 2].decode("utf-16le", errors="ignore"),
+            )
+            tail = body[-128 * 1024:]
 
     with path.open("rb") as source:
         scan(source)
+    if media_type == "application/pdf" and (pdftotext := shutil.which("pdftotext")):
+        try:
+            with tempfile.TemporaryFile() as output:
+                result = subprocess.run(
+                    [pdftotext, "-layout", str(path), "-"],
+                    stdout=output,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=120,
+                )
+                if result.returncode == 0:
+                    output.seek(0)
+                    scan(output)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     if not zipfile.is_zipfile(path):
         return
     try:
         with zipfile.ZipFile(path) as archive:
+            remaining = max(64 * 1024 * 1024, path.stat().st_size * 100)
             for member in archive.infolist():
                 if member.is_dir() or member.flag_bits & 0x1 or not member.filename.lower().endswith(
                     (".xml", ".rels", ".txt", ".csv", ".json", ".html", ".xhtml")
                 ):
                     continue
+                if member.file_size > remaining:
+                    raise OperationError("document Capture Bundle asset expands beyond its inspection budget")
+                remaining -= member.file_size
                 with archive.open(member) as source:
                     scan(source)
     except (OSError, RuntimeError, zipfile.BadZipFile) as error:
@@ -847,6 +871,9 @@ def verified_staged_assets(
 
 
 MAX_EXTRACTED_TEXT_BYTES = 8 * 1024 * 1024
+MAX_OCR_PAGES = 100
+MAX_OCR_SECONDS = 10 * 60
+OCR_DISK_RESERVE_BYTES = 256 * 1024 * 1024
 
 
 def limited_text(source: BinaryIO, limit: int = MAX_EXTRACTED_TEXT_BYTES) -> tuple[str, bool]:
@@ -897,12 +924,16 @@ def local_pdf_text(path: Path) -> tuple[str, str]:
             remaining = MAX_EXTRACTED_TEXT_BYTES
             truncated = False
             page_number = 1
-            while remaining > 0:
+            deadline = time.monotonic() + MAX_OCR_SECONDS
+            while remaining > 0 and page_number <= MAX_OCR_PAGES and time.monotonic() < deadline:
+                if shutil.disk_usage(temporary).free < OCR_DISK_RESERVE_BYTES:
+                    truncated = True
+                    break
                 page = prefix.with_suffix(".png")
                 rendered = subprocess.run(
                     [
                         pdftoppm, "-f", str(page_number), "-l", str(page_number),
-                        "-singlefile", "-png", str(path), str(prefix),
+                        "-singlefile", "-scale-to", "4000", "-png", str(path), str(prefix),
                     ],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -930,6 +961,8 @@ def local_pdf_text(path: Path) -> tuple[str, str]:
                 if remaining <= 0:
                     truncated = True
                     break
+            if page_number > MAX_OCR_PAGES or time.monotonic() >= deadline:
+                truncated = True
             return ("\n\n".join(pages), "ocr-truncated" if truncated else "ocr") if pages else ("", "failed")
     except (OSError, subprocess.TimeoutExpired):
         return "", "failed"
@@ -1213,6 +1246,11 @@ def restore_preserved_links(
         content = content.replace(f"- Media could not be preserved: {asset_url}\n", "")
         content = content.replace(f"- Media could not be preserved: {asset_url}", "")
         content = content.replace(missing_markdown, placeholder)
+        content = re.sub(
+            r"(?<![A-Za-z0-9%/?=&])" + re.escape(asset_url) + r"(?=$|[\s\"'<>\]\)])",
+            lambda _: placeholder,
+            content,
+        )
     content = re.sub(r"(?m)^## Capture warnings\n(?:\s*\n)*(?=## |\Z)", "", content).strip()
 
     snapshot = next((asset for asset in assets if asset["placeholder"] == "lbrain-asset://html-snapshot"), None)
@@ -1394,7 +1432,7 @@ def capture_bundle(
         }:
             reject_secret_file(root, Path(asset["_source"]))
         elif media_type.startswith("application/"):
-            reject_binary_secret_file(root, Path(asset["_source"]))
+            reject_binary_secret_file(root, Path(asset["_source"]), media_type)
     content, enrichment_incomplete = enriched_bundle_content(content, assets)
     if enrichment_incomplete and extraction_status == "complete":
         extraction_status = "partial"
