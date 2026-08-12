@@ -2061,7 +2061,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                 '<video src="blob:https://video.example.invalid/runtime-stream">'
                 '<track kind="subtitles" src="https://video.example.invalid/captions.vtt" label="English">'
                 '</video><audio src="https://video.example.invalid/soundtrack.mp3"></audio>'
-                '<ytd-transcript-renderer><p>Page transcript sentence.</p></ytd-transcript-renderer>'
+                '<ytd-transcript-renderer><div class="segment"><p>Page transcript sentence.</p></div></ytd-transcript-renderer>'
                 "</article></body></html>",
                 encoding="utf-8",
             )
@@ -2248,7 +2248,9 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertIn("https://video.example.invalid/captions.vtt", remote)
             self.assertNotIn("https://video.example.invalid/soundtrack.mp3", remote)
             self.assertFalse(any(value.endswith((".mp4", ".mov", ".webm")) for value in remote))
+            self.assertIn("Body with", media_capture["content_markdown"])
             self.assertIn("Page transcript sentence.", media_capture["content_markdown"])
+            self.assertEqual(media_capture["content_markdown"].count("Page transcript sentence."), 1)
             self.assertIn("https://video.example.invalid/watch/123", media_capture["content_markdown"])
             self.assertNotIn("blob:https://", media_capture["content_markdown"])
             self.assertEqual(media_capture["capture_kind"], "article")

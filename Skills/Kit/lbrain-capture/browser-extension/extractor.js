@@ -42,7 +42,7 @@
   function inline(node) {
     if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || "";
     if (node.nodeType !== Node.ELEMENT_NODE) return "";
-    if (node.matches(transcriptSelector) || node.querySelector(transcriptSelector)) return "";
+    if (node.matches(transcriptSelector)) return "";
     const tag = node.tagName;
     if (tag === "BR") return "\n";
     if (tag === "IMG") {
@@ -95,7 +95,7 @@
     if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || "";
     if (node.nodeType !== Node.ELEMENT_NODE) return "";
     const tag = node.tagName;
-    if (node.matches?.(transcriptSelector) || node.querySelector?.(transcriptSelector)) return "";
+    if (node.matches?.(transcriptSelector)) return "";
     if (/^H[1-6]$/.test(tag)) return `${"#".repeat(Number(tag[1]))} ${inline(node).trim()}\n\n`;
     if (tag === "P") return `${inline(node).trim()}\n\n`;
     if (tag === "UL" || tag === "OL") return `${list(node, tag === "OL")}\n`;
@@ -288,8 +288,10 @@
       lines.unshift(`- Original video: [${fallback}](${fallback})`);
     }
     const transcriptRoot = root.querySelector(transcriptSelector);
+    const cueSelector = "p, [data-testid='cue'], .segment, ytd-transcript-segment-renderer";
     const transcriptParts = transcriptRoot
-      ? Array.from(transcriptRoot.querySelectorAll("p, [data-testid='cue'], .segment, ytd-transcript-segment-renderer"))
+      ? Array.from(transcriptRoot.querySelectorAll(cueSelector))
+        .filter((node) => !node.querySelector(cueSelector))
         .map(text).filter(Boolean)
       : [];
     const transcript = transcriptParts.length ? transcriptParts.join("\n") : text(transcriptRoot);
