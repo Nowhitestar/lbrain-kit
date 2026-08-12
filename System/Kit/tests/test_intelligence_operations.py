@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -1358,6 +1360,26 @@ class IntelligenceOperationTest(unittest.TestCase):
             readable_note = (root / str(readable["target"])).read_text(encoding="utf-8")
             self.assertIn("documents/2026%20%E5%B9%B4%E5%BA%A6%E6%8A%A5%E5%91%8A%20%231%29.pdf", readable_note)
 
+            long_title_result, long_title = self.run_capture_native_host(
+                root,
+                {**payload, "origin": "https://example.invalid/long-title", "title": "长标题" * 120},
+                staging,
+            )
+            self.assertEqual(long_title_result.returncode, 0, (long_title_result.stderr.decode(), long_title))
+            self.assertLessEqual(max(len(part.encode()) for part in Path(str(long_title["target"])).parts), 200)
+
+            overlong_result, overlong = self.run_capture_native_host(
+                root,
+                {
+                    **payload,
+                    "origin": "https://example.invalid/overlong-asset",
+                    "assets": [{**dict(payload["assets"][0]), "name": f"images/{'a' * 220}.png"}],
+                },
+                staging,
+            )
+            self.assertNotEqual(overlong_result.returncode, 0)
+            self.assertEqual(overlong["status"], "failed")
+
     def test_native_stream_saves_a_generic_page_as_html_without_download_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -1601,7 +1623,10 @@ class IntelligenceOperationTest(unittest.TestCase):
                 "origin": rotating_origin,
                 "scope": "page",
                 "capture_kind": "html",
-                "content_markdown": "[HTML](lbrain-asset://html-snapshot)",
+                "content_markdown": (
+                    "[HTML](lbrain-asset://html-snapshot)\n\n"
+                    f"[Redirect](https://redirect.example.invalid/?next={first_url})"
+                ),
                 "snapshot_html": f'<img src="{first_url}"><img src="{second_url}">',
                 "extraction_status": "complete",
                 "remote_assets": [
@@ -1650,6 +1675,9 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertIn("../images/first.png", rotating_html)
             self.assertIn("../images/second.png", rotating_html)
             self.assertNotIn("lbrain-missing", rotating_html)
+            rotating_note = (root / str(rotating_retry["target"])).read_text(encoding="utf-8")
+            self.assertIn(f"https://redirect.example.invalid/?next={first_url}", rotating_note)
+            self.assertNotIn("Media could not be preserved", rotating_note)
 
             encoded_source = "https://alpha.example.invalid/a%2Fb.png"
             slash_archive = (
@@ -1752,6 +1780,19 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(active["status"], "partial")
             self.assertFalse(list((root / "Inbox/Captures/_assets").rglob("unsafe.svg")))
 
+            escaped_result, escaped = self.run_capture_native_stream(
+                root,
+                {**payload, "origin": "https://example.invalid/escaped-active-svg"},
+                b"",
+                "none",
+                staging,
+                {"unsafe-svg": b'<svg xmlns="http://www.w3.org/2000/svg"><rect style="fill:\\75 rl(https://attacker.invalid/pixel)"/></svg>'},
+                attachment_media_types={"unsafe-svg": "image/svg+xml"},
+            )
+            self.assertEqual(escaped_result.returncode, 0, (escaped_result.stderr.decode(), escaped))
+            self.assertEqual(escaped["status"], "partial")
+            self.assertFalse(list((root / "Inbox/Captures/_assets").rglob("unsafe.svg")))
+
     def test_native_stream_saves_direct_pdf_and_rejects_disguised_video(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -1790,6 +1831,39 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(manifest["assets"][0]["media_type"], "application/pdf")
             note = (root / str(saved["target"])).read_text(encoding="utf-8")
             self.assertIn("Extracted PDF text", note)
+
+            payload["origin"] = "https://example.invalid/secret.pdf"
+            secret_result, secret = self.run_capture_native_stream(
+                root,
+                payload,
+                b'%PDF-1.7\napi_key = "fixture-hardcoded-secret-12345"',
+                "binary",
+                staging,
+                snapshot_media_type="application/pdf",
+            )
+            self.assertNotEqual(secret_result.returncode, 0)
+            self.assertEqual(secret["status"], "failed")
+
+            office = io.BytesIO()
+            with zipfile.ZipFile(office, "w") as archive:
+                archive.writestr("word/document.xml", '<w:t>api_key = "fixture-office-secret-12345"</w:t>')
+            office_payload = {
+                **payload,
+                "origin": "https://example.invalid/secret.docx",
+                "content_markdown": "[Original document](lbrain-asset://direct-document)",
+                "remote_assets": [{
+                    **payload["remote_assets"][0],
+                    "url": "https://example.invalid/secret.docx",
+                    "name": "documents/secret.docx",
+                    "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                }],
+            }
+            office_result, office_rejected = self.run_capture_native_stream(
+                root, office_payload, office.getvalue(), "binary", staging,
+                snapshot_media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+            self.assertNotEqual(office_result.returncode, 0)
+            self.assertEqual(office_rejected["status"], "failed")
 
             payload["origin"] = "https://example.invalid/disguised.pdf"
             rejected_result, rejected = self.run_capture_native_stream(
@@ -1913,7 +1987,8 @@ class IntelligenceOperationTest(unittest.TestCase):
             generic_fixture = directory / "generic.html"
             generic_fixture.write_text(
                 "<!doctype html><html><head><title>Alpha School</title>"
-                '<meta property="og:type" content="article"><link rel="canonical" href="https://alpha.example.invalid/"></head><body>'
+                '<meta property="og:type" content="article"><base href="https://remote.invalid/leak/">'
+                '<link rel="canonical" href="https://alpha.example.invalid/"></head><body>'
                 "<header><h1>Alpha School</h1></header><nav>Course navigation</nav><main><p>Choose a course.</p>"
                 '<article class="course-card"><h1>Course card</h1><p>' + ("Course features and pricing. " * 24)
                 + "</p><p>Choose this course.</p></article>"
@@ -1964,18 +2039,38 @@ class IntelligenceOperationTest(unittest.TestCase):
                 '<div data-testid="tweetText">Interposed standalone post.</div></article>'
                 '<article data-testid="tweet" data-in-reply-to-status-id="300"><div data-testid="User-Name"><span>Alice</span>'
                 '<a href="https://x.com/alice/status/301"><time datetime="2026-08-11T01:02:00Z">3</time></a></div>'
-                '<div data-testid="tweetText">Second chain post.</div></article></main></body></html>',
+                '<div data-testid="tweetText">Second chain post.</div></article>'
+                '<article data-testid="tweet" data-in-reply-to-status-id="300"><div data-testid="User-Name"><span>Alice</span>'
+                '<a href="https://x.com/alice/status/302"><time datetime="2026-08-11T01:03:00Z">4</time></a></div>'
+                '<div data-testid="tweetText">Third root reply.</div></article></main></body></html>',
                 encoding="utf-8",
+            )
+            timeline_fixture = directory / "x-timeline.html"
+            timeline_fixture.write_text(
+                '<!doctype html><html><head><title>Alice timeline</title></head><body><main>'
+                '<article data-testid="tweet"><div data-testid="User-Name"><span>Alice</span>'
+                '<a href="https://x.com/alice/status/500"></a></div><div data-testid="tweetText">Standalone one.</div></article>'
+                '<article data-testid="tweet"><div data-testid="User-Name"><span>Alice</span>'
+                '<a href="https://x.com/alice/status/501"></a></div><div data-testid="tweetText">Standalone two.</div></article>'
+                '</main></body></html>', encoding="utf-8",
+            )
+            chinese_article_fixture = directory / "chinese-article.html"
+            chinese_article_fixture.write_text(
+                '<!doctype html><html><head><title>研究札记</title></head><body><main><h1>研究札记</h1>'
+                '<p><span itemprop="author">张三</span><time datetime="2026-08-11">2026-08-11</time></p>'
+                '<p>' + ('这是一个完整的中文论证段落，包含背景、证据、判断以及可复核的结论。' * 8) + '</p>'
+                '<p>' + ('第二段继续解释取舍、限制与后续行动，形成清晰完整的文章结构。' * 8) + '</p>'
+                '</main></body></html>', encoding="utf-8",
             )
             (
                 captured, wechat, x_article, x_thread, media_capture, generic, main_article,
-                product, plain_article, interposed_thread,
+                product, plain_article, interposed_thread, timeline, chinese_article,
             ) = self.run_browser_fixtures(
                 chrome,
                 [
                     fixture, wechat_fixture, x_article_fixture, x_thread_fixture, media_fixture,
                     generic_fixture, main_article_fixture, product_fixture, plain_article_fixture,
-                    interposed_thread_fixture,
+                    interposed_thread_fixture, timeline_fixture, chinese_article_fixture,
                 ],
             )
             self.assertEqual(captured["capture_kind"], "article")
@@ -2035,6 +2130,7 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertNotIn("private form value", generic["snapshot_html"])
             self.assertNotIn("onerror", generic["snapshot_html"])
             self.assertNotIn("javascript:", generic["snapshot_html"])
+            self.assertNotIn("<base", generic["snapshot_html"])
             self.assertNotIn("icons.svg", generic["snapshot_html"])
             self.assertIn('href="#local-symbol"', generic["snapshot_html"])
             generic_media = {asset["url"] for asset in generic["remote_assets"]}
@@ -2051,8 +2147,12 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(plain_article["title"], "Research Note")
             self.assertIn("First chain post.", interposed_thread["content_markdown"])
             self.assertIn("Second chain post.", interposed_thread["content_markdown"])
+            self.assertIn("Third root reply.", interposed_thread["content_markdown"])
             self.assertNotIn("Interposed reply.", interposed_thread["content_markdown"])
             self.assertNotIn("Interposed standalone post.", interposed_thread["content_markdown"])
+            self.assertEqual(timeline["capture_kind"], "html")
+            self.assertEqual(chinese_article["capture_kind"], "article")
+            self.assertEqual(chinese_article["title"], "研究札记")
 
     def test_extension_builds_direct_pdf_capture_without_saving_video_binary(self) -> None:
         script = (
@@ -2066,8 +2166,10 @@ class IntelligenceOperationTest(unittest.TestCase):
             "const video=LBrainCaptureWorker.directCapture({url:'https://example.invalid/movie.mp4',title:'Recorded talk'});"
             "const signed=LBrainCaptureWorker.directCapture({url:'https://example.invalid/download?id=signed',title:'Signed report',mimeType:'application/pdf'});"
             "const readable=LBrainCaptureWorker.directCapture({url:'https://example.invalid/2026%20%E5%B9%B4%E6%8A%A5.pdf',title:'Readable report'});"
+            "const malformed=LBrainCaptureWorker.directCapture({url:'https://example.invalid/%E0%A4%A',title:'Malformed',mimeType:'application/pdf'});"
+            "const longName=LBrainCaptureWorker.directCapture({url:'https://example.invalid/" + ("a" * 260) + ".pdf',title:'Long',mimeType:'application/pdf'});"
             "const prepared=await LBrainCaptureWorker.preparePayload(pdf);"
-            "console.log(JSON.stringify([pdf,video,signed,readable,prepared,LBrainCaptureWorker.previewFor(pdf)]));})().catch(error=>{console.error(error);process.exit(1)});"
+            "console.log(JSON.stringify([pdf,video,signed,readable,malformed,longName,prepared,LBrainCaptureWorker.previewFor(pdf)]));})().catch(error=>{console.error(error);process.exit(1)});"
         )
         result = subprocess.run(
             ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
@@ -2076,7 +2178,7 @@ class IntelligenceOperationTest(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        pdf, video, signed, readable, prepared, preview = json.loads(result.stdout)
+        pdf, video, signed, readable, malformed, long_name, prepared, preview = json.loads(result.stdout)
         self.assertEqual(pdf["remote_assets"][0]["media_type"], "application/pdf")
         self.assertIn("lbrain-asset://direct-document", pdf["content_markdown"])
         self.assertEqual(video["remote_assets"], [])
@@ -2084,6 +2186,8 @@ class IntelligenceOperationTest(unittest.TestCase):
         self.assertEqual(signed["remote_assets"][0]["media_type"], "application/pdf")
         self.assertTrue(str(signed["remote_assets"][0]["name"]).endswith(".pdf"))
         self.assertEqual(readable["remote_assets"][0]["name"], "documents/2026 年报.pdf")
+        self.assertTrue(malformed["remote_assets"][0]["name"].endswith(".pdf"))
+        self.assertLessEqual(len(long_name["remote_assets"][0]["name"].split("/", 1)[1].encode()), 160)
         source_identity = "\0".join((pdf["title"], pdf["author"], pdf["published_at"], pdf["content_markdown"]))
         self.assertEqual(prepared["source_content_hash"], hashlib.sha256(source_identity.encode()).hexdigest())
         self.assertEqual(prepared["source_content_markdown"], pdf["content_markdown"])
@@ -2636,8 +2740,11 @@ class IntelligenceOperationTest(unittest.TestCase):
                 if command[0] == "pdftotext":
                     return subprocess.CompletedProcess(command, 0, "", "")
                 if command[0] == "pdftoppm":
-                    Path(f"{command[-1]}-1.png").write_bytes(b"page")
-                    return subprocess.CompletedProcess(command, 0, "", "")
+                    page = int(command[command.index("-f") + 1])
+                    if page == 1:
+                        Path(f"{command[-1]}.png").write_bytes(b"page")
+                        return subprocess.CompletedProcess(command, 0, "", "")
+                    return subprocess.CompletedProcess(command, 1, "", "")
                 output = kwargs["stdout"]
                 assert hasattr(output, "write")
                 output.write(b"OCR recovered sentence.\n")

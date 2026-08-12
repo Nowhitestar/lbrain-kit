@@ -33,6 +33,23 @@ const DIRECT_TYPES = {
 };
 const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "m4v", "webm", "avi", "mkv"]);
 
+function decodedFilename(value, fallback) {
+  let decoded = fallback;
+  try {
+    decoded = decodeURIComponent(value || fallback);
+  } catch (_) {}
+  decoded = decoded.replace(/[\x00-\x1f\x7f<>:"|?*\\/]/g, "-");
+  const suffix = decoded.includes(".") ? decoded.split(".").pop() : "";
+  const extension = suffix && suffix.length <= 10 ? `.${suffix}` : "";
+  const stem = extension ? decoded.slice(0, -extension.length) : decoded;
+  let shortened = "";
+  for (const character of stem.slice(0, 512)) {
+    if (new TextEncoder().encode(shortened + character + extension).length > 160) break;
+    shortened += character;
+  }
+  return `${shortened || "Saved document"}${extension}`;
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   clearConfirmations().catch(() => {});
   chrome.contextMenus.removeAll(() => {
@@ -50,7 +67,7 @@ function directCapture(tab) {
   } catch (_) {
     return null;
   }
-  let filename = decodeURIComponent(parsed.pathname.split("/").pop() || "Saved document");
+  let filename = decodedFilename(parsed.pathname.split("/").pop(), "Saved document");
   const extension = filename.split(".").pop()?.toLowerCase();
   const title = tab.title || filename;
   if (VIDEO_EXTENSIONS.has(extension)) {

@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from contextlib import contextmanager
 from datetime import date
 from pathlib import Path, PurePosixPath
@@ -63,6 +64,31 @@ def reject_secret_file(root: Path, path: Path) -> None:
                 tail = (tail + chunk)[-128 * 1024:]
     except UnicodeError as error:
         raise OperationError("text Capture Bundle asset is not valid UTF-8") from error
+
+
+def reject_binary_secret_file(root: Path, path: Path) -> None:
+    def scan(source: BinaryIO) -> None:
+        tail = ""
+        for chunk in iter(lambda: source.read(128 * 1024), b""):
+            text = tail + chunk.decode("latin-1")
+            reject_secrets(root, text)
+            tail = text[-128 * 1024:]
+
+    with path.open("rb") as source:
+        scan(source)
+    if not zipfile.is_zipfile(path):
+        return
+    try:
+        with zipfile.ZipFile(path) as archive:
+            for member in archive.infolist():
+                if member.is_dir() or member.flag_bits & 0x1 or not member.filename.lower().endswith(
+                    (".xml", ".rels", ".txt", ".csv", ".json", ".html", ".xhtml")
+                ):
+                    continue
+                with archive.open(member) as source:
+                    scan(source)
+    except (OSError, RuntimeError, zipfile.BadZipFile) as error:
+        raise OperationError("document Capture Bundle asset could not be inspected") from error
 
 
 def digest(content: str) -> str:
@@ -550,7 +576,9 @@ def capture_key(origin: str, content: str) -> str:
 
 def capture_slug(title: str, key: str) -> str:
     slug = re.sub(r"[^\w-]+", "-", title, flags=re.UNICODE).strip("-_")
-    return f"{slug or 'Capture'}-{key[:8]}"
+    suffix = f"-{key[:8]}"
+    slug = slug.encode("utf-8")[: 160 - len(suffix)].decode("utf-8", errors="ignore")
+    return f"{slug or 'Capture'}{suffix}"
 
 
 def frontmatter_text(lines: list[str], key: str) -> str:
@@ -707,6 +735,8 @@ def safe_asset_path(value: object, field: str) -> PurePosixPath:
         raise OperationError(f"{field} must stay inside its asset directory")
     if any(re.search(r'[\x00-\x1f\x7f<>:"|?*\\]', part) for part in path.parts):
         raise OperationError(f"{field} contains unsafe filename characters")
+    if any(len(part.encode("utf-8")) > 200 for part in path.parts):
+        raise OperationError(f"{field} contains an overlong filename")
     return path
 
 
@@ -863,19 +893,24 @@ def local_pdf_text(path: Path) -> tuple[str, str]:
     try:
         with tempfile.TemporaryDirectory(prefix="lbrain-pdf-ocr-") as temporary:
             prefix = Path(temporary) / "page"
-            rendered = subprocess.run(
-                [pdftoppm, "-png", str(path), str(prefix)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=300,
-            )
-            if rendered.returncode:
-                return "", "failed"
             pages: list[str] = []
             remaining = MAX_EXTRACTED_TEXT_BYTES
             truncated = False
-            for page in sorted(Path(temporary).glob("page-*.png")):
+            page_number = 1
+            while remaining > 0:
+                page = prefix.with_suffix(".png")
+                rendered = subprocess.run(
+                    [
+                        pdftoppm, "-f", str(page_number), "-l", str(page_number),
+                        "-singlefile", "-png", str(path), str(prefix),
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=120,
+                )
+                if rendered.returncode or not page.is_file():
+                    break
                 with tempfile.TemporaryFile() as output:
                     result = subprocess.run(
                         [tesseract, str(page), "stdout"],
@@ -890,6 +925,8 @@ def local_pdf_text(path: Path) -> tuple[str, str]:
                     pages.append(extracted.strip())
                     remaining -= len(extracted.encode("utf-8"))
                 truncated = truncated or page_truncated
+                page.unlink()
+                page_number += 1
                 if remaining <= 0:
                     truncated = True
                     break
@@ -1173,9 +1210,9 @@ def restore_preserved_links(
         if placeholder not in by_placeholder:
             continue
         resolved.add(placeholder)
-        content = content.replace(missing_markdown, placeholder).replace(asset_url, placeholder)
         content = content.replace(f"- Media could not be preserved: {asset_url}\n", "")
         content = content.replace(f"- Media could not be preserved: {asset_url}", "")
+        content = content.replace(missing_markdown, placeholder)
     content = re.sub(r"(?m)^## Capture warnings\n(?:\s*\n)*(?=## |\Z)", "", content).strip()
 
     snapshot = next((asset for asset in assets if asset["placeholder"] == "lbrain-asset://html-snapshot"), None)
@@ -1356,6 +1393,8 @@ def capture_bundle(
             "application/json", "application/xhtml+xml", "image/svg+xml"
         }:
             reject_secret_file(root, Path(asset["_source"]))
+        elif media_type.startswith("application/"):
+            reject_binary_secret_file(root, Path(asset["_source"]))
     content, enrichment_incomplete = enriched_bundle_content(content, assets)
     if enrichment_incomplete and extraction_status == "complete":
         extraction_status = "partial"

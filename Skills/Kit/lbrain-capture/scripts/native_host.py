@@ -256,7 +256,11 @@ class SafeSvg(xml.sax.handler.ContentHandler):
             raise OperationError("SVG active content is not allowed")
         for key in attributes.getNames():
             lowered = key.lower().split(":")[-1]
-            value = str(attributes.getValue(key)).strip().lower()
+            value = re.sub(
+                r"\\([0-9a-fA-F]{1,6})[ \t\r\n\f]?|\\(.)",
+                lambda match: chr(int(match.group(1), 16)) if match.group(1) else (match.group(2) or ""),
+                str(attributes.getValue(key)),
+            ).strip().lower()
             if lowered.startswith("on") or (lowered == "style" and ("url(" in value or "@import" in value)):
                 raise OperationError("SVG active content is not allowed")
             if lowered == "href" and value and not value.startswith("#"):

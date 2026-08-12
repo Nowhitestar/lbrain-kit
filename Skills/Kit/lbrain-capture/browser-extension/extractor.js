@@ -145,6 +145,7 @@
   function xThread(tweets, handle) {
     const root = document.createElement("article");
     let previous = null;
+    const accepted = new Set();
     for (const tweet of tweets) {
       const status = xStatus(tweet);
       if (!status || status.handle !== handle) continue;
@@ -173,13 +174,14 @@
             && new URL(url(link.getAttribute("href") || "")).pathname.toLowerCase() === `/${handle}`);
         const chronological = !previous.publishedAt || !status.publishedAt
           || Date.parse(status.publishedAt) >= Date.parse(previous.publishedAt);
-        if ((replyTarget !== previous.id && !selfReply) || !chronological) continue;
+        if ((!accepted.has(replyTarget) && !selfReply) || !chronological) continue;
         root.append(document.createElement("hr"));
       }
       root.append(tweet.cloneNode(true));
       previous = status;
+      accepted.add(status.id);
     }
-    return root;
+    return accepted.size > 1 ? root : null;
   }
 
   const ATTACHMENTS = {
@@ -204,8 +206,11 @@
 
   function asset(source, index, folder, mediaType) {
     const fallback = `asset-${String(index + 1).padStart(3, "0")}.bin`;
-    const basename = decodeURIComponent(new URL(source).pathname.split("/").pop() || fallback)
-      .replace(/[^A-Za-z0-9._-]+/g, "-") || fallback;
+    let decoded = fallback;
+    try {
+      decoded = decodeURIComponent(new URL(source).pathname.split("/").pop() || fallback);
+    } catch (_) {}
+    const basename = (decoded.replace(/[^A-Za-z0-9._-]+/g, "-") || fallback).slice(0, 120);
     return {
       id: `asset-${index + 1}`,
       url: source,
@@ -282,7 +287,7 @@
 
   function htmlSnapshot(root, title) {
     const copy = root.cloneNode(true);
-    copy.querySelectorAll("script, style, noscript, template, form, input, textarea, select, button, iframe, object, embed, [aria-hidden='true'], [hidden]")
+    copy.querySelectorAll("base, script, style, noscript, template, form, input, textarea, select, button, iframe, object, embed, [aria-hidden='true'], [hidden]")
       .forEach((node) => node.remove());
     const allowed = new Set(["alt", "class", "colspan", "datetime", "height", "href", "id", "open", "poster", "rowspan", "src", "title", "width", "xlink:href"]);
     const safeUrl = (value) => {
@@ -345,6 +350,7 @@
     const articleRoot = (node) => {
       if (!node || !node.querySelector("h1") || node.querySelectorAll("p").length < 2) return false;
       const length = text(node).length;
+      const editorial = node.querySelector("blockquote, figure, pre, table, time[datetime], [itemprop='author'], [rel='author']");
       if (node.querySelector("video") && length >= 50) return true;
       if (node.tagName === "MAIN" || node.getAttribute("role") === "main") {
         const longestParagraph = Math.max(...Array.from(node.querySelectorAll("p"), (item) => text(item).length));
@@ -355,14 +361,13 @@
         }
         return node.querySelectorAll("h1").length === 1
           && longestParagraph >= 120
-          && length >= (articleMetadata ? 350 : 800)
+          && length >= (articleMetadata || editorial ? 350 : 800)
           && node.querySelectorAll("article").length <= 1;
       }
       if (cardLike(node)) return false;
       const pageMain = node.closest("main, [role='main']");
       if (!publishedMetadata && pageMain
         && pageMain.querySelectorAll("h1").length > node.querySelectorAll("h1").length) return false;
-      const editorial = node.querySelector("blockquote, figure, pre, table, time[datetime], [itemprop='author'], [rel='author']");
       if (!publishedMetadata && !editorial && node.querySelectorAll("p").length < 3) return false;
       return length >= (publishedMetadata ? 250 : 500);
     };
