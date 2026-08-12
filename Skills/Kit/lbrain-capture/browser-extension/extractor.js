@@ -36,14 +36,13 @@
       || node.getAttribute("src")
       || ""
   );
+  const pinRenderedImages = (originals, copies) => originals.forEach((image, index) => {
+    const source = imageUrl(image);
+    if (source) copies[index]?.setAttribute("src", source);
+  });
   const renderedClone = (node) => {
     const clone = node.cloneNode(true);
-    const originals = Array.from(node.querySelectorAll("img"));
-    const copies = Array.from(clone.querySelectorAll("img"));
-    originals.forEach((image, index) => {
-      const source = imageUrl(image);
-      if (source) copies[index]?.setAttribute("src", source);
-    });
+    pinRenderedImages(Array.from(node.querySelectorAll("img")), Array.from(clone.querySelectorAll("img")));
     return clone;
   };
   const children = (node, renderer) => Array.from(node.childNodes).map(renderer).join("");
@@ -132,8 +131,11 @@
   function selectedRoot() {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
+    const range = selection.getRangeAt(0);
     const container = document.createElement("article");
-    container.append(selection.getRangeAt(0).cloneContents());
+    container.append(range.cloneContents());
+    const originals = Array.from(document.querySelectorAll("img")).filter((image) => range.intersectsNode(image));
+    pinRenderedImages(originals, Array.from(container.querySelectorAll("img")));
     return container;
   }
 
@@ -191,7 +193,7 @@
         if (!related || !chronological) continue;
         root.append(document.createElement("hr"));
       }
-      root.append(tweet.cloneNode(true));
+      root.append(renderedClone(tweet));
       previous = status;
       accepted.add(status.id);
     }

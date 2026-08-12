@@ -189,7 +189,10 @@ class IntelligenceOperationTest(unittest.TestCase):
             "target='https://www.youtube.com/watch?v=abc'}"
             "await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 10000 });"
             "await page.addScriptTag({ path: process.argv[2] });"
-            "results.push(await page.evaluate(() => LBrainCapture.extract('page')));"
+            "const selection=uri.includes('selection-responsive');"
+            "if(selection){await page.evaluate(()=>{const range=document.createRange();range.selectNodeContents(document.querySelector('article'));"
+            "const selected=window.getSelection();selected.removeAllRanges();selected.addRange(range)})}"
+            "results.push(await page.evaluate(scope => LBrainCapture.extract(scope), selection?'selection':'page'));"
             "await page.close();"
             "}"
             "console.log(JSON.stringify(results));"
@@ -2031,7 +2034,9 @@ class IntelligenceOperationTest(unittest.TestCase):
                 '<article data-testid="tweet"><div data-testid="User-Name"><span>Alice</span>'
                 '<a href="https://x.com/alice/status/101"><time datetime="2026-08-11T01:05:00Z">Aug 11</time></a></div>'
                 '<div>回复 <a href="https://x.com/alice">@alice</a></div>'
-                '<div data-testid="tweetText">Second author post.</div></article>'
+                '<div data-testid="tweetText">Second author post.</div><div data-testid="tweetPhoto">'
+                '<picture><source srcset="https://pbs.example.invalid/thread-responsive.png 2x"><img alt="Thread responsive"></picture>'
+                '</div></article>'
                 '<article data-testid="tweet"><div data-testid="User-Name"><span>Alice</span>'
                 '<a href="https://x.com/alice/status/102"><time datetime="2026-08-11T01:06:00Z">Aug 11</time></a></div>'
                 '<div>回复 <a href="https://x.com/alice">@alice</a></div>'
@@ -2146,6 +2151,12 @@ class IntelligenceOperationTest(unittest.TestCase):
                 '<section itemprop="transcript"><p>Alice: First answer.</p><p>Bob: Follow-up question.</p></section>'
                 '<p>' + ('Editorial conclusion and analysis. ' * 20) + '</p></main></body></html>', encoding="utf-8",
             )
+            selection_fixture = directory / "selection-responsive.html"
+            selection_fixture.write_text(
+                '<!doctype html><html><head><title>Selection</title></head><body><article><h1>Selected passage</h1>'
+                '<p>Selected text.</p><picture><source srcset="https://cdn.example/selected.png 2x">'
+                '<img alt="Selected responsive"></picture></article></body></html>', encoding="utf-8",
+            )
             plain_article_fixture = directory / "plain-article.html"
             plain_article_fixture.write_text(
                 "<!doctype html><html><head><title>Research Note</title></head><body><main><h1>Research Note</h1>"
@@ -2210,6 +2221,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                 youtube_video,
                 transcript_video,
                 interview,
+                selection_capture,
             ) = self.run_browser_fixtures(
                 chrome,
                 [
@@ -2221,6 +2233,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                     youtube_fixture,
                     transcript_fixture,
                     interview_fixture,
+                    selection_fixture,
                 ],
             )
             self.assertEqual(captured["capture_kind"], "article")
@@ -2257,6 +2270,7 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertIn("First author post.", x_thread["content_markdown"])
             self.assertIn("Quoted Bob: useful evidence.", x_thread["content_markdown"])
             self.assertIn("Second author post.", x_thread["content_markdown"])
+            self.assertIn("https://pbs.example.invalid/thread-responsive.png", x_thread["content_markdown"])
             self.assertIn("Media-only reply", x_thread["content_markdown"])
             self.assertNotIn("Unrelated reply.", x_thread["content_markdown"])
             self.assertNotIn("Reply to another chain.", x_thread["content_markdown"])
@@ -2338,6 +2352,8 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(interview["capture_kind"], "article")
             self.assertFalse(interview["has_video"])
             self.assertIn("Alice: First answer.", interview["content_markdown"])
+            self.assertEqual(selection_capture["capture_kind"], "selection")
+            self.assertIn("https://cdn.example/selected.png", selection_capture["content_markdown"])
 
     def test_extension_builds_direct_pdf_capture_without_saving_video_binary(self) -> None:
         script = (
