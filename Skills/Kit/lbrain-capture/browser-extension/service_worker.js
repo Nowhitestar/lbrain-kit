@@ -8,6 +8,13 @@ const SAVE_RESERVATION = "lbrain-save-reservation-v1";
 const confirmations = new Map();
 const confirmationWindows = new Map();
 let saveReservation = null;
+let reservationMutation = Promise.resolve();
+
+function mutateReservation(task) {
+  const current = reservationMutation.then(task, task);
+  reservationMutation = current.catch(() => {});
+  return current;
+}
 
 const DIRECT_TYPES = {
   pdf: "application/pdf",
@@ -520,7 +527,7 @@ async function confirmCapture(tab, capture) {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message.id !== "string" || !message.type?.startsWith("confirmation.")) return;
-  (async () => {
+  mutateReservation(async () => {
     if (message.type === "confirmation.reserve") {
       if (saveReservation) throw new Error("Another LBrain capture is already being saved.");
       saveReservation = message.id;
@@ -595,7 +602,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     } finally {
       await releaseSaveReservation(message.id);
     }
-  })().then(sendResponse, (error) => sendResponse({ error: error instanceof Error ? error.message : String(error) }));
+  }).then(sendResponse, (error) => sendResponse({ error: error instanceof Error ? error.message : String(error) }));
   return true;
 });
 
@@ -620,10 +627,10 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 chrome.windows.onRemoved.addListener((windowId) => {
-  chrome.storage.session.get(SAVE_RESERVATION).then((value) => {
+  mutateReservation(async () => {
+    const value = await chrome.storage.session.get(SAVE_RESERVATION);
     const stored = value[SAVE_RESERVATION];
-    if (stored?.state !== "saving" && stored?.window_id === windowId) return releaseSaveReservation(stored.id);
-    return undefined;
+    if (stored?.state !== "saving" && stored?.window_id === windowId) await releaseSaveReservation(stored.id);
   }).catch(() => {});
   for (const [id, savedWindowId] of confirmationWindows) {
     if (savedWindowId !== windowId) continue;
