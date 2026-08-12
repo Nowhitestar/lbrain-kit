@@ -1959,6 +1959,9 @@ class IntelligenceOperationTest(unittest.TestCase):
                 '<article data-testid="tweet"><div data-testid="User-Name"><span>Bob</span>'
                 '<a href="https://x.com/bob/status/400"><time datetime="2026-08-11T01:01:00Z">2</time></a></div>'
                 '<div data-testid="tweetText">Interposed reply.</div></article>'
+                '<article data-testid="tweet"><div data-testid="User-Name"><span>Alice</span>'
+                '<a href="https://x.com/alice/status/399"><time datetime="2026-08-11T01:01:30Z">2.5</time></a></div>'
+                '<div data-testid="tweetText">Interposed standalone post.</div></article>'
                 '<article data-testid="tweet" data-in-reply-to-status-id="300"><div data-testid="User-Name"><span>Alice</span>'
                 '<a href="https://x.com/alice/status/301"><time datetime="2026-08-11T01:02:00Z">3</time></a></div>'
                 '<div data-testid="tweetText">Second chain post.</div></article></main></body></html>',
@@ -2049,6 +2052,7 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertIn("First chain post.", interposed_thread["content_markdown"])
             self.assertIn("Second chain post.", interposed_thread["content_markdown"])
             self.assertNotIn("Interposed reply.", interposed_thread["content_markdown"])
+            self.assertNotIn("Interposed standalone post.", interposed_thread["content_markdown"])
 
     def test_extension_builds_direct_pdf_capture_without_saving_video_binary(self) -> None:
         script = (

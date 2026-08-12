@@ -173,7 +173,7 @@
             && new URL(url(link.getAttribute("href") || "")).pathname.toLowerCase() === `/${handle}`);
         const chronological = !previous.publishedAt || !status.publishedAt
           || Date.parse(status.publishedAt) >= Date.parse(previous.publishedAt);
-        if ((replyTarget !== previous.id && !selfReply) || !chronological) break;
+        if ((replyTarget !== previous.id && !selfReply) || !chronological) continue;
         root.append(document.createElement("hr"));
       }
       root.append(tweet.cloneNode(true));
