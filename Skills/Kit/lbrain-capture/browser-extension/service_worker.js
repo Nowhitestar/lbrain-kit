@@ -460,23 +460,27 @@ async function deleteConfirmation(id) {
   await cache.delete(chrome.runtime.getURL(`confirmation/${id}`));
 }
 
+async function removeRecordedPermissions(stored) {
+  if (!stored?.release_origins?.length) return true;
+  try {
+    if (await chrome.permissions.remove({ origins: stored.release_origins })) return true;
+    return !await chrome.permissions.contains({ origins: stored.release_origins });
+  } catch (_) {
+    return false;
+  }
+}
+
 async function clearConfirmations() {
   const stored = (await chrome.storage.session.get(SAVE_RESERVATION))[SAVE_RESERVATION];
-  if (stored?.release_origins?.length) {
-    await chrome.permissions?.remove?.({ origins: stored.release_origins }).catch(() => {});
-  }
   await caches.delete(CONFIRMATION_CACHE);
-  await chrome.storage.session.remove(SAVE_RESERVATION);
+  if (await removeRecordedPermissions(stored)) await chrome.storage.session.remove(SAVE_RESERVATION);
 }
 
 async function releaseSaveReservation(id) {
   if (saveReservation === id) saveReservation = null;
   try {
     const stored = (await chrome.storage.session.get(SAVE_RESERVATION))[SAVE_RESERVATION];
-    if (stored?.id === id) {
-      if (stored.release_origins?.length) {
-        await chrome.permissions?.remove?.({ origins: stored.release_origins }).catch(() => {});
-      }
+    if (stored?.id === id && await removeRecordedPermissions(stored)) {
       await chrome.storage.session.remove(SAVE_RESERVATION);
     }
   } catch (_) {
@@ -525,11 +529,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         if (stored?.id && stored.id !== message.id && Date.now() - stored.created < 10 * 60 * 1000) {
           throw new Error("Another LBrain capture is already being saved.");
         }
+        if (stored?.id && stored.id !== message.id && !await removeRecordedPermissions(stored)) {
+          throw new Error("The previous temporary permission could not be released.");
+        }
         const allowedOrigins = Array.isArray(message.permission_origins)
           ? message.permission_origins.filter((origin) => /^https?:\/\/[^/]+\/\*$/.test(origin))
           : [];
         await chrome.storage.session.set({
-          [SAVE_RESERVATION]: { id: message.id, created: Date.now(), allowed_origins: allowedOrigins, release_origins: [] }
+          [SAVE_RESERVATION]: {
+            id: message.id,
+            created: Date.now(),
+            window_id: Number.isInteger(message.window_id) ? message.window_id : null,
+            allowed_origins: allowedOrigins,
+            release_origins: []
+          }
         });
       } catch (error) {
         saveReservation = null;
@@ -602,6 +615,11 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 chrome.windows.onRemoved.addListener((windowId) => {
+  chrome.storage.session.get(SAVE_RESERVATION).then((value) => {
+    const stored = value[SAVE_RESERVATION];
+    if (stored?.window_id === windowId) return releaseSaveReservation(stored.id);
+    return undefined;
+  }).catch(() => {});
   for (const [id, savedWindowId] of confirmationWindows) {
     if (savedWindowId !== windowId) continue;
     confirmationWindows.delete(id);

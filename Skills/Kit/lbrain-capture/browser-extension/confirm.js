@@ -43,8 +43,9 @@ save.addEventListener("click", async () => {
   const releaseOrigins = [];
   let reserved = false;
   try {
+    const confirmationWindow = await chrome.windows.getCurrent();
     const reservation = await chrome.runtime.sendMessage({
-      type: "confirmation.reserve", id, permission_origins: permissionOrigins
+      type: "confirmation.reserve", id, window_id: confirmationWindow?.id, permission_origins: permissionOrigins
     });
     if (reservation?.error) throw new Error(reservation.error);
     reserved = true;

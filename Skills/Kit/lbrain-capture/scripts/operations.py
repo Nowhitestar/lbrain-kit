@@ -931,29 +931,37 @@ def local_pdf_text(path: Path) -> tuple[str, str]:
                     truncated = True
                     break
                 page = prefix.with_suffix(".png")
-                rendered = subprocess.run(
-                    [
-                        pdftoppm, "-f", str(page_number), "-l", str(page_number),
-                        "-singlefile", "-scale-to", "4000", "-png", str(path), str(prefix),
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                    timeout=min(120, max(deadline - time.monotonic(), 0.001)),
-                )
+                try:
+                    rendered = subprocess.run(
+                        [
+                            pdftoppm, "-f", str(page_number), "-l", str(page_number),
+                            "-singlefile", "-scale-to", "4000", "-png", str(path), str(prefix),
+                        ],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                        timeout=min(120, max(deadline - time.monotonic(), 0.001)),
+                    )
+                except subprocess.TimeoutExpired:
+                    truncated = True
+                    break
                 if rendered.returncode or not page.is_file():
                     break
                 if time.monotonic() >= deadline:
                     truncated = True
                     break
                 with tempfile.TemporaryFile() as output:
-                    result = subprocess.run(
-                        [tesseract, str(page), "stdout"],
-                        stdout=output,
-                        stderr=subprocess.DEVNULL,
-                        check=False,
-                        timeout=min(120, max(deadline - time.monotonic(), 0.001)),
-                    )
+                    try:
+                        result = subprocess.run(
+                            [tesseract, str(page), "stdout"],
+                            stdout=output,
+                            stderr=subprocess.DEVNULL,
+                            check=False,
+                            timeout=min(120, max(deadline - time.monotonic(), 0.001)),
+                        )
+                    except subprocess.TimeoutExpired:
+                        truncated = True
+                        break
                     output.seek(0)
                     extracted, page_truncated = limited_text(output, max(remaining, 0))
                 if result.returncode == 0 and extracted.strip():

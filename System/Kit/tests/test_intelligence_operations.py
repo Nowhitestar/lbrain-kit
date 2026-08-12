@@ -2508,6 +2508,7 @@ with tempfile.TemporaryDirectory() as temporary:
             "queueMicrotask(()=>fn({type:'preview',preview:{title:'Saved',summary:'',permission_origins:['https://existing.invalid/*','https://new.invalid/*'],details:[]},"
             "capture:{schema:'lbrain.capture.v1'},tab:{id:7}}))}},postMessage(){},disconnect(){}}},"
             "async sendMessage(message){if(message.type==='confirmation.reserve')reserved=true;decision=message;cachedAtDecision=Object.keys(cached).length===1;return{status:'saved'}}},"
+            "windows:{async getCurrent(){return{id:19}}},"
             "permissions:{async contains({origins}){reservedBeforePermissions=reservedBeforePermissions&&reserved;return origins[0].includes('existing')},async request({origins}){requested=origins;return true},"
             "async remove(){throw new Error('worker owns permission cleanup')}}};"
             "eval(fs.readFileSync(process.argv[1],'utf8'));setTimeout(async()=>{await listeners['#saveclick']();"
@@ -2529,26 +2530,31 @@ with tempfile.TemporaryDirectory() as temporary:
 
     def test_extension_save_reservation_survives_worker_restart(self) -> None:
         script = (
-            "const fs=require('fs'),vm=require('vm'),{webcrypto}=require('crypto');const shared={},removed=[];"
-            "function worker(){let handler,startup;const session={async get(key){return{[key]:shared[key]}},"
+            "const fs=require('fs'),vm=require('vm'),{webcrypto}=require('crypto');const shared={},removed=[];let failRemove=false;"
+            "function worker(){let handler,startup,removedWindow;const session={async get(key){return{[key]:shared[key]}},"
             "async set(value){Object.assign(shared,value)},async remove(key){delete shared[key]}};"
             "const chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(fn){startup=fn}},"
             "onMessage:{addListener(fn){handler=fn}},onConnect:{addListener(){}},lastError:null,"
             "getURL(value){return 'chrome-extension://test/'+value}},contextMenus:{removeAll(){},create(){},"
-            "onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},windows:{onRemoved:{addListener(){}}},"
-            "permissions:{async remove({origins}){removed.push(...origins);return true}},"
+            "onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},windows:{onRemoved:{addListener(fn){removedWindow=fn}}},"
+            "permissions:{async remove({origins}){if(failRemove)return false;removed.push(...origins);return true},async contains(){return failRemove}},"
             "notifications:{onButtonClicked:{addListener(){}}},storage:{session,local:{async get(){return{}},async set(){},async remove(){}}}};"
             "const caches={async open(){return{async match(){return undefined},async delete(){}}},async delete(){}};"
             "const context={chrome,caches,crypto:webcrypto,URL,TextEncoder,Blob,Response,setTimeout,clearTimeout,console};"
-            "vm.createContext(context);vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),context);return{handler,startup}}"
+            "vm.createContext(context);vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),context);return{handler,startup,removedWindow}}"
             "function send(handler,message){return new Promise(resolve=>handler(message,{},resolve))}"
             "(async()=>{const first=worker();const reserved=await send(first.handler,{type:'confirmation.reserve',id:'capture-1',"
-            "permission_origins:['https://new.invalid/*']});"
+            "window_id:19,permission_origins:['https://new.invalid/*']});"
             "await send(first.handler,{type:'confirmation.permissions',id:'capture-1',origins:['https://new.invalid/*']});"
-            "const decided=await send(worker().handler,{type:'confirmation.decide',id:'capture-1'});"
-            "shared['lbrain-save-reservation-v1']={id:'capture-2',created:Date.now(),release_origins:['https://crash.invalid/*']};"
-            "await worker().startup();"
-            "console.log(JSON.stringify({reserved:reserved.reserved,error:decided.error,removed,stale:Boolean(shared['lbrain-save-reservation-v1'])}))})()"
+            "const restarted=worker();restarted.removedWindow(19);await new Promise(resolve=>setTimeout(resolve,0));"
+            "const second=worker();await send(second.handler,{type:'confirmation.reserve',id:'capture-2'});"
+            "const decided=await send(worker().handler,{type:'confirmation.decide',id:'capture-2'});"
+            "shared['lbrain-save-reservation-v1']={id:'stale',created:Date.now()-660000,release_origins:['https://crash.invalid/*']};"
+            "const third=worker();await send(third.handler,{type:'confirmation.reserve',id:'capture-3'});await third.startup();"
+            "shared['lbrain-save-reservation-v1']={id:'retry',created:Date.now(),release_origins:['https://retry.invalid/*']};"
+            "failRemove=true;await worker().startup();const retainedOnFailure=Boolean(shared['lbrain-save-reservation-v1']);"
+            "failRemove=false;await worker().startup();"
+            "console.log(JSON.stringify({reserved:reserved.reserved,error:decided.error,removed,retainedOnFailure,stale:Boolean(shared['lbrain-save-reservation-v1'])}))})()"
             ".catch(error=>{console.error(error);process.exit(1)});"
         )
         result = subprocess.run(
@@ -2562,7 +2568,8 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertTrue(output["reserved"])
         self.assertIn("confirmation is no longer available", output["error"])
         self.assertNotIn("owns the save slot", output["error"])
-        self.assertEqual(output["removed"], ["https://new.invalid/*", "https://crash.invalid/*"])
+        self.assertEqual(output["removed"], ["https://new.invalid/*", "https://crash.invalid/*", "https://retry.invalid/*"])
+        self.assertTrue(output["retainedOnFailure"])
         self.assertFalse(output["stale"])
 
     def test_bundle_extracts_pdf_and_subtitle_text_and_recovers_partial_media(self) -> None:
@@ -3017,6 +3024,27 @@ with tempfile.TemporaryDirectory() as temporary:
                 _, method = operations.local_pdf_text(pdf)
             self.assertEqual(method, "failed")
             self.assertNotIn("tesseract", commands)
+
+            def timeout_after_first_page(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                if command[0] == "pdftotext":
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                if command[0] == "pdftoppm":
+                    page = int(command[command.index("-f") + 1])
+                    if page == 2:
+                        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+                    Path(f"{command[-1]}.png").write_bytes(b"page")
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                output = kwargs["stdout"]
+                assert hasattr(output, "write")
+                output.write(b"First page OCR text.\n")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with mock.patch.object(operations.shutil, "which", side_effect=lambda name: name), mock.patch.object(
+                operations.subprocess, "run", side_effect=timeout_after_first_page
+            ):
+                text, method = operations.local_pdf_text(pdf)
+            self.assertEqual(text, "First page OCR text.")
+            self.assertEqual(method, "ocr-truncated")
 
     def test_capture_binary_assets_use_git_lfs_without_a_remote(self) -> None:
         if shutil.which("git-lfs") is None:
