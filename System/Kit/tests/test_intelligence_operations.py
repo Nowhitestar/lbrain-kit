@@ -2106,6 +2106,14 @@ class IntelligenceOperationTest(unittest.TestCase):
                 + ('Pricing and feature catalog. ' * 30)
                 + '</p><p>Annual billing.</p></section></article></body></html>', encoding="utf-8",
             )
+            unknown_video_fixture = directory / "unknown-video.html"
+            unknown_video_fixture.write_text(
+                '<!doctype html><html><head><title>Watch lesson</title></head><body><main><h1>Watch lesson</h1>'
+                '<p>Short lesson introduction.</p><p>Watch the lesson below.</p>'
+                '<video src="https://training.example/lesson.mp4"><track kind="subtitles" '
+                'src="https://training.example/lesson.vtt"></video>'
+                '<audio src="https://training.example/lesson-audio.mp3"></audio></main></body></html>', encoding="utf-8",
+            )
             plain_article_fixture = directory / "plain-article.html"
             plain_article_fixture.write_text(
                 "<!doctype html><html><head><title>Research Note</title></head><body><main><h1>Research Note</h1>"
@@ -2164,6 +2172,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                 captured, wechat, x_article, x_thread, media_capture, generic, main_article,
                 product, plain_article, interposed_thread, timeline, chinese_article, editorial_product,
                 product_article,
+                unknown_video,
             ) = self.run_browser_fixtures(
                 chrome,
                 [
@@ -2171,6 +2180,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                     generic_fixture, main_article_fixture, product_fixture, plain_article_fixture,
                     interposed_thread_fixture, timeline_fixture, chinese_article_fixture, editorial_product_fixture,
                     product_article_fixture,
+                    unknown_video_fixture,
                 ],
             )
             self.assertEqual(captured["capture_kind"], "article")
@@ -2260,6 +2270,10 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(editorial_product["capture_kind"], "article")
             self.assertIn("Independent editorial evidence", editorial_product["content_markdown"])
             self.assertEqual(product_article["capture_kind"], "html")
+            self.assertEqual(unknown_video["capture_kind"], "html")
+            self.assertTrue(unknown_video["has_video"])
+            self.assertFalse(any(asset["media_type"].startswith(("audio/", "video/")) for asset in unknown_video["remote_assets"]))
+            self.assertIn("https://training.example/lesson.vtt", {asset["url"] for asset in unknown_video["remote_assets"]})
 
     def test_extension_builds_direct_pdf_capture_without_saving_video_binary(self) -> None:
         script = (

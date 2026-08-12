@@ -357,7 +357,7 @@
         .filter((item) => !cardNodes.some((other) => other !== item && other.contains(item)))
         .reduce((total, item) => total + text(item).length, 0);
       if (cardLike(node) || cardLength >= length / 2) return false;
-      if (node.querySelector("video") && length >= 50) return true;
+      if (node.tagName === "ARTICLE" && node.querySelector("video") && length >= 50) return true;
       if (node.tagName === "MAIN" || node.getAttribute("role") === "main") {
         const longestParagraph = Math.max(...Array.from(node.querySelectorAll("p"), (item) => text(item).length));
         let container = node.querySelector("h1");
@@ -405,6 +405,7 @@
     const rendered = `${block(root).trim()}${videoMarkdown(root)}`
       .replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
     if (!title || !rendered) throw new Error("The rendered page did not contain a readable title and body.");
+    const containsVideo = Boolean(root.querySelector("video, ytd-transcript-renderer, [data-testid='transcript'], [itemprop='transcript']"));
     const videoPage = /(^|\.)((youtube\.com)|(youtu\.be)|(bilibili\.com))$/i.test(location.hostname)
       || Boolean(root.querySelector("ytd-transcript-renderer, [data-testid='transcript'], [itemprop='transcript']"));
     const articlePage = Boolean(wechat || xArticle || thread || semanticArticle);
@@ -426,11 +427,11 @@
       published_at: publishedAt,
       content_markdown: content,
       capture_kind: captureKind,
-      has_video: videoPage,
+      has_video: containsVideo,
       snapshot_html: captureKind === "html" ? htmlSnapshot(document.body, title) : "",
       preview_characters: rendered.length,
       extraction_status: "complete",
-      remote_assets: media(captureKind === "html" ? document.body : root, videoPage),
+      remote_assets: media(captureKind === "html" ? document.body : root, containsVideo),
       assets: []
     };
   }
