@@ -416,16 +416,17 @@
       || url(document.querySelector("link[rel='canonical']")?.getAttribute("href") || "")
       || url(location.href);
     const genericPage = scope === "page" && !wechat && !xArticle && !thread && !semanticArticle;
-    const mediaRoot = genericPage ? document.body.cloneNode(true) : root;
-    if (genericPage) mediaRoot.querySelectorAll(NOISE).forEach((node) => node.remove());
+    const mediaRoot = genericPage ? document.body : root;
+    const signalRoot = genericPage ? document.body.cloneNode(true) : root;
+    if (genericPage) signalRoot.querySelectorAll(NOISE).forEach((node) => node.remove());
     const supportedVideoHost = /(^|\.)((youtube\.com)|(youtu\.be)|(bilibili\.com))$/i.test(location.hostname);
-    const transcriptPresent = Boolean(mediaRoot.querySelector(transcriptSelector));
-    const videoDetails = videoMarkdown(mediaRoot, supportedVideoHost || transcriptPresent ? canonical : "");
+    const transcriptPresent = Boolean(signalRoot.querySelector(transcriptSelector));
+    const videoDetails = videoMarkdown(signalRoot, supportedVideoHost || transcriptPresent ? canonical : "");
     const rendered = `${block(root).trim()}${videoDetails}`
       .replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
     if (!title || !rendered) throw new Error("The rendered page did not contain a readable title and body.");
     const containsVideo = supportedVideoHost
-      || transcriptPresent || Boolean(mediaRoot.querySelector("video"));
+      || transcriptPresent || Boolean(signalRoot.querySelector("video"));
     const videoPage = supportedVideoHost || transcriptPresent;
     const articlePage = Boolean(wechat || xArticle || thread || semanticArticle);
     const captureKind = scope === "selection"
