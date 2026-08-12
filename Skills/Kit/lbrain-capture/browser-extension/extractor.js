@@ -402,18 +402,20 @@
     const canonical = (thread ? firstStatus?.href : "")
       || url(document.querySelector("link[rel='canonical']")?.getAttribute("href") || "")
       || url(location.href);
-    const rendered = `${block(root).trim()}${videoMarkdown(root)}`
+    const mediaRoot = scope === "page" ? document.body : root;
+    const videoDetails = videoMarkdown(mediaRoot);
+    const rendered = `${block(root).trim()}${videoDetails}`
       .replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
     if (!title || !rendered) throw new Error("The rendered page did not contain a readable title and body.");
-    const containsVideo = Boolean(root.querySelector("video, ytd-transcript-renderer, [data-testid='transcript'], [itemprop='transcript']"));
+    const containsVideo = Boolean(mediaRoot.querySelector("video, ytd-transcript-renderer, [data-testid='transcript'], [itemprop='transcript']"));
     const videoPage = /(^|\.)((youtube\.com)|(youtu\.be)|(bilibili\.com))$/i.test(location.hostname)
-      || Boolean(root.querySelector("ytd-transcript-renderer, [data-testid='transcript'], [itemprop='transcript']"));
+      || Boolean(mediaRoot.querySelector("ytd-transcript-renderer, [data-testid='transcript'], [itemprop='transcript']"));
     const articlePage = Boolean(wechat || xArticle || thread || semanticArticle);
     const captureKind = scope === "selection"
       ? "selection"
       : thread ? "thread" : articlePage ? "article" : videoPage ? "video" : "html";
     const content = captureKind === "html"
-      ? `[打开保存的 HTML 快照](lbrain-asset://html-snapshot)\n\n- 原页面：[${canonical}](${canonical})`
+      ? `[打开保存的 HTML 快照](lbrain-asset://html-snapshot)\n\n- 原页面：[${canonical}](${canonical})${videoDetails}`
       : rendered;
     const summary = document.querySelector("meta[name='description'], meta[property='og:description']")?.content?.trim()
       || text(root).slice(0, 240);
@@ -431,7 +433,7 @@
       snapshot_html: captureKind === "html" ? htmlSnapshot(document.body, title) : "",
       preview_characters: rendered.length,
       extraction_status: "complete",
-      remote_assets: media(captureKind === "html" ? document.body : root, containsVideo),
+      remote_assets: media(captureKind === "html" ? mediaRoot : root, containsVideo),
       assets: []
     };
   }

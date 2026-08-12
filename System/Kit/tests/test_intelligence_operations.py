@@ -2110,9 +2110,9 @@ class IntelligenceOperationTest(unittest.TestCase):
             unknown_video_fixture.write_text(
                 '<!doctype html><html><head><title>Watch lesson</title></head><body><main><h1>Watch lesson</h1>'
                 '<p>Short lesson introduction.</p><p>Watch the lesson below.</p>'
-                '<video src="https://training.example/lesson.mp4"><track kind="subtitles" '
+                '</main><div id="player"><video src="https://training.example/lesson.mp4"><track kind="subtitles" '
                 'src="https://training.example/lesson.vtt"></video>'
-                '<audio src="https://training.example/lesson-audio.mp3"></audio></main></body></html>', encoding="utf-8",
+                '<audio src="https://training.example/lesson-audio.mp3"></audio></div></body></html>', encoding="utf-8",
             )
             plain_article_fixture = directory / "plain-article.html"
             plain_article_fixture.write_text(
@@ -2272,6 +2272,7 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(product_article["capture_kind"], "html")
             self.assertEqual(unknown_video["capture_kind"], "html")
             self.assertTrue(unknown_video["has_video"])
+            self.assertIn("https://training.example/lesson.mp4", unknown_video["content_markdown"])
             self.assertFalse(any(asset["media_type"].startswith(("audio/", "video/")) for asset in unknown_video["remote_assets"]))
             self.assertIn("https://training.example/lesson.vtt", {asset["url"] for asset in unknown_video["remote_assets"]})
 
