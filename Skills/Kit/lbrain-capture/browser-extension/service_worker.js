@@ -572,6 +572,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     stored.state = "saving";
     stored.window_id = null;
     await chrome.storage.session.set({ [SAVE_RESERVATION]: stored });
+    confirmationWindows.delete(message.id);
     if (saveReservation !== message.id) {
       saveReservation = message.id;
     }
@@ -627,9 +628,6 @@ chrome.windows.onRemoved.addListener((windowId) => {
   for (const [id, savedWindowId] of confirmationWindows) {
     if (savedWindowId !== windowId) continue;
     confirmationWindows.delete(id);
-    if (saveReservation === id) {
-      releaseSaveReservation(id).catch(() => {});
-    }
   }
   for (const [id, pending] of confirmations) {
     if (pending.windowId === windowId) {
