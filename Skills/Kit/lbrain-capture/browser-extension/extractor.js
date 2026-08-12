@@ -155,6 +155,11 @@
         const replyTarget = tweet.getAttribute("data-lbrain-reply-to")
           || tweet.getAttribute("data-in-reply-to-status-id")
           || Array.from(tweet.querySelectorAll("a[href*='/status/']"))
+            .filter((link) => !link.closest("[data-testid='User-Name']")
+              && !link.closest("[data-testid='tweetText']")
+              && !link.closest("[data-testid='quoteTweet']")
+              && tweetContent
+              && Boolean(link.compareDocumentPosition(tweetContent) & Node.DOCUMENT_POSITION_FOLLOWING))
             .map((link) => (link.getAttribute("href") || "").match(/\/status\/(\d+)/)?.[1])
             .find((id) => id && id !== status.id);
         const selfReply = Array.from(tweet.querySelectorAll("a[href]"))
@@ -343,7 +348,11 @@
       if (node.querySelector("video") && length >= 50) return true;
       if (node.tagName === "MAIN" || node.getAttribute("role") === "main") {
         const longestParagraph = Math.max(...Array.from(node.querySelectorAll("p"), (item) => text(item).length));
-        if (cardLike(node.querySelector("h1")?.closest("article"))) return false;
+        let container = node.querySelector("h1");
+        while (container && container !== node.parentElement) {
+          if (cardLike(container)) return false;
+          container = container.parentElement;
+        }
         return node.querySelectorAll("h1").length === 1
           && longestParagraph >= 120
           && length >= (articleMetadata ? 350 : 800)

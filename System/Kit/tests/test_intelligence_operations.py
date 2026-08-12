@@ -1887,7 +1887,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                 '<article data-testid="tweet"><div data-testid="User-Name"><span>Alice</span>'
                 '<a href="https://x.com/alice/status/103"><time datetime="2026-08-11T01:07:00Z">Aug 11</time></a></div>'
                 '<div data-testid="tweetText">Recommended same-author post.</div>'
-                '<div data-testid="quoteTweet">Quoted <a href="https://x.com/alice">@alice</a>.</div></article>'
+                '<div data-testid="quoteTweet">Quoted <a href="https://x.com/alice/status/102">previous post</a>.</div></article>'
                 '<article data-testid="tweet"><div data-testid="User-Name"><span>Reply User</span>'
                 '<a href="https://x.com/replier/status/200"><time datetime="2026-08-11T01:06:00Z">Aug 11</time></a></div>'
                 '<div data-testid="tweetText">Unrelated reply.</div></article></main></body></html>',
@@ -1938,10 +1938,10 @@ class IntelligenceOperationTest(unittest.TestCase):
             product_fixture = directory / "product.html"
             product_fixture.write_text(
                 "<!doctype html><html><head><title>Plans</title><meta property=\"og:type\" content=\"website\"></head>"
-                '<body><header><h1>Plans</h1></header><main><article class="pricing-plan" itemscope '
+                '<body><header><h1>Plans</h1></header><main><div class="pricing-plan" itemscope '
                 'itemtype="https://schema.org/Product"><h1>Pro Plan</h1><p>'
                 + ("Pricing and subscription details. " * 30)
-                + "</p><p>Annual billing.</p><p>Choose this plan.</p></article></main></body></html>",
+                + "</p><p>Annual billing.</p><p>Choose this plan.</p></div></main></body></html>",
                 encoding="utf-8",
             )
             plain_article_fixture = directory / "plain-article.html"
