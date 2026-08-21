@@ -447,12 +447,16 @@ async function fetchFromPage(source, pageUrl, signal) {
   }
 }
 
+async function cancelResponseBody(response) {
+  try {
+    await response.body?.cancel?.();
+  } catch (_) {}
+}
+
 async function responseBlobWithin(response, limit) {
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > limit) {
-    try {
-      await response.body?.cancel?.();
-    } catch (_) {}
+    await cancelResponseBody(response);
     throw new Error("Capture media exceeds the 256 MiB per-file limit.");
   }
   if (!response.body?.getReader) {
@@ -484,35 +488,6 @@ async function responseBlobWithin(response, limit) {
   return new Blob(chunks, { type: response.headers.get("content-type") || "" });
 }
 
-async function preloadMedia(tabId, sources) {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    func: async (requested) => {
-      const wanted = new Set(requested);
-      const images = Array.from(document.images).filter((image) => {
-        const source = image.getAttribute("data-src") || image.getAttribute("data-original") || image.currentSrc || image.src;
-        try {
-          return wanted.has(new URL(source, document.baseURI).href);
-        } catch (_) {
-          return false;
-        }
-      });
-      for (const image of images) {
-        const source = image.getAttribute("data-src") || image.getAttribute("data-original");
-        if (source) image.src = source;
-      }
-      await Promise.race([
-        Promise.allSettled(images.map((image) => image.complete ? undefined : new Promise((resolve) => {
-          image.addEventListener("load", resolve, { once: true });
-          image.addEventListener("error", resolve, { once: true });
-        }))),
-        new Promise((resolve) => setTimeout(resolve, 4000))
-      ]);
-    },
-    args: [sources]
-  });
-}
-
 async function fetchAttachments(capture, pageUrl) {
   const assets = (capture.remote_assets || [])
     .filter((asset) => !asset.media_type.startsWith("video/"))
@@ -524,7 +499,10 @@ async function fetchAttachments(capture, pageUrl) {
     try {
       const response = await fetchFromPage(asset.url, pageUrl, signal);
       const contentType = (response.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
-      if (!response.ok || (contentType === "text/html" && asset.media_type !== "text/html")) continue;
+      if (!response.ok || (contentType === "text/html" && asset.media_type !== "text/html")) {
+        await cancelResponseBody(response);
+        continue;
+      }
       const bytes = await responseBlobWithin(
         response,
         Math.min(MAX_CAPTURE_ASSET_BYTES, MAX_CAPTURE_MEDIA_BYTES - capturedBytes)
@@ -542,9 +520,15 @@ async function snapshotFor(tab, capture) {
   if (["document", "image"].includes(capture.capture_kind)) {
     const source = capture.remote_assets?.[0]?.url || tab.url || capture.origin;
     const response = await fetchFromPage(source, tab.url || source, AbortSignal.timeout(30000));
-    if (!response.ok) throw new Error(`The current file could not be read (${response.status}).`);
+    if (!response.ok) {
+      await cancelResponseBody(response);
+      throw new Error(`The current file could not be read (${response.status}).`);
+    }
     const mediaType = (response.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
-    if (mediaType.startsWith("video/")) throw new Error("Video binaries are not saved.");
+    if (mediaType.startsWith("video/")) {
+      await cancelResponseBody(response);
+      throw new Error("Video binaries are not saved.");
+    }
     return {
       kind: "binary",
       mediaType,
@@ -555,11 +539,6 @@ async function snapshotFor(tab, capture) {
   if (capture.capture_kind === "video" && !(capture.remote_assets || []).length) {
     return { kind: "none", mediaType: "", bytes: new Uint8Array(), attachments: [] };
   }
-  const imageSources = (capture.remote_assets || [])
-    .filter((asset) => asset.media_type.startsWith("image/") || asset.name.startsWith("images/"))
-    .slice(0, MAX_CAPTURE_ATTACHMENTS)
-    .map((asset) => asset.url);
-  await preloadMedia(tab.id, imageSources);
   const attachments = await fetchAttachments(capture, tab.url);
   return { kind: "none", mediaType: "", bytes: new Uint8Array(), attachments };
 }

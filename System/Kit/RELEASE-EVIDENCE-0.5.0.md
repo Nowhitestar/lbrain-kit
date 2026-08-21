@@ -13,7 +13,7 @@ Date: 2026-08-21
 
 ## Final local verification
 
-- `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s System/Kit/tests -v`: 116 tests passed; 3 optional real-Chrome tests skipped because `LBRAIN_NODE_PATH` was not configured.
+- `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s System/Kit/tests -v` with `LBRAIN_NODE_PATH` configured to a local Playwright installation: 117 tests passed; all 3 real-Chrome tests executed with no skips.
 - `PYTHONDONTWRITEBYTECODE=1 python3 System/Kit/check.py`: 0 errors; the standalone public release repository reports only the expected missing-personal-`kit`-remote warning.
 - `PYTHONDONTWRITEBYTECODE=1 python3 System/Kit/Examples/Tracer/run.py`: Personal Intelligence trace passed.
 - Browser-extension JavaScript syntax checks, manifest JSON parsing, relevant Python compilation, and `git diff --check` passed.

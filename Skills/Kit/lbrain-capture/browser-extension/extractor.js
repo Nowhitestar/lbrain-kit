@@ -51,7 +51,8 @@
       || node.closest("picture")?.querySelector("source[srcset]")?.getAttribute("srcset")
       || "").split(",", 1)[0].trim().split(/\s+/, 1)[0];
     const source = url(
-    node.getAttribute("data-src")
+    node.getAttribute("data-lbrain-image-source")
+      || node.getAttribute("data-src")
       || node.getAttribute("data-original")
       || node.currentSrc
       || node.getAttribute("src")
@@ -62,11 +63,20 @@
   };
   const pinRenderedImages = (originals, copies) => originals.forEach((image, index) => {
     const source = imageUrl(image);
-    if (source) copies[index]?.setAttribute("src", source);
+    const copy = copies[index];
+    if (!copy) return;
+    copy.removeAttribute("src");
+    copy.removeAttribute("srcset");
+    copy.closest("picture")?.querySelectorAll("source[srcset]").forEach((candidate) => candidate.removeAttribute("srcset"));
+    copy.removeAttribute("data-lbrain-image-source");
+    if (source) copy.setAttribute("data-lbrain-image-source", source);
   });
   const renderedClone = (node) => {
     const clone = node.cloneNode(true);
-    pinRenderedImages(Array.from(node.querySelectorAll("img")), Array.from(clone.querySelectorAll("img")));
+    pinRenderedImages(
+      [...(node.matches?.("img") ? [node] : []), ...node.querySelectorAll("img")],
+      [...(clone.matches?.("img") ? [clone] : []), ...clone.querySelectorAll("img")]
+    );
     const originals = Array.from(node.querySelectorAll("*"));
     const copies = Array.from(clone.querySelectorAll("*"));
     originals.forEach((original, index) => {
@@ -440,7 +450,10 @@
     };
     for (const node of copy.querySelectorAll("*")) {
       for (const attribute of Array.from(node.attributes)) {
-        if (!allowed.has(attribute.name.toLowerCase())) node.removeAttribute(attribute.name);
+        if (!allowed.has(attribute.name.toLowerCase())
+          && !(node.tagName === "IMG" && attribute.name.toLowerCase() === "data-lbrain-image-source")) {
+          node.removeAttribute(attribute.name);
+        }
       }
       for (const attribute of ["href", "xlink:href"]) {
         if (!node.hasAttribute(attribute)) continue;
@@ -460,14 +473,18 @@
       if (node.hasAttribute("src") || node.tagName === "IMG") {
         const videoSource = node.tagName === "VIDEO" || node.closest("video");
         const value = videoSource ? "" : safeUrl(node.tagName === "IMG" ? imageUrl(node) : node.getAttribute("src"));
-        if (value) node.setAttribute("src", value);
-        else node.removeAttribute("src");
+        node.removeAttribute("src");
+        if (node.tagName === "IMG") {
+          node.removeAttribute("data-lbrain-image-source");
+          if (value) node.setAttribute("data-lbrain-image-source", value);
+        }
       }
     }
     const escape = (value) => value.replace(/[&<>"']/g, (character) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
     })[character]);
-    return `<!doctype html>\n<html lang="${escape(document.documentElement.lang || "")}"><head><meta charset="utf-8"><title>${escape(title)}</title></head><body>${copy.outerHTML}</body></html>`;
+    const body = copy.outerHTML.replace(/\sdata-lbrain-image-source=/g, " src=");
+    return `<!doctype html>\n<html lang="${escape(document.documentElement.lang || "")}"><head><meta charset="utf-8"><title>${escape(title)}</title></head><body>${body}</body></html>`;
   }
 
   function extract(scope = "page") {

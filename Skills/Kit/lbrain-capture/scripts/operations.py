@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import resource
 import shutil
 import subprocess
 import sys
@@ -17,7 +18,7 @@ import zipfile
 from contextlib import contextmanager
 from datetime import date
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO, Iterator
+from typing import Any, BinaryIO, Callable, Iterator
 from urllib.parse import quote
 
 
@@ -118,17 +119,29 @@ def reject_binary_secret_file(root: Path, path: Path, media_type: str) -> None:
         scan(source)
     if media_type == "application/pdf" and (pdftotext := local_tool("pdftotext")):
         try:
-            with tempfile.TemporaryFile() as output:
-                result = subprocess.run(
-                    [pdftotext, "-layout", str(path), "-"],
-                    stdout=output,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                    timeout=120,
-                )
-                if result.returncode == 0:
+            with tempfile.TemporaryFile(dir=path.parent) as output:
+                try:
+                    result = subprocess.run(
+                        [pdftotext, "-layout", str(path), "-"],
+                        stdout=output,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                        timeout=120,
+                        preexec_fn=capture_subprocess_file_limit(
+                            path.parent,
+                            MAX_EXTRACTED_TEXT_BYTES + 1,
+                            require_maximum=True,
+                        ),
+                    )
+                finally:
+                    ensure_capture_disk_reserve(path.parent)
+                output.seek(0, os.SEEK_END)
+                output_size = output.tell()
+                if result.returncode == 0 or output_size > MAX_EXTRACTED_TEXT_BYTES:
                     output.seek(0)
                     scan(output)
+                if output_size > MAX_EXTRACTED_TEXT_BYTES:
+                    raise OperationError("PDF text inspection exceeds the safe limit")
         except (OSError, subprocess.TimeoutExpired):
             pass
     if not zipfile.is_zipfile(path):
@@ -939,8 +952,53 @@ def verified_staged_assets(
 MAX_EXTRACTED_TEXT_BYTES = 8 * 1024 * 1024
 MAX_OCR_PAGES = 100
 MAX_OCR_SECONDS = 10 * 60
-OCR_DISK_RESERVE_BYTES = 256 * 1024 * 1024
+MAX_OCR_PAGE_BYTES = 128 * 1024 * 1024
 CAPTURE_DISK_RESERVE_BYTES = 512 * 1024 * 1024
+MAX_CAPTURE_HTML_BYTES = 32 * 1024 * 1024
+
+
+def ensure_capture_disk_reserve(directory: Path, additional: int = 0) -> None:
+    if additional < 0 or additional + CAPTURE_DISK_RESERVE_BYTES > shutil.disk_usage(directory).free:
+        raise OperationError("not enough disk space for Capture Bundle")
+
+
+def capture_subprocess_file_limit(
+    directory: Path, maximum: int, *, require_maximum: bool = False
+) -> Callable[[], None]:
+    ensure_capture_disk_reserve(directory, 1)
+    available = shutil.disk_usage(directory).free - CAPTURE_DISK_RESERVE_BYTES
+    if available < 1 or (require_maximum and available < maximum):
+        raise OperationError("not enough disk space for Capture Bundle")
+    _, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    if require_maximum and hard != resource.RLIM_INFINITY and hard < maximum:
+        raise OperationError("PDF text inspection cannot enforce its safe limit")
+    limit = min(available, maximum)
+    if hard != resource.RLIM_INFINITY:
+        limit = min(limit, hard)
+
+    def apply() -> None:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+
+    return apply
+
+
+def write_capture_chunk(output: BinaryIO, body: bytes) -> None:
+    if not body:
+        return
+    ensure_capture_disk_reserve(Path(str(output.name)).resolve().parent, len(body))
+    output.write(body)
+    output.flush()
+
+
+def copy_capture_file(source: Path, destination: Path) -> None:
+    with source.open("rb") as input_file, destination.open("wb") as output:
+        for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+            write_capture_chunk(output, chunk)
+
+
+def write_capture_text(path: Path, content: str) -> None:
+    with path.open("wb") as output:
+        write_capture_chunk(output, content.encode("utf-8"))
 
 
 def limited_text(source: BinaryIO, limit: int = MAX_EXTRACTED_TEXT_BYTES) -> tuple[str, bool]:
@@ -966,14 +1024,20 @@ def local_pdf_text(path: Path) -> tuple[str, str]:
     pdftotext = local_tool("pdftotext")
     if pdftotext:
         try:
-            with tempfile.TemporaryFile() as output:
-                result = subprocess.run(
-                    [pdftotext, "-layout", str(path), "-"],
-                    stdout=output,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                    timeout=120,
-                )
+            with tempfile.TemporaryFile(dir=path.parent) as output:
+                try:
+                    result = subprocess.run(
+                        [pdftotext, "-layout", str(path), "-"],
+                        stdout=output,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                        timeout=120,
+                        preexec_fn=capture_subprocess_file_limit(
+                            path.parent, MAX_EXTRACTED_TEXT_BYTES + 1
+                        ),
+                    )
+                finally:
+                    ensure_capture_disk_reserve(path.parent)
                 output.seek(0)
                 extracted, truncated = limited_text(output)
             if result.returncode == 0 and extracted.strip():
@@ -993,21 +1057,23 @@ def local_pdf_text(path: Path) -> tuple[str, str]:
             page_number = 1
             deadline = time.monotonic() + MAX_OCR_SECONDS
             while remaining > 0 and page_number <= MAX_OCR_PAGES and time.monotonic() < deadline:
-                if shutil.disk_usage(temporary).free < OCR_DISK_RESERVE_BYTES:
-                    truncated = True
-                    break
+                directory = Path(temporary)
                 page = prefix.with_suffix(".png")
                 try:
-                    rendered = subprocess.run(
-                        [
-                            pdftoppm, "-f", str(page_number), "-l", str(page_number),
-                            "-singlefile", "-scale-to", "4000", "-png", str(path), str(prefix),
-                        ],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        check=False,
-                        timeout=min(120, max(deadline - time.monotonic(), 0.001)),
-                    )
+                    try:
+                        rendered = subprocess.run(
+                            [
+                                pdftoppm, "-f", str(page_number), "-l", str(page_number),
+                                "-singlefile", "-scale-to", "4000", "-png", str(path), str(prefix),
+                            ],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            check=False,
+                            timeout=min(120, max(deadline - time.monotonic(), 0.001)),
+                            preexec_fn=capture_subprocess_file_limit(directory, MAX_OCR_PAGE_BYTES),
+                        )
+                    finally:
+                        ensure_capture_disk_reserve(directory)
                 except subprocess.TimeoutExpired:
                     truncated = True
                     break
@@ -1016,15 +1082,19 @@ def local_pdf_text(path: Path) -> tuple[str, str]:
                 if time.monotonic() >= deadline:
                     truncated = True
                     break
-                with tempfile.TemporaryFile() as output:
+                with tempfile.TemporaryFile(dir=directory) as output:
                     try:
-                        result = subprocess.run(
-                            [tesseract, str(page), "stdout"],
-                            stdout=output,
-                            stderr=subprocess.DEVNULL,
-                            check=False,
-                            timeout=min(120, max(deadline - time.monotonic(), 0.001)),
-                        )
+                        try:
+                            result = subprocess.run(
+                                [tesseract, str(page), "stdout"],
+                                stdout=output,
+                                stderr=subprocess.DEVNULL,
+                                check=False,
+                                timeout=min(120, max(deadline - time.monotonic(), 0.001)),
+                                preexec_fn=capture_subprocess_file_limit(directory, remaining + 1),
+                            )
+                        finally:
+                            ensure_capture_disk_reserve(directory)
                     except subprocess.TimeoutExpired:
                         truncated = True
                         break
@@ -1346,35 +1416,36 @@ def restore_preserved_links(
     snapshot = next((asset for asset in assets if asset["placeholder"] == "lbrain-asset://html-snapshot"), None)
     if snapshot is not None and resolved:
         source = Path(snapshot["_source"])
+        if source.stat().st_size > MAX_CAPTURE_HTML_BYTES:
+            raise OperationError("saved HTML snapshot exceeds the 32 MiB recovery limit")
         replacements = {
             missing_html.encode(): f"../{quote(str(by_placeholder[placeholder]['name']), safe='/')}".encode()
             for placeholder, _, _, missing_html in failures
             if placeholder in by_placeholder
         }
+        body = source.read_bytes()
         for old, new in replacements.items():
+            body = body.replace(old, new)
+        temporary: Path | None = None
+        try:
             with tempfile.NamedTemporaryFile(dir=source.parent, delete=False) as target:
                 temporary = Path(target.name)
-                tail = b""
-                with source.open("rb") as current:
-                    for chunk in iter(lambda: current.read(64 * 1024), b""):
-                        body = tail + chunk
-                        boundary = max(0, len(body) - len(old) + 1)
-                        offset = 0
-                        while True:
-                            found = body.find(old, offset)
-                            if found < 0 or found >= boundary:
-                                break
-                            target.write(body[offset:found])
-                            target.write(new)
-                            offset = found + len(old)
-                        safe = max(offset, boundary)
-                        target.write(body[offset:safe])
-                        tail = body[safe:]
-                    target.write(tail.replace(old, new))
-            os.replace(temporary, source)
-        snapshot["size"] = source.stat().st_size
-        snapshot["sha256"] = file_digest(source)
+                write_capture_chunk(target, body)
+            snapshot["_source"] = temporary
+            snapshot["_cleanup_source"] = True
+            snapshot["size"] = temporary.stat().st_size
+            snapshot["sha256"] = file_digest(temporary)
+        except Exception:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+            raise
     return content, resolved
+
+
+def cleanup_capture_sources(assets: list[dict[str, Any]]) -> None:
+    for asset in assets:
+        if asset.get("_cleanup_source") is True:
+            Path(asset["_source"]).unlink(missing_ok=True)
 
 
 def build_bundle_assets(
@@ -1385,18 +1456,19 @@ def build_bundle_assets(
 ) -> tuple[Path, Path, str, list[str]]:
     relative = PurePosixPath("Inbox/Captures/_assets") / capture_id / f"v{version}"
     final = root.joinpath(*relative.parts)
-    assert_safe_target(root, final / "manifest.json")
-    final.parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(tempfile.mkdtemp(prefix=f".v{version}.", dir=final.parent))
+    temporary: Path | None = None
     copied: list[str] = []
     try:
+        assert_safe_target(root, final / "manifest.json")
+        final.parent.mkdir(parents=True, exist_ok=True)
+        temporary = Path(tempfile.mkdtemp(prefix=f".v{version}.", dir=final.parent))
         for asset in assets:
             source = Path(asset["_source"])
             if source.stat().st_size != asset["size"] or file_digest(source) != asset["sha256"]:
                 raise OperationError("staged asset does not match its declared size and SHA-256")
             destination = temporary / "files" / Path(str(asset["name"]))
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, destination)
+            copy_capture_file(source, destination)
             copied.append((relative / "files" / str(asset["name"])).as_posix())
         manifest = {
             "schema": "lbrain.capture-assets.v1",
@@ -1407,15 +1479,18 @@ def build_bundle_assets(
                 for asset in assets
             ],
         }
-        (temporary / "manifest.json").write_text(
+        write_capture_text(
+            temporary / "manifest.json",
             json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
         )
     except Exception:
-        shutil.rmtree(temporary, ignore_errors=True)
+        if temporary is not None:
+            shutil.rmtree(temporary, ignore_errors=True)
         if final.parent.is_dir() and not any(final.parent.iterdir()):
             final.parent.rmdir()
         raise
+    finally:
+        cleanup_capture_sources(assets)
     manifest_path = (relative / "manifest.json").as_posix()
     return temporary, final, manifest_path, [manifest_path, *copied]
 
@@ -1515,6 +1590,7 @@ def capture_bundle(
     if pre_media_status not in {None, "complete", "partial", "failed"}:
         raise OperationError("pre_media_extraction_status is invalid")
     assets = verified_staged_assets(asset_manifest(payload), staging_root)
+    ensure_capture_disk_reserve(root)
     for asset in assets:
         media_type = str(asset["media_type"]).lower()
         if media_type.startswith("text/") or media_type in {
@@ -1616,47 +1692,56 @@ def capture_bundle(
             content, resolved_failures = restore_preserved_links(
                 content, assets, preserved_assets, failed_remote_assets
             )
-            preserved_content, preserved_incomplete = enriched_bundle_content("", preserved_assets)
-            content = "\n\n".join(item for item in (content, preserved_content) if item).strip()
-            if (
-                pre_media_status == "complete"
-                and len(resolved_failures) == len(failed_remote_assets)
-                and not enrichment_incomplete
-                and not preserved_incomplete
-            ):
-                extraction_status = "complete"
-            if preserved_incomplete and extraction_status == "complete":
-                extraction_status = "partial"
-            reject_secrets(
-                root,
-                *(str(asset[key]) for asset in preserved_assets for key in ("name", "media_type", "placeholder")),
-            )
-            normalized_assets = [
-                {key: asset[key] for key in ("name", "sha256", "size", "media_type")}
-                for asset in assets
-            ]
-            content_hash = digest(
-                json.dumps(
-                    {
-                        "title": title,
-                        "author": author,
-                        "published_at": published_at,
-                        "content_markdown": content,
-                        "assets": normalized_assets,
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
+            try:
+                preserved_content, preserved_incomplete = enriched_bundle_content("", preserved_assets)
+                content = "\n\n".join(item for item in (content, preserved_content) if item).strip()
+                if (
+                    pre_media_status == "complete"
+                    and len(resolved_failures) == len(failed_remote_assets)
+                    and not enrichment_incomplete
+                    and not preserved_incomplete
+                ):
+                    extraction_status = "complete"
+                if preserved_incomplete and extraction_status == "complete":
+                    extraction_status = "partial"
+                reject_secrets(
+                    root,
+                    *(
+                        str(asset[key])
+                        for asset in preserved_assets
+                        for key in ("name", "media_type", "placeholder")
+                    ),
                 )
+                normalized_assets = [
+                    {key: asset[key] for key in ("name", "sha256", "size", "media_type")}
+                    for asset in assets
+                ]
+                content_hash = digest(
+                    json.dumps(
+                        {
+                            "title": title,
+                            "author": author,
+                            "published_at": published_at,
+                            "content_markdown": content,
+                            "assets": normalized_assets,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+            except Exception:
+                cleanup_capture_sources(assets)
+                raise
+        try:
+            version = frontmatter_number(recovery_head, "capture_version")
+            previous = frontmatter_text(recovery_head, "previous_version")
+            temporary, asset_directory, manifest_path, asset_paths = build_bundle_assets(
+                root, capture_id, version, assets
             )
-        version = frontmatter_number(recovery_head, "capture_version")
-        previous = frontmatter_text(recovery_head, "previous_version")
-        required_bytes = sum(int(asset["size"]) for asset in assets) + len(content.encode("utf-8")) + 4096
-        if shutil.disk_usage(root).free < required_bytes + CAPTURE_DISK_RESERVE_BYTES:
-            raise OperationError("not enough disk space for Capture Bundle")
-        temporary, asset_directory, manifest_path, asset_paths = build_bundle_assets(
-            root, capture_id, version, assets
-        )
+        except Exception:
+            cleanup_capture_sources(assets)
+            raise
         try:
             rendered = render_bundle(
                 title,
@@ -1690,6 +1775,7 @@ def capture_bundle(
             os.replace(asset_directory, backup)
             os.replace(temporary, asset_directory)
             applied_asset_digest = directory_digest(asset_directory)
+            ensure_capture_disk_reserve(root, len(recovered.encode("utf-8")))
             atomic_write(root, recovery_note, recovered, existing)
             note_written = True
             valid, message = validate(root)
@@ -1753,9 +1839,6 @@ def capture_bundle(
 
     version = max((item[0] for item in versions), default=0) + 1
     previous = versions[-1][2].relative_to(root).as_posix() if versions else ""
-    required_bytes = sum(int(asset["size"]) for asset in assets) + len(content.encode("utf-8")) + 4096
-    if shutil.disk_usage(root).free < required_bytes + CAPTURE_DISK_RESERVE_BYTES:
-        raise OperationError("not enough disk space for Capture Bundle")
     asset_directory: Path | None = None
     asset_digest: str | None = None
     note: Path | None = None
@@ -1788,6 +1871,7 @@ def capture_bundle(
             capture_note,
         )
         reject_secrets(root, rendered)
+        ensure_capture_disk_reserve(root, len(rendered.encode("utf-8")))
         atomic_write(root, note, rendered, None)
         valid, message = validate(root)
         if not valid:

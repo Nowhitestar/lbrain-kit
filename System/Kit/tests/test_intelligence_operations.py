@@ -3511,11 +3511,11 @@ const capture={schema:"lbrain.capture.v1",title:"Recovery",summary:"Recovery",or
 
     def test_extension_caps_attachment_fetch_candidates(self) -> None:
         script = r'''
-const fs=require("fs");let fetches=0,preloaded=0;
+const fs=require("fs");let fetches=0,scriptCalls=0;
 global.fetch=async()=>{fetches++;throw new Error("offline")};
 global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}},
   onConnect:{addListener(){}},lastError:null},contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},
-  action:{onClicked:{addListener(){}}},scripting:{async executeScript(options){preloaded=options.args[0].length}},
+  action:{onClicked:{addListener(){}}},scripting:{async executeScript(){scriptCalls++}},
   windows:{onRemoved:{addListener(){}}},notifications:{onButtonClicked:{addListener(){}}}};
 eval(fs.readFileSync(process.argv[1],"utf8"));
 const remote_assets=Array.from({length:300},(_,index)=>({id:`image-${index}`,url:`https://cdn.invalid/${index}.png`,
@@ -3524,7 +3524,7 @@ const remote_assets=Array.from({length:300},(_,index)=>({id:`image-${index}`,url
   summary:"Summary",preview_characters:10,remote_assets};
 const preview=LBrainCaptureWorker.previewFor(capture);
 const snapshot=await LBrainCaptureWorker.snapshotFor({id:7,url:capture.origin},capture);
-console.log(JSON.stringify({fetches,preloaded,attachments:snapshot.attachments.length,media:preview.details[2][1]}))})()
+console.log(JSON.stringify({fetches,scriptCalls,attachments:snapshot.attachments.length,media:preview.details[2][1]}))})()
   .catch(reason=>{console.error(reason);process.exit(1)});
 '''
         result = subprocess.run(
@@ -3536,16 +3536,34 @@ console.log(JSON.stringify({fetches,preloaded,attachments:snapshot.attachments.l
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             json.loads(result.stdout),
-            {"fetches": 256, "preloaded": 256, "attachments": 0, "media": "256 张图片，0 个文档/字幕"},
+            {"fetches": 256, "scriptCalls": 0, "attachments": 0, "media": "256 张图片，0 个文档/字幕"},
         )
+
+    def test_extractor_keeps_cloned_image_urls_inert_until_serialization(self) -> None:
+        extractor = (CAPTURE_EXTENSION / "extractor.js").read_text(encoding="utf-8")
+        pin = extractor[
+            extractor.index("const pinRenderedImages") : extractor.index("const renderedClone")
+        ]
+        snapshot = extractor[
+            extractor.index("function htmlSnapshot") : extractor.index("function extract")
+        ]
+        self.assertIn('copy.removeAttribute("src")', pin)
+        self.assertNotIn('setAttribute("src"', pin)
+        self.assertNotIn('node.setAttribute("src"', snapshot)
+        self.assertIn('copy.outerHTML.replace(/\\sdata-lbrain-image-source=/g, " src=")', snapshot)
 
     def test_extension_bounds_media_before_materializing_or_connecting(self) -> None:
         script = r'''
-const fs=require("fs");let headerReads=0,headerCancelled=false,cancelled=false,released=false,nativeConnections=0;
-global.fetch=async()=>({ok:true,headers:{get(name){
+const fs=require("fs");let headerReads=0,headerCancelled=false,cancelled=false,released=false,nativeConnections=0,rejectedCancelled=0;
+const rejected=(ok,status,contentType)=>({ok,status,headers:{get(name){return name==="content-type"?contentType:null}},body:{async cancel(){rejectedCancelled++}}});
+global.fetch=async(source)=>{
+  if(String(source).includes("missing"))return rejected(false,404,"application/pdf");
+  if(String(source).includes("unexpected"))return rejected(true,200,"text/html");
+  if(String(source).includes("video"))return rejected(true,200,"video/mp4");
+  return{ok:true,headers:{get(name){
   if(name==="content-type")return"application/pdf";
   if(name==="content-length")return"268435457";
-  return null}},body:{async cancel(){headerCancelled=true},getReader(){headerReads++;throw new Error("oversized body was read")}}});
+  return null}},body:{async cancel(){headerCancelled=true},getReader(){headerReads++;throw new Error("oversized body was read")}}}};
 global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}},
   onConnect:{addListener(){}},lastError:null,connectNative(){nativeConnections++;throw new Error("unexpected native connection")}},
   contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},
@@ -3561,12 +3579,27 @@ const streamed={headers:{get(name){return name==="content-type"?"application/oct
   {capture_kind:"document",origin:"https://files.invalid/report.pdf",remote_assets:[]}
 ));
 const bounded=await error(LBrainCaptureWorker.responseBlobWithin(streamed,4));
+const attachments=await LBrainCaptureWorker.snapshotFor(
+  {id:8,url:"https://article.invalid/post"},
+  {capture_kind:"article",origin:"https://article.invalid/post",remote_assets:[
+    {id:"missing",url:"https://cdn.invalid/missing.png",name:"images/missing.png",media_type:"image/png"},
+    {id:"unexpected",url:"https://cdn.invalid/unexpected.png",name:"images/unexpected.png",media_type:"image/png"}
+  ]}
+);
+const missing=await error(LBrainCaptureWorker.snapshotFor(
+  {id:9,url:"https://files.invalid/missing.pdf"},
+  {capture_kind:"document",origin:"https://files.invalid/missing.pdf",remote_assets:[]}
+));
+const video=await error(LBrainCaptureWorker.snapshotFor(
+  {id:10,url:"https://files.invalid/video.mp4"},
+  {capture_kind:"document",origin:"https://files.invalid/video.mp4",remote_assets:[]}
+));
 const oversized={size:268435457,reader:{async read(){return{done:true}},releaseLock(){}}};
 const preflight=await error(LBrainCaptureWorker.streamCapture(
   {schema:"lbrain.capture.v1"},
   {kind:"binary",mediaType:"application/pdf",bytes:oversized,attachments:[]}
 ));
-console.log(JSON.stringify({direct,bounded,headerReads,headerCancelled,cancelled,released,nativeConnections,preflight}))})()
+console.log(JSON.stringify({direct,bounded,attachments:attachments.attachments.length,missing,video,rejectedCancelled,headerReads,headerCancelled,cancelled,released,nativeConnections,preflight}))})()
   .catch(reason=>{console.error(reason);process.exit(1)});
 '''
         result = subprocess.run(
@@ -3580,6 +3613,10 @@ console.log(JSON.stringify({direct,bounded,headerReads,headerCancelled,cancelled
         self.assertIn("256 MiB", output["direct"])
         self.assertIn("256 MiB", output["bounded"])
         self.assertIn("256 MiB", output["preflight"])
+        self.assertEqual(output["attachments"], 0)
+        self.assertIn("could not be read (404)", output["missing"])
+        self.assertEqual(output["video"], "Video binaries are not saved.")
+        self.assertEqual(output["rejectedCancelled"], 4)
         self.assertEqual(
             {key: output[key] for key in ("headerReads", "headerCancelled", "cancelled", "released", "nativeConnections")},
             {"headerReads": 0, "headerCancelled": True, "cancelled": True, "released": True, "nativeConnections": 0},
@@ -3672,7 +3709,127 @@ console.log(JSON.stringify({direct,bounded,headerReads,headerCancelled,cancelled
             "assets": [],
         }
         with tempfile.TemporaryDirectory() as temporary:
-            root = self.copy_repo(Path(temporary))
+            base = Path(temporary)
+            scratch = base / "restore"
+            scratch.mkdir()
+            snapshot = scratch / "page.html"
+            original = b'<img src="about:blank#lbrain-missing-image">'
+            snapshot.write_bytes(original)
+            assets = [{
+                "placeholder": "lbrain-asset://html-snapshot",
+                "_source": snapshot,
+                "size": len(original),
+                "sha256": hashlib.sha256(original).hexdigest(),
+            }]
+            preserved = [{
+                "placeholder": "lbrain-asset://image",
+                "name": "images/image.png",
+            }]
+            failures = [(
+                "lbrain-asset://image",
+                "https://cdn.invalid/image.png",
+                "lbrain-missing://image",
+                "about:blank#lbrain-missing-image",
+            )]
+            with mock.patch.object(
+                operations.shutil,
+                "disk_usage",
+                return_value=mock.Mock(free=operations.CAPTURE_DISK_RESERVE_BYTES),
+            ), self.assertRaisesRegex(operations.OperationError, "disk space"):
+                operations.restore_preserved_links("lbrain-missing://image", assets, preserved, failures)
+            self.assertEqual(snapshot.read_bytes(), original)
+            self.assertEqual(list(scratch.iterdir()), [snapshot])
+
+            with mock.patch.object(
+                operations.shutil,
+                "disk_usage",
+                return_value=mock.Mock(
+                    free=operations.CAPTURE_DISK_RESERVE_BYTES + len(original)
+                ),
+            ):
+                operations.restore_preserved_links(
+                    "lbrain-missing://image", assets, preserved, failures
+                )
+            generated = Path(assets[0]["_source"])
+            self.assertTrue(generated.is_file())
+            with mock.patch.object(
+                operations,
+                "assert_safe_target",
+                side_effect=operations.OperationError("unsafe target"),
+            ), self.assertRaisesRegex(operations.OperationError, "unsafe target"):
+                operations.build_bundle_assets(base, "a" * 64, 1, assets)
+            self.assertFalse(generated.exists())
+            self.assertEqual(snapshot.read_bytes(), original)
+            self.assertEqual(list(scratch.iterdir()), [snapshot])
+
+            limited = base / "limited.bin"
+            with mock.patch.object(
+                operations.shutil,
+                "disk_usage",
+                return_value=mock.Mock(
+                    free=operations.CAPTURE_DISK_RESERVE_BYTES + 4096
+                ),
+            ):
+                apply_limit = operations.capture_subprocess_file_limit(base, 1024)
+            with limited.open("wb") as output:
+                subprocess.run(
+                    [sys.executable, "-c", "import os; os.write(1, b'x' * 4096)"],
+                    stdout=output,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    preexec_fn=apply_limit,
+                )
+            self.assertLessEqual(limited.stat().st_size, 1024)
+
+            pdf = base / "fixture.pdf"
+            pdf.write_bytes(b"%PDF synthetic fixture")
+            with mock.patch.object(
+                operations.shutil,
+                "disk_usage",
+                return_value=mock.Mock(free=operations.CAPTURE_DISK_RESERVE_BYTES),
+            ), mock.patch.object(
+                operations, "local_tool", return_value="/usr/bin/false"
+            ), mock.patch.object(
+                operations.subprocess, "run"
+            ) as run, self.assertRaisesRegex(operations.OperationError, "disk space"):
+                operations.local_pdf_text(pdf)
+            run.assert_not_called()
+
+            root = self.copy_repo(base)
+            with mock.patch.object(
+                operations.shutil,
+                "disk_usage",
+                return_value=mock.Mock(
+                    free=operations.CAPTURE_DISK_RESERVE_BYTES + 1024
+                ),
+            ), mock.patch.object(
+                operations, "local_tool", return_value="/usr/bin/false"
+            ), mock.patch.object(
+                operations.subprocess, "run"
+            ) as inspect_run, self.assertRaisesRegex(operations.OperationError, "disk space"):
+                operations.reject_binary_secret_file(root, pdf, "application/pdf")
+            inspect_run.assert_not_called()
+
+            with mock.patch.object(
+                operations.shutil,
+                "disk_usage",
+                return_value=mock.Mock(
+                    free=(
+                        operations.CAPTURE_DISK_RESERVE_BYTES
+                        + operations.MAX_EXTRACTED_TEXT_BYTES
+                        + 1
+                    )
+                ),
+            ), mock.patch.object(
+                operations.resource, "getrlimit", return_value=(1024, 1024)
+            ), mock.patch.object(
+                operations, "local_tool", return_value="/usr/bin/false"
+            ), mock.patch.object(
+                operations.subprocess, "run"
+            ) as limited_run, self.assertRaisesRegex(operations.OperationError, "safe limit"):
+                operations.reject_binary_secret_file(root, pdf, "application/pdf")
+            limited_run.assert_not_called()
+
             with mock.patch.object(
                 operations.shutil,
                 "disk_usage",
