@@ -5,26 +5,48 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>确认保存到 LBrain</title>
   <style>
-    :root { color-scheme: light dark; font: 15px/1.5 system-ui, sans-serif; }
-    body { margin: 0; padding: 24px; }
-    h1 { margin: 0 0 8px; font-size: 20px; }
-    #summary { margin: 0 0 20px; color: #666; }
-    dl { display: grid; grid-template-columns: 80px 1fr; gap: 10px 12px; margin: 0; }
-    dt { color: #777; }
+    :root { color-scheme: light dark; font: 14px/1.5 system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { width: 360px; max-height: 560px; margin: 0; padding: 20px; overflow: auto; }
+    h1 { margin: 0 0 8px; font-size: 18px; line-height: 1.35; }
+    p { margin: 0; }
+    #summary, #status-message { color: #666; }
+    h1, #summary, #status-message { overflow-wrap: anywhere; }
+    #summary { margin-bottom: 18px; }
+    #status { min-height: 112px; display: grid; align-content: center; justify-items: center; text-align: center; }
+    #status-title { margin-top: 12px; }
+    #spinner { width: 24px; height: 24px; border: 3px solid #bbb; border-top-color: #315efb; border-radius: 50%; animation: spin .8s linear infinite; }
+    body:not([data-phase="preparing"]):not([data-phase="saving"]) #spinner { display: none; }
+    body[data-phase="complete"] #status-title { color: #16803c; }
+    body[data-phase="failed"] #status-title { color: #c73b33; }
+    dl { display: grid; grid-template-columns: 78px 1fr; gap: 9px 12px; margin: 0; }
+    dt { color: #6f6f6f; }
     dd { margin: 0; overflow-wrap: anywhere; }
-    footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 28px; }
-    button { min-width: 88px; padding: 9px 14px; border: 1px solid #aaa; border-radius: 8px; font: inherit; }
+    footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+    button { min-width: 82px; padding: 8px 13px; border: 1px solid #aaa; border-radius: 8px; font: inherit; }
     #save { color: white; background: #315efb; border-color: #315efb; }
-    @media (prefers-color-scheme: dark) { #summary, dt { color: #aaa; } }
+    [hidden] { display: none !important; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { #spinner { animation: none; } }
+    @media (prefers-color-scheme: dark) {
+      #summary, #status-message, dt { color: #aaa; }
+      body[data-phase="complete"] #status-title { color: #55d98a; }
+      body[data-phase="failed"] #status-title { color: #ff7b72; }
+    }
   </style>
 </head>
-<body>
-  <main>
+<body data-phase="preparing">
+  <section id="status" role="status" aria-live="polite">
+    <div id="spinner" aria-hidden="true"></div>
+    <h1 id="status-title">正在读取当前页面…</h1>
+    <p id="status-message">识别正文和可保存的媒体。</p>
+  </section>
+  <main id="preview" hidden>
     <h1 id="title">准备保存…</h1>
     <p id="summary"></p>
     <dl id="details"></dl>
   </main>
-  <footer>
+  <footer id="actions" hidden>
     <button id="cancel" type="button">取消</button>
     <button id="save" type="button">确认保存</button>
   </footer>

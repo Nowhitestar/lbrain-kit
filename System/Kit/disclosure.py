@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import ast
+import html
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 
 CONCRETE_SECRET_PATTERN = re.compile(
@@ -19,6 +21,7 @@ CONCRETE_SECRET_PATTERN = re.compile(
     r"|\bxox[baprs]-[A-Za-z0-9-]{10,}\b"
     r"|\bauthorization\s*:\s*basic\s+[A-Za-z0-9+/=]{12,})"
 )
+URL_PATTERN = re.compile(r"(?i)\bhttps?://[^\s<>\"']+")
 
 SHELL_REFERENCE_TEXT = (
     r"\$[A-Za-z_][A-Za-z0-9_]*"
@@ -1240,9 +1243,39 @@ def fence_language(info: str) -> str:
     return token.removeprefix(".")
 
 
+def contains_sensitive_url(text: str) -> bool:
+    def sensitive_key(key: str) -> bool:
+        normalized = key.casefold()
+        return (
+            normalized.startswith(("x-amz-", "x-goog-"))
+            or normalized in {
+                "sig", "policy", "key-pair-id", "auth", "auth_key", "code", "jwt",
+                "hmac", "hdnea", "hdnts",
+            }
+            or re.search(r"(?:^|[_-])(?:token|signature|credential|secret)$", normalized)
+            is not None
+        )
+
+    for raw_url in URL_PATTERN.findall(text):
+        try:
+            parsed = urlsplit(html.unescape(raw_url))
+            parameters = parse_qsl(parsed.query, keep_blank_values=True)
+            fragment = parsed.fragment
+            if "?" in fragment:
+                fragment = fragment.partition("?")[2]
+            fragment_parameters = parse_qsl(fragment, keep_blank_values=True) if "=" in fragment else []
+        except ValueError:
+            continue
+        if any((parsed.username, parsed.password)):
+            return True
+        if any(sensitive_key(key) for key, _ in [*parameters, *fragment_parameters]):
+            return True
+    return False
+
+
 def contains_secret(*values: str) -> bool:
     for text in values:
-        if CONCRETE_SECRET_PATTERN.search(text):
+        if CONCRETE_SECRET_PATTERN.search(text) or contains_sensitive_url(text):
             return True
         if assignments(text, CREDENTIAL_SUFFIXES):
             return True
@@ -1256,10 +1289,152 @@ def contains_runtime_state(*values: str) -> bool:
             "", "0", "''", '\"\"', "``", "...", "[...]",
         }
 
+    def runtime_values(value: str) -> list[str]:
+        found: list[str] = []
+        def visible_text(text: str) -> str:
+            clean = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+            clean = re.sub(r"\s+", " ", re.sub(r"<[^>]*>", "", clean)).strip()
+            return re.sub(r"\s*:\s*", ": ", clean)
+
+        def prose_heading(position: int, item: str) -> bool:
+            line_start = value.rfind("\n", 0, position) + 1
+            line_end = value.find("\n", position)
+            line_end = len(value) if line_end < 0 else line_end
+            line = value[line_start:line_end]
+            markdown = re.match(r"[ \t]{0,3}#{1,6}[ \t]+", line)
+            context = line[markdown.end(): position - line_start] if markdown else ""
+            tags = list(re.finditer(r"</?(h[1-6]|title)\b[^>]*>", value[:position], re.IGNORECASE))
+            closing = re.search(rf"</{tags[-1].group(1)}\s*>", value[position:], re.IGNORECASE) if tags else None
+            html = bool(
+                tags
+                and not tags[-1].group(0).startswith("</")
+                and closing
+            )
+            inline_reference = False
+            if not markdown and not html:
+                context = visible_text(line[: position - line_start])
+                section_headings = list(
+                    re.finditer(
+                        r"(?m)^[ \t]{0,3}#{1,6}[ \t]+(?P<title>[^\n]+)$",
+                        value[:line_start],
+                    )
+                )
+                reference_section = bool(
+                    section_headings
+                    and visible_text(section_headings[-1].group("title"))
+                    .rstrip(": ")
+                    .casefold()
+                    in {"reference", "references", "referenced", "see also", "further reading"}
+                )
+                citation = re.fullmatch(
+                    r"[ \t]*(?:[-*+]|\u2022)\s+"
+                    r"(?P<title>[^|<>\r\n]+?)\s+\\?\|\s+"
+                    r"(?P<byline>[^|<>\r\n]+?)\s*:\s*"
+                    r"\[(?P<url>https://[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?"
+                    r"(?:/[a-z0-9._~!$&'()*+,;=:@/-]*)?)\]"
+                    r"\((?P=url)\)\s*",
+                    line,
+                )
+                inline_reference = False
+                if reference_section and citation:
+                    offset = position - line_start
+                    byline = visible_text(citation.group("byline"))
+                    parsed_url = urlsplit(citation.group("url"))
+                    hostname = parsed_url.hostname or ""
+                    opaque_url_component = any(
+                        (
+                            re.fullmatch(r"[a-z0-9]{14,}", component)
+                            and re.search(r"\d", component)
+                        )
+                        or re.fullmatch(
+                            r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}",
+                            component,
+                        )
+                        for component in [*hostname.split("."), *parsed_url.path.split("/")]
+                    )
+                    unsafe_marker = re.compile(
+                        r"(?:^|[./_-])(?:opaque|runtime|checkpoint|token|secret|credential)"
+                        r"(?:$|[./_-])",
+                        re.IGNORECASE,
+                    )
+                    inline_reference = bool(
+                        citation.start("title") <= offset < citation.end("title")
+                        and "." in hostname
+                        and not any(label.startswith("xn--") for label in hostname.split("."))
+                        and not any(
+                            not label or label.startswith("-") or label.endswith("-")
+                            for label in hostname.split(".")
+                        )
+                        and not opaque_url_component
+                        and not unsafe_marker.search(byline)
+                        and not unsafe_marker.search(citation.group("url"))
+                        and not (
+                            re.fullmatch(r"\S+", byline)
+                            and (
+                                len(byline) >= 14
+                                or (re.search(r"\d", byline) and len(byline) >= 8)
+                            )
+                        )
+                        and not assignments(byline, CREDENTIAL_SUFFIXES | RUNTIME_SUFFIXES)
+                    )
+                if not inline_reference:
+                    return False
+            if markdown:
+                field = FIELD.match(value, position)
+                separator = field and re.match(r"(?:[ \t]|</?[^>]+>)*:", value[field.end():])
+                if field and separator:
+                    start = field.end() + separator.end()
+                    item = value[start:line_end]
+            if html:
+                context = value[tags[-1].end():position]
+                field = FIELD.match(value, position)
+                separator = field and re.match(r"(?:[ \t]|</?[^>]+>)*:", value[field.end():])
+                if field and separator and closing:
+                    start = field.end() + separator.end()
+                    item = value[start: position + closing.start()]
+            rendered = visible_text(item)
+            checked = re.split(r"\s*\\?\|\s*", rendered, maxsplit=1)[0].strip() if inline_reference else rendered
+            runtime_phrase = re.search(
+                r"\b(?:runtime\s+state|stored\s+(?:state|value|cursor|token)|pagination|"
+                r"resume\s+(?:from|using)|start\s+after|"
+                r"continue\s+(?:from|at|with)|fetch\s+using|request\s+for|token\s+value|"
+                r"(?:current|active|checkpoint|saved|continuation)\s+"
+                r"(?:state|value|cursor|token)|last\s+checkpoint|"
+                r"after\s+item|next\s+(?:page|request)|page\s*(?::|=)?\s*\d+|shard)\b",
+                f"{visible_text(context)} {rendered}" if inline_reference else checked,
+                re.IGNORECASE,
+            )
+            opaque_token = bool(
+                re.fullmatch(r"\S+", checked)
+                and (
+                    inline_reference
+                    or len(checked) >= 14
+                    or (re.search(r"\d", checked) and len(checked) >= 8)
+                )
+            )
+            return (
+                bool(visible_text(context) or rendered)
+                and not runtime_phrase
+                and not opaque_token
+            )
+
+        for item, position in assignments(value, RUNTIME_SUFFIXES, positions=True):
+            match = FIELD.match(value, position)
+            colon = match and re.match(r"(?:[ \t]|</?[^>]+>)*:", value[match.end():])
+            if (
+                match
+                and (match.group("name") or match.group("quoted_name") or "").casefold() == "cursor"
+                and colon
+                and prose_heading(position, item)
+            ):
+                continue
+            found.append(item)
+        return found
+
     return any(
         any(
             not placeholder(item)
-            for item in assignments(value, RUNTIME_SUFFIXES)
+            for item in runtime_values(value)
         )
         for value in values
     )
@@ -1271,7 +1446,7 @@ def contains_code_secret(
     python: bool = False,
 ) -> bool:
     for text in values:
-        if CONCRETE_SECRET_PATTERN.search(text):
+        if CONCRETE_SECRET_PATTERN.search(text) or contains_sensitive_url(text):
             return True
         embedded, truncated = nested_string_contents(text, shell, python)
         if truncated:
@@ -1364,10 +1539,18 @@ def contains_document_secret(*values: str) -> bool:
 def contains_document_runtime_state(*values: str) -> bool:
     for value in values:
         document = without_fenced_code(value)
+        rendered = re.sub(r"<!--.*?-->", "", document, flags=re.DOTALL)
+        rendered = re.sub(
+            r"</?(?:article|aside|blockquote|body|br|div|footer|header|li|main|nav|p|section|table|td|th|tr)\b[^>]*>",
+            "\n",
+            rendered,
+            flags=re.IGNORECASE,
+        )
+        rendered = re.sub(r"<(?!/?(?:h[1-6]|title)\b)[^>]*>", "", rendered, flags=re.IGNORECASE)
         embedded, truncated = nested_string_contents(document)
         if truncated:
             return True
-        if contains_runtime_state(document) or any(
+        if contains_runtime_state(document, rendered) or any(
             contains_runtime_state(content) for content in embedded
         ):
             return True

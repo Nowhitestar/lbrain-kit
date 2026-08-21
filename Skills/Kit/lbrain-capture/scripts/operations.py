@@ -56,6 +56,13 @@ def reject_secrets(root: Path, *values: str) -> None:
         raise OperationError("operation contains possible credentials or runtime state; remove or redact them")
 
 
+def reject_capture_secrets(root: Path, title: str, *values: str) -> None:
+    secret_check = load_kit_helper(root, "disclosure", "contains_document_secret")
+    if secret_check(title):
+        raise OperationError("operation contains possible credentials or runtime state; remove or redact them")
+    reject_secrets(root, f"# {title}", *values)
+
+
 def reject_secret_file(root: Path, path: Path) -> None:
     tail = ""
     try:
@@ -67,22 +74,49 @@ def reject_secret_file(root: Path, path: Path) -> None:
         raise OperationError("text Capture Bundle asset is not valid UTF-8") from error
 
 
+LOCAL_TOOL_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin")
+
+
+def local_tool(name: str) -> str | None:
+    if found := shutil.which(name):
+        return found
+    return shutil.which(name, path=os.pathsep.join(LOCAL_TOOL_DIRS))
+
+
 def reject_binary_secret_file(root: Path, path: Path, media_type: str) -> None:
+    concrete_check = load_kit_helper(root, "disclosure", "contains_concrete_secret")
+    field_pattern = load_kit_helper(root, "disclosure", "FIELD")
+    sensitive_suffixes = load_kit_helper(root, "disclosure", "CREDENTIAL_SUFFIXES") | load_kit_helper(
+        root, "disclosure", "RUNTIME_SUFFIXES"
+    )
+
+    def has_sensitive_field(value: str) -> bool:
+        return any(
+            any(
+                re.sub(r"[^a-z0-9]", "", (match.group("quoted_name") or match.group("name")).casefold()).endswith(
+                    suffix
+                )
+                for suffix in sensitive_suffixes
+            )
+            for match in field_pattern.finditer(value)
+        )
+
     def scan(source: BinaryIO) -> None:
         tail = b""
         for chunk in iter(lambda: source.read(128 * 1024), b""):
             body = tail + chunk
-            reject_secrets(
-                root,
+            values = (
                 body.decode("latin-1"),
                 body[: len(body) - len(body) % 2].decode("utf-16le", errors="ignore"),
                 body[1 : len(body) - (len(body) - 1) % 2].decode("utf-16le", errors="ignore"),
             )
+            if concrete_check(*values) or any(has_sensitive_field(value) for value in values):
+                reject_secrets(root, *values)
             tail = body[-128 * 1024:]
 
     with path.open("rb") as source:
         scan(source)
-    if media_type == "application/pdf" and (pdftotext := shutil.which("pdftotext")):
+    if media_type == "application/pdf" and (pdftotext := local_tool("pdftotext")):
         try:
             with tempfile.TemporaryFile() as output:
                 result = subprocess.run(
@@ -145,6 +179,20 @@ def required_text(payload: dict[str, Any], key: str) -> str:
 
 def yaml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+def markdown_plain_text(value: str) -> str:
+    clean = re.sub(r"([\\`*_\[\]<>!|~#])", r"\\\1", value)
+    clean = re.sub(r"(?m)^([ \t]{0,3})([=-]+)[ \t]*$", r"\1\\\2", clean)
+    clean = re.sub(r"(?m)^([ \t]{0,3})(~{3,})", r"\1\\\2", clean)
+    clean = re.sub(r"(?m)^ {4}", "&#32;   ", clean)
+    clean = re.sub(r"(?m)^\t", "&#9;", clean)
+    clean = re.sub(r"(?m)^([ \t]{0,3})([#>+-])(?=\s)", r"\1\\\2", clean)
+    return re.sub(r"(?m)^([ \t]{0,3}\d+)([.)])(?=\s)", r"\1\\\2", clean)
+
+
+def markdown_inline_text(value: str) -> str:
+    return markdown_plain_text(" ".join(value.split()))
 
 
 def managed_profile(value: object) -> str:
@@ -253,8 +301,16 @@ def validate(root: Path) -> tuple[bool, str]:
         capture_output=True,
         check=False,
     )
+    if result.returncode == 0:
+        return True, ""
+    result = subprocess.run(
+        [sys.executable, str(root / "System/Kit/check.py"), "--root", str(root)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
     output = (result.stdout + result.stderr).strip()
-    return result.returncode == 0, output
+    return False, output[-32_000:]
 
 
 def project_proposal(
@@ -620,15 +676,24 @@ def frontmatter_text(lines: list[str], key: str) -> str:
     return ""
 
 
+def split_note(value: str) -> tuple[list[str], str]:
+    if not value.startswith("---\n"):
+        raise OperationError("Capture Bundle is missing frontmatter")
+    closing = re.search(r"\n---(?:\n|\Z)", value[4:])
+    if closing is None:
+        raise OperationError("Capture Bundle frontmatter is incomplete")
+    end = 4 + closing.start()
+    return value[4:end].splitlines(), value[4 + closing.end() :]
+
+
 def existing_capture(root: Path, key: str, origin: str) -> Path | None:
     marker = f"capture_id: {key}"
     for directory in (root / "Inbox", root / "Knowledge/Sources"):
         for path in sorted(directory.rglob("*.md")):
             try:
-                head = path.read_text(encoding="utf-8").split("---", 2)[1]
-            except (IndexError, OSError, UnicodeError):
+                lines, _ = split_note(path.read_text(encoding="utf-8"))
+            except (OperationError, OSError, UnicodeError):
                 continue
-            lines = head.splitlines()
             legacy_origin = frontmatter_text(lines, "origin").strip().rstrip("/")
             if marker in lines or (origin and legacy_origin == origin.strip().rstrip("/")):
                 return path
@@ -637,8 +702,8 @@ def existing_capture(root: Path, key: str, origin: str) -> Path | None:
 
 def capture_frontmatter(path: Path) -> list[str]:
     try:
-        return path.read_text(encoding="utf-8").split("---", 2)[1].splitlines()
-    except (IndexError, OSError, UnicodeError) as error:
+        return split_note(path.read_text(encoding="utf-8"))[0]
+    except (OperationError, OSError, UnicodeError) as error:
         raise OperationError("existing capture is malformed") from error
 
 
@@ -657,7 +722,7 @@ def capture_create(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     note = note_value.strip()
     if not origin and not content:
         raise OperationError("capture requires an origin or content")
-    reject_secrets(root, title, summary, origin, content, note)
+    reject_capture_secrets(root, title, summary, origin, content, note)
 
     extraction_status = payload.get("extraction_status", "complete")
     if extraction_status not in {"complete", "partial", "failed"}:
@@ -670,7 +735,7 @@ def capture_create(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     stable_origin = origin or f"lbrain:user-provided/{capture_key('', content)}"
     legacy = existing_capture(root, capture_key(origin, content), origin)
     if legacy is not None and frontmatter_number(capture_frontmatter(legacy), "capture_version") == 0:
-        legacy_body = legacy.read_text(encoding="utf-8").split("---", 2)[-1]
+        _, legacy_body = split_note(legacy.read_text(encoding="utf-8"))
         legacy_body = re.sub(r"(?m)^# .+\n+", "", legacy_body, count=1)
         legacy_body = re.sub(r"(?m)^## Capture\s*\n+", "", legacy_body, count=1)
         provenance = list(re.finditer(r"(?m)^## Provenance notes\s*$", legacy_body))
@@ -897,7 +962,7 @@ def readable_subtitles(path: Path) -> tuple[str, bool]:
 
 
 def local_pdf_text(path: Path) -> tuple[str, str]:
-    pdftotext = shutil.which("pdftotext")
+    pdftotext = local_tool("pdftotext")
     if pdftotext:
         try:
             with tempfile.TemporaryFile() as output:
@@ -915,7 +980,7 @@ def local_pdf_text(path: Path) -> tuple[str, str]:
         except (OSError, subprocess.TimeoutExpired):
             pass
 
-    pdftoppm, tesseract = shutil.which("pdftoppm"), shutil.which("tesseract")
+    pdftoppm, tesseract = local_tool("pdftoppm"), local_tool("tesseract")
     if not pdftoppm or not tesseract:
         return "", "unavailable"
     try:
@@ -990,8 +1055,9 @@ def enriched_bundle_content(content: str, assets: list[dict[str, Any]]) -> tuple
         if media_type == "application/pdf":
             extracted, method = local_pdf_text(source)
             sections.append(
-                f"### Extracted PDF text — {name}\n\n- Extraction: {method}\n\n"
-                + (extracted or "_No searchable text could be produced; the original PDF is preserved._")
+                f"### Extracted PDF text — {markdown_inline_text(name)}\n\n- Extraction: {method}\n\n"
+                + (markdown_plain_text(extracted) if extracted else
+                   "_No searchable text could be produced; the original PDF is preserved._")
             )
             incomplete = incomplete or not extracted or method.endswith("-truncated")
         elif media_type in {"text/vtt", "application/x-subrip"}:
@@ -1000,11 +1066,19 @@ def enriched_bundle_content(content: str, assets: list[dict[str, Any]]) -> tuple
             except (OSError, UnicodeError):
                 extracted, truncated = "", False
             sections.append(
-                f"### Extracted transcript — {name}\n\n"
-                + (extracted or "_No subtitle text could be produced; the original subtitle file is preserved._")
+                f"### Extracted transcript — {markdown_inline_text(name)}\n\n"
+                + (markdown_plain_text(extracted) if extracted else
+                   "_No subtitle text could be produced; the original subtitle file is preserved._")
             )
             incomplete = incomplete or not extracted or truncated
     return "\n\n".join([content, *sections]).strip(), incomplete
+
+
+def replace_exact_url(value: str, source: str, target: str) -> str:
+    for variant in {source, source.replace("|", "%7C")}:
+        pattern = r"(?<![A-Za-z0-9%/?=&])" + re.escape(variant) + r"(?=$|[\s\"'<>\]\)])"
+        value = re.sub(pattern, lambda _: target, value)
+    return value
 
 
 def render_bundle(
@@ -1045,34 +1119,42 @@ def render_bundle(
     if previous:
         header += f"previous_version: {yaml_string(previous)}\n"
     marker_safe = lambda value: value.replace("<!-- lbrain:", "&lt;!-- lbrain:")
+    metadata = lambda value: markdown_inline_text(marker_safe(value))
     capture_body = marker_safe(content) or "Original content was not available at capture time."
     media_body = ""
     if assets:
         media_body = "## Preserved media\n\n"
         prefix = PurePosixPath(*PurePosixPath(manifest_path).parts[2:]).parent / "files"
-        for asset in assets:
-            target = (prefix / str(asset["name"])).as_posix()
-            link_target = quote(target, safe="/")
+        links = [
+            (asset, quote((prefix / str(asset["name"])).as_posix(), safe="/"))
+            for asset in assets
+        ]
+        for asset, link_target in sorted(
+            links, key=lambda item: len(str(item[0]["placeholder"])), reverse=True
+        ):
             if asset["placeholder"]:
-                capture_body = capture_body.replace(str(asset["placeholder"]), link_target)
+                capture_body = replace_exact_url(
+                    capture_body, str(asset["placeholder"]), link_target
+                )
+        for asset, link_target in links:
             label = str(asset["name"]).replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
             media_body += f"- [{label}]({link_target})\n"
     provenance = (
         "## Provenance notes\n\n"
-        f"- Origin: {marker_safe(origin)}\n"
-        f"- Scope: {marker_safe(scope)}\n"
-        f"- Extraction: {marker_safe(extraction_status)}\n"
+        f"- Origin: {metadata(origin)}\n"
+        f"- Scope: {metadata(scope)}\n"
+        f"- Extraction: {metadata(extraction_status)}\n"
     )
     if author:
-        provenance += f"- Author: {marker_safe(author)}\n"
+        provenance += f"- Author: {metadata(author)}\n"
     if published_at:
-        provenance += f"- Published: {marker_safe(published_at)}\n"
+        provenance += f"- Published: {metadata(published_at)}\n"
     if capture_note:
-        provenance += f"- Capture note: {marker_safe(capture_note)}\n"
+        provenance += f"- Capture note: {metadata(capture_note)}\n"
     body = (
         f"created: {today}\nupdated: {today}\n---\n"
         "<!-- lbrain:title:start -->\n"
-        f"# {marker_safe(title)}\n\n"
+        f"# {metadata(title)}\n\n"
         "<!-- lbrain:title:end -->\n\n"
         "<!-- lbrain:capture:start -->\n"
         "## Capture\n\n"
@@ -1106,15 +1188,6 @@ BUNDLE_MANAGED_FIELDS = {
     "created",
     "updated",
 }
-
-
-def split_note(value: str) -> tuple[list[str], str]:
-    if not value.startswith("---\n"):
-        raise OperationError("Capture Bundle is missing frontmatter")
-    end = value.find("\n---\n", 4)
-    if end < 0:
-        raise OperationError("Capture Bundle frontmatter is incomplete")
-    return value[4:end].splitlines(), value[end + 5 :]
 
 
 def bundle_marker_bounds(value: str, name: str) -> tuple[int, int]:
@@ -1255,14 +1328,18 @@ def restore_preserved_links(
         if placeholder not in by_placeholder:
             continue
         resolved.add(placeholder)
+        asset_id = placeholder.removeprefix("lbrain-asset://")
+        content = content.replace(f"- Media could not be preserved: {asset_id}\n", "")
+        content = content.replace(f"- Media could not be preserved: {asset_id}", "")
         content = content.replace(f"- Media could not be preserved: {asset_url}\n", "")
         content = content.replace(f"- Media could not be preserved: {asset_url}", "")
         content = content.replace(missing_markdown, placeholder)
-        content = re.sub(
-            r"(?<![A-Za-z0-9%/?=&])" + re.escape(asset_url) + r"(?=$|[\s\"'<>\]\)])",
-            lambda _: placeholder,
-            content,
-        )
+        for variant in {asset_url, asset_url.replace("|", "%7C")}:
+            content = re.sub(
+                r"(?<![A-Za-z0-9%/?=&])" + re.escape(variant) + r"(?=$|[\s\"'<>\]\)])",
+                lambda _: placeholder,
+                content,
+            )
     content = re.sub(r"(?m)^## Capture warnings\n(?:\s*\n)*(?=## |\Z)", "", content).strip()
 
     snapshot = next((asset for asset in assets if asset["placeholder"] == "lbrain-asset://html-snapshot"), None)
@@ -1448,7 +1525,7 @@ def capture_bundle(
     content, enrichment_incomplete = enriched_bundle_content(content, assets)
     if enrichment_incomplete and extraction_status == "complete":
         extraction_status = "partial"
-    reject_secrets(root, title, summary, origin, content, author, published_at, capture_note)
+    reject_capture_secrets(root, title, summary, origin, content, author, published_at, capture_note)
     reject_secrets(
         root,
         *(str(asset[key]) for asset in assets for key in ("name", "media_type", "placeholder")),

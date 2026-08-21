@@ -8,6 +8,7 @@
     "style",
     "noscript",
     "template",
+    "[hidden]",
     "[aria-hidden='true']",
     "[role='navigation']",
     "[role='banner']",
@@ -15,13 +16,29 @@
     "[role='group']",
     ".advertisement",
     ".ads",
+    ".sponsor",
+    ".sponsored",
     ".recommendations",
     ".related-posts",
     ".comments"
   ].join(",");
 
   const text = (node) => (node?.textContent || "").replace(/\s+/g, " ").trim();
+  const markdownText = (value) => value
+    .replace(/([\\`*_[\]<>!|~#])/g, "\\$1")
+    .replace(/(^|\n)([ \t]{0,3})([=-]+)(?=[ \t]*(?:\n|$))/g, "$1$2\\$3")
+    .replace(/(^|\n)([ \t]{0,3})(~{3,})/g, "$1$2\\$3")
+    .replace(/(^|\n) {4}/g, "$1&#32;   ")
+    .replace(/(^|\n)\t/g, "$1&#9;")
+    .replace(/(^|\n)([ \t]{0,3})([#>+-])(?=\s)/g, "$1$2\\$3")
+    .replace(/(^|\n)([ \t]{0,3}\d+)([.)])(?=\s)/g, "$1$2\\$3");
+  const markdownLabel = (value) => markdownText(String(value || "")).replace(/\s+/g, " ").trim();
+  const markdownUrl = (value) => {
+    const clean = String(value || "").replace(/\\/g, "%5C").replace(/</g, "%3C").replace(/>/g, "%3E").replace(/\|/g, "%7C");
+    return /[()[\]]/.test(clean) ? `<${clean}>` : clean;
+  };
   const url = (value) => {
+    if (!value) return "";
     try {
       const parsed = new URL(value, document.baseURI);
       return ["http:", "https:"].includes(parsed.protocol) ? parsed.href : "";
@@ -29,13 +46,20 @@
       return "";
     }
   };
-  const imageUrl = (node) => url(
+  const imageUrl = (node) => {
+    const responsive = (node.getAttribute("srcset")
+      || node.closest("picture")?.querySelector("source[srcset]")?.getAttribute("srcset")
+      || "").split(",", 1)[0].trim().split(/\s+/, 1)[0];
+    const source = url(
     node.getAttribute("data-src")
       || node.getAttribute("data-original")
       || node.currentSrc
       || node.getAttribute("src")
+      || responsive
       || ""
-  );
+    );
+    return source === url(location.href) ? "" : source;
+  };
   const pinRenderedImages = (originals, copies) => originals.forEach((image, index) => {
     const source = imageUrl(image);
     if (source) copies[index]?.setAttribute("src", source);
@@ -43,35 +67,61 @@
   const renderedClone = (node) => {
     const clone = node.cloneNode(true);
     pinRenderedImages(Array.from(node.querySelectorAll("img")), Array.from(clone.querySelectorAll("img")));
+    const originals = Array.from(node.querySelectorAll("*"));
+    const copies = Array.from(clone.querySelectorAll("*"));
+    originals.forEach((original, index) => {
+      const media = original.closest("audio, video");
+      const hiddenVideo = media?.tagName === "VIDEO" && hiddenByStyle(media);
+      const inlineHiddenMedia = media && /(?:display\s*:\s*none|visibility\s*:\s*hidden)/i.test(media.getAttribute("style") || "");
+      if (hiddenVideo || inlineHiddenMedia || hiddenByStyle(media ? media.parentElement : original)) copies[index]?.remove();
+    });
     return clone;
   };
+  const hiddenByStyle = (node) => {
+    for (let current = node; current; current = current.parentElement) {
+      if (current.hidden || current.getAttribute("aria-hidden") === "true") return true;
+      const style = getComputedStyle(current);
+      if (style.display === "none" || ["hidden", "collapse"].includes(style.visibility)
+        || style.contentVisibility === "hidden" || style.opacity === "0") return true;
+    }
+    return false;
+  };
+  const visibleRoot = (node) => Boolean(node) && !node.closest(NOISE) && !hiddenByStyle(node);
   const children = (node, renderer) => Array.from(node.childNodes).map(renderer).join("");
-  const transcriptSelector = "ytd-transcript-renderer, [data-testid='transcript'], [data-lbrain-transcript]";
+  const transcriptSelector = "ytd-transcript-renderer, ytd-transcript-segment-list-renderer, [data-testid='transcript'], [data-lbrain-transcript]";
 
   function inline(node) {
-    if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || "";
+    if (node.nodeType === Node.TEXT_NODE) return markdownText((node.nodeValue || "").replace(/\s+/g, " "));
     if (node.nodeType !== Node.ELEMENT_NODE) return "";
     if (node.matches(transcriptSelector)) return "";
     const tag = node.tagName;
     if (tag === "BR") return "\n";
     if (tag === "IMG") {
       const source = imageUrl(node);
-      return source ? `![${node.getAttribute("alt") || ""}](${source})` : "";
+      return source ? `![${markdownLabel(node.getAttribute("alt"))}](${markdownUrl(source)})` : "";
     }
     if (tag === "AUDIO") {
       const source = url(node.getAttribute("src") || node.querySelector("source[src]")?.getAttribute("src") || "");
-      return source ? `[Audio](${source})` : "";
+      return source ? `[Audio](${markdownUrl(source)})` : "";
+    }
+    if (tag === "CODE") {
+      const value = node.textContent || "";
+      const fence = "`".repeat(Math.max(1, Math.max(0, ...Array.from(value.matchAll(/`+/g), (match) => match[0].length)) + 1));
+      const padded = /^`|`$|^ | $/.test(value) ? ` ${value} ` : value;
+      return `${fence}${padded}${fence}`;
     }
     const value = children(node, inline).replace(/\s+/g, " ");
     if (!value.trim() && tag !== "A") return "";
     if (tag === "A") {
       const href = url(node.getAttribute("href") || "");
-      return href && value.trim() ? `[${value.trim()}](${href})` : value;
+      const label = node.querySelector("img")
+        ? value.trim()
+        : value.trim();
+      return href && label ? `[${label}](${markdownUrl(href)})` : value;
     }
     if (tag === "STRONG" || tag === "B") return `**${value.trim()}**`;
     if (tag === "EM" || tag === "I") return `*${value.trim()}*`;
     if (tag === "DEL" || tag === "S") return `~~${value.trim()}~~`;
-    if (tag === "CODE") return `\`${value.trim()}\``;
     return value;
   }
 
@@ -92,7 +142,7 @@
 
   function table(node) {
     const rows = Array.from(node.querySelectorAll("tr")).map((row) =>
-      Array.from(row.querySelectorAll(":scope > th, :scope > td")).map((cell) => inline(cell).trim().replace(/\|/g, "\\|"))
+      Array.from(row.querySelectorAll(":scope > th, :scope > td")).map((cell) => inline(cell).trim())
     );
     if (!rows.length || !rows[0].length) return "";
     const width = Math.max(...rows.map((row) => row.length));
@@ -101,10 +151,39 @@
   }
 
   function block(node) {
-    if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || "";
+    if (node.nodeType === Node.TEXT_NODE) {
+      const value = node.nodeValue || "";
+      return value.trim() ? markdownText(value) : /[\r\n]/.test(value) ? "\n" : value ? " " : "";
+    }
     if (node.nodeType !== Node.ELEMENT_NODE) return "";
     const tag = node.tagName;
     if (node.matches?.(transcriptSelector)) return "";
+    if (node.matches?.("article[data-testid='tweet']")) {
+      return Array.from(node.querySelectorAll(
+        "[data-testid='tweetText'], [data-testid='quoteTweet'], [data-testid='tweetPhoto']"
+      )).filter((part) => !part.parentElement?.closest("[data-testid='quoteTweet'], [data-testid='tweetPhoto']"))
+        .map(block).join("");
+    }
+    if (node.matches?.("[data-testid='User-Name']")) {
+      const author = xAuthor(node);
+      const handle = text(Array.from(node.querySelectorAll("a[href]"))
+        .find((link) => !link.querySelector("time") && text(link).startsWith("@")));
+      const timestamp = node.querySelector("a[href*='/status/'] time");
+      const status = timestamp?.closest("a");
+      const published = timestamp && status
+        ? `[${markdownLabel(text(timestamp))}](${markdownUrl(url(status.getAttribute("href") || ""))})`
+        : "";
+      return `**${markdownLabel(author)}${handle ? ` (${markdownLabel(handle)})` : ""}**${published ? ` — ${published}` : ""}\n\n`;
+    }
+    if (node.matches?.("[data-testid='tweetText']")) return `${inline(node).trim()}\n\n`;
+    if (node.matches?.("[data-testid='quoteTweet']")) {
+      const value = children(node, block).trim() || inline(node).trim();
+      return `${value.split("\n").map((line) => `> ${line}`.trimEnd()).join("\n")}\n\n`;
+    }
+    if (node.matches?.("[data-testid='tweetPhoto']")) {
+      return `${Array.from(node.querySelectorAll("img")).map(block).join("").trim()}\n\n`;
+    }
+    if (node.classList?.contains("public-DraftStyleDefault-block")) return `${inline(node).trim()}\n\n`;
     if (/^H[1-6]$/.test(tag)) return `${"#".repeat(Number(tag[1]))} ${inline(node).trim()}\n\n`;
     if (tag === "P") return `${inline(node).trim()}\n\n`;
     if (tag === "UL" || tag === "OL") return `${list(node, tag === "OL")}\n`;
@@ -114,15 +193,18 @@
     }
     if (tag === "PRE") {
       const language = (node.querySelector("code")?.className || "").match(/language-([\w+-]+)/)?.[1] || "";
-      return `\`\`\`${language}\n${(node.textContent || "").trim()}\n\`\`\`\n\n`;
+      const value = (node.textContent || "").trim();
+      const fence = "`".repeat(Math.max(3, Math.max(0, ...Array.from(value.matchAll(/`+/g), (match) => match[0].length)) + 1));
+      return `${fence}${language}\n${value}\n${fence}\n\n`;
     }
     if (tag === "TABLE") return table(node);
     if (tag === "HR") return "---\n\n";
     if (tag === "FIGURE") {
       const media = Array.from(node.children).filter((child) => child.tagName !== "FIGCAPTION").map(block).join("").trim();
       const caption = text(node.querySelector("figcaption"));
-      return `${media}${caption ? `\n\n*${caption}*` : ""}\n\n`;
+      return `${media}${caption ? `\n\n*${markdownText(caption)}*` : ""}\n\n`;
     }
+    if (tag === "A" && node.querySelector("img")) return `${inline(node).trim()}\n\n`;
     if (tag === "IMG") return `${inline(node)}\n\n`;
     if (["DIV", "SECTION", "ARTICLE", "MAIN", "HEADER", "BODY"].includes(tag)) return children(node, block);
     return inline(node);
@@ -139,16 +221,22 @@
     return container;
   }
 
-  function xStatus(tweet) {
-    const link = tweet?.querySelector("a[href*='/status/']");
-    if (!link) return null;
-    const href = url(link.getAttribute("href") || "");
+  function xStatusUrl(value) {
+    const href = url(value);
     if (!href) return null;
-    const match = new URL(href).pathname.match(/^\/([^/]+)\/status\/(\d+)/);
+    const parsed = new URL(href);
+    const match = parsed.pathname.match(/^\/([^/]+)\/status\/(\d+)/);
     return match ? {
-      href,
+      href: `${parsed.origin}/${match[1]}/status/${match[2]}`,
       handle: match[1].toLowerCase(),
-      id: match[2],
+      id: match[2]
+    } : null;
+  }
+
+  function xStatus(tweet) {
+    const status = xStatusUrl(tweet?.querySelector("a[href*='/status/']")?.getAttribute("href") || "");
+    return status ? {
+      ...status,
       publishedAt: tweet.querySelector("time[datetime]")?.getAttribute("datetime") || ""
     } : null;
   }
@@ -157,13 +245,21 @@
     return text(node?.querySelector("[data-testid='User-Name'] span"));
   }
 
-  function xThread(tweets, handle) {
+  function xThread(tweets, rootStatus, markedThread = false) {
     const root = document.createElement("article");
     let previous = null;
+    let contiguous = markedThread;
     const accepted = new Set();
-    for (const tweet of tweets) {
+    const sources = [];
+    const start = tweets.findIndex((tweet) => xStatus(tweet)?.id === rootStatus.id);
+    if (start < 0) return null;
+    for (const tweet of tweets.slice(start)) {
       const status = xStatus(tweet);
-      if (!status || status.handle !== handle) continue;
+      if (!status) continue;
+      if (status.handle !== rootStatus.handle) {
+        if (accepted.size) contiguous = false;
+        continue;
+      }
       if (previous) {
         const tweetContent = tweet.querySelector(
           "[data-testid='tweetText'], [data-testid='tweetPhoto'], [data-testid='videoPlayer'], video"
@@ -179,23 +275,38 @@
             .map((link) => (link.getAttribute("href") || "").match(/\/status\/(\d+)/)?.[1])
             .find((id) => id && id !== status.id);
         const selfReply = Array.from(tweet.querySelectorAll("a[href]"))
-          .some((link) => text(link).replace(/^@/, "").toLowerCase() === handle
+          .some((link) => text(link).replace(/^@/, "").toLowerCase() === rootStatus.handle
             && !link.closest("[data-testid='User-Name']")
             && !link.closest("[data-testid='tweetText']")
             && !link.closest("[data-testid='quoteTweet']")
             && tweetContent
             && Boolean(link.compareDocumentPosition(tweetContent) & Node.DOCUMENT_POSITION_FOLLOWING)
             && url(link.getAttribute("href") || "")
-            && new URL(url(link.getAttribute("href") || "")).pathname.toLowerCase() === `/${handle}`);
+            && new URL(url(link.getAttribute("href") || "")).pathname.toLowerCase() === `/${rootStatus.handle}`);
         const chronological = !previous.publishedAt || !status.publishedAt
           || Date.parse(status.publishedAt) >= Date.parse(previous.publishedAt);
-        const related = replyTarget ? accepted.has(replyTarget) : selfReply;
+        const related = replyTarget ? accepted.has(replyTarget) : selfReply || contiguous;
         if (!related || !chronological) continue;
         root.append(document.createElement("hr"));
       }
       root.append(renderedClone(tweet));
       previous = status;
       accepted.add(status.id);
+      sources.push(status);
+    }
+    if (accepted.size > 1) {
+      const heading = document.createElement("h2");
+      heading.textContent = "Thread sources";
+      const list = document.createElement("ol");
+      for (const [index, status] of sources.entries()) {
+        const item = document.createElement("li");
+        const link = document.createElement("a");
+        link.href = status.href;
+        link.textContent = `Post ${index + 1}`;
+        item.append(link);
+        list.append(item);
+      }
+      root.append(heading, list);
     }
     return accepted.size > 1 ? root : null;
   }
@@ -260,10 +371,11 @@
     }
     for (const link of root.querySelectorAll("a[href]")) {
       const source = url(link.getAttribute("href") || "");
+      const downloadable = link.hasAttribute("download");
       const download = link.getAttribute("download") || "";
       const extension = `${download || new URL(source || "data:,x").pathname}`.split(".").pop()?.toLowerCase();
       const declared = (link.getAttribute("type") || "").split(";", 1)[0].trim().toLowerCase();
-      const mediaType = ATTACHMENTS[extension]
+      const mediaType = ((extension === "md" || extension === "txt") && !downloadable ? "" : ATTACHMENTS[extension])
         || (Object.values(ATTACHMENTS).includes(declared) ? declared : "")
         || (/\bpdf\b/i.test(text(link)) ? "application/pdf" : "");
       if (mediaType) candidates.push([source, "documents", mediaType]);
@@ -287,26 +399,27 @@
     const lines = [];
     for (const video of root.querySelectorAll("video")) {
       const direct = url(video.currentSrc || video.getAttribute("src") || video.querySelector("source")?.getAttribute("src") || "");
-      const source = direct && !direct.startsWith("blob:")
-        ? direct
-        : url(document.querySelector("link[rel='canonical']")?.getAttribute("href") || "") || url(location.href);
-      if (source) lines.push(`- Original video: [${source}](${source})`);
+      const parsed = direct ? new URL(direct) : null;
+      const stableDirect = direct && !direct.startsWith("blob:") && !parsed.search && !parsed.hash ? direct : "";
+      const source = fallback || url(document.querySelector("link[rel='canonical']")?.getAttribute("href") || "")
+        || url(location.href) || stableDirect;
+      if (source) lines.push(`- Original video: [${markdownLabel(source)}](${markdownUrl(source)})`);
       for (const track of video.querySelectorAll("track[kind='subtitles'], track[kind='captions']")) {
         const href = url(track.getAttribute("src") || "");
-        if (href) lines.push(`- ${track.getAttribute("label") || "Subtitles"}: [subtitle file](${href})`);
+        if (href) lines.push(`- ${markdownLabel(track.getAttribute("label") || "Subtitles")}: [subtitle file](${markdownUrl(href)})`);
       }
     }
     if (fallback && !lines.some((line) => line.startsWith("- Original video:"))) {
-      lines.unshift(`- Original video: [${fallback}](${fallback})`);
+      lines.unshift(`- Original video: [${markdownLabel(fallback)}](${markdownUrl(fallback)})`);
     }
     const transcriptRoot = root.querySelector(transcriptSelector);
     const cueSelector = "p, [data-testid='cue'], .segment, ytd-transcript-segment-renderer";
     const transcriptParts = transcriptRoot
       ? Array.from(transcriptRoot.querySelectorAll(cueSelector))
         .filter((node) => !node.querySelector(cueSelector))
-        .map(text).filter(Boolean)
+        .map((node) => markdownText(text(node))).filter(Boolean)
       : [];
-    const transcript = transcriptParts.length ? transcriptParts.join("\n") : text(transcriptRoot);
+    const transcript = transcriptParts.length ? transcriptParts.join("\n") : markdownText(text(transcriptRoot));
     if (!lines.length && !transcript) return "";
     return `\n\n## Video\n\n${lines.join("\n")}${transcript ? `\n\n## Transcript\n\n${transcript}` : ""}`;
   }
@@ -316,7 +429,7 @@
     copy.querySelectorAll("base, script, style, noscript, template, form, input, textarea, select, button, iframe, object, embed, [aria-hidden='true'], [hidden]")
       .forEach((node) => node.remove());
     if (stripAudio) copy.querySelectorAll("audio").forEach((node) => node.remove());
-    const allowed = new Set(["alt", "class", "colspan", "datetime", "height", "href", "id", "open", "poster", "rowspan", "src", "title", "width", "xlink:href"]);
+    const allowed = new Set(["alt", "class", "colspan", "datetime", "height", "href", "id", "open", "poster", "rowspan", "src", "width", "xlink:href"]);
     const safeUrl = (value) => {
       try {
         const parsed = new URL(value, document.baseURI);
@@ -358,16 +471,73 @@
   }
 
   function extract(scope = "page") {
-    const wechat = scope === "page" ? document.querySelector("#js_content") : null;
-    const xArticle = scope === "page" ? document.querySelector("[data-testid='twitterArticleReadView']") : null;
+    const visibleMatch = (selector) => Array.from(document.querySelectorAll(selector)).find(visibleRoot) || null;
+    const wechatRoot = scope === "page" ? visibleMatch("#js_content") : null;
+    const wechat = visibleRoot(wechatRoot) ? wechatRoot : null;
+    const xArticle = scope === "page"
+      ? Array.from(document.querySelectorAll("[data-testid='twitterArticleReadView']"))
+        .find(visibleRoot) || null
+      : null;
     const tweets = scope === "page" && !xArticle
       ? Array.from(document.querySelectorAll("article[data-testid='tweet']"))
+        .filter(visibleRoot).map(renderedClone)
       : [];
     const firstStatus = xStatus(tweets[0]);
-    const thread = firstStatus ? xThread(tweets, firstStatus.handle) : null;
+    const pageStatus = xStatusUrl(location.href)
+      || xStatusUrl(document.querySelector("link[rel='canonical']")?.getAttribute("href") || "");
+    const primaryTweet = pageStatus
+      ? tweets.find((tweet) => xStatus(tweet)?.id === pageStatus.id)
+      : null;
+    const primaryStatus = xStatus(primaryTweet) || pageStatus || firstStatus;
+    const markedThread = Boolean(primaryStatus && Array.from(document.querySelectorAll("a[href*='/thread/']"))
+      .filter(visibleRoot).some((link) => {
+        const href = url(link.getAttribute("href") || "");
+        return href && new URL(href).pathname.toLowerCase()
+          === `/${primaryStatus.handle}/thread/${primaryStatus.id}`;
+      }));
+    const thread = primaryStatus ? xThread(tweets, primaryStatus, markedThread) : null;
+    const standaloneTweet = pageStatus && primaryTweet && !thread ? primaryTweet : null;
     const publishedMetadata = Boolean(document.querySelector("meta[property='article:published_time']"));
     const articleMetadata = publishedMetadata
       || Boolean(document.querySelector("meta[property='og:type'][content='article' i]"));
+    const openGraphTitle = document.querySelector("meta[property='og:title']")?.content?.trim() || "";
+    const normalizedPageTitles = [openGraphTitle || document.title]
+      .map((value) => value.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase())
+      .filter(Boolean);
+    const editorialSelector = "blockquote, figure, pre, table, time[datetime], [itemprop='author'], [rel='author']";
+    const articleBodySelector = "[itemprop='articleBody'], [class~='body'][class~='markup']";
+    const readableArticleBody = (node) => Array.from(node?.querySelectorAll(articleBodySelector) || [])
+      .find((body) => visibleRoot(body) && text(body).length >= 350);
+    const candidateViews = new WeakMap();
+    const candidateView = (node) => {
+      if (!candidateViews.has(node)) {
+        const view = renderedClone(node);
+        view.querySelectorAll(NOISE).forEach((noise) => noise.remove());
+        candidateViews.set(node, view);
+      }
+      return candidateViews.get(node);
+    };
+    const candidateText = (node) => text(candidateView(node));
+    const ownArticleView = (node) => {
+      const clone = candidateView(node).cloneNode(true);
+      clone.querySelectorAll("article, main, [role='main']").forEach((nested) => nested.remove());
+      return clone;
+    };
+    const headingMatchScore = (node, heading) => {
+      const candidate = text(heading).normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
+      let score = 0;
+      for (const expected of normalizedPageTitles) {
+        if (expected === candidate) score = Math.max(score, 3);
+        else if ([" | ", " — ", " – ", " - "].some((separator) =>
+          expected.startsWith(`${candidate}${separator}`)
+        )) score = Math.max(score, 2);
+        else if ([" | ", " — ", " – ", " - "].some((separator) =>
+          expected.endsWith(`${separator}${candidate}`)
+        )) score = Math.max(score, 1);
+      }
+      if (!score) return 0;
+      return score * 1000 + Math.min(candidate.length, 999);
+    };
     const cardLike = (node) => {
       const schema = node?.getAttribute("itemtype") || "";
       return /(?:^|[-_\s])(card|catalog|course|plan|pricing|product|teaser|tile)(?:$|[-_\s])/i
@@ -375,80 +545,168 @@
         || /schema\.org\/(?:Product|Offer|Course)(?:$|[/#])/i.test(schema);
     };
     const articleRoot = (node) => {
-      if (!node || !node.querySelector("h1") || node.querySelectorAll("p").length < 2) return false;
-      const length = text(node).length;
-      const editorial = node.querySelector("blockquote, figure, pre, table, time[datetime], [itemprop='author'], [rel='author']");
-      const cardNodes = Array.from(node.querySelectorAll("[id], [class], [itemtype]")).filter(cardLike);
+      if (!node || node.matches(NOISE) || node.parentElement?.closest(NOISE) || hiddenByStyle(node)) return false;
+      const view = candidateView(node);
+      const articleHeading = view.querySelector("h1")
+        || (node.tagName === "ARTICLE" ? view.querySelector("h2") : null);
+      if (!articleHeading || view.querySelectorAll("p").length < 2) return false;
+      const length = text(view).length;
+      const editorial = view.querySelector(editorialSelector);
+      const cardNodes = Array.from(view.querySelectorAll("[id], [class], [itemtype]")).filter(cardLike);
       const cardLength = cardNodes
         .filter((item) => !cardNodes.some((other) => other !== item && other.contains(item)))
         .reduce((total, item) => total + text(item).length, 0);
       if (cardLike(node) || cardLength >= length / 2) return false;
-      if (node.tagName === "ARTICLE" && node.querySelector("video") && length >= 50) return true;
+      if (node.tagName === "ARTICLE" && view.querySelector("video") && length >= 50) return true;
       if (node.tagName === "MAIN" || node.getAttribute("role") === "main") {
-        const longestParagraph = Math.max(...Array.from(node.querySelectorAll("p"), (item) => text(item).length));
-        let container = node.querySelector("h1");
-        while (container && container !== node.parentElement) {
+        const longestParagraph = Math.max(...Array.from(view.querySelectorAll("p"), (item) => text(item).length));
+        let container = view.querySelector("h1");
+        while (container && container !== view.parentElement) {
           if (cardLike(container)) return false;
           container = container.parentElement;
         }
-        return node.querySelectorAll("h1").length === 1
+        return view.querySelectorAll("h1").length === 1
           && longestParagraph >= 120
           && length >= (articleMetadata || editorial ? 350 : 800)
-          && node.querySelectorAll("article").length <= 1;
+          && view.querySelectorAll("article").length <= 1;
       }
       const pageMain = node.closest("main, [role='main']");
-      if (!publishedMetadata && pageMain
-        && pageMain.querySelectorAll("h1").length > node.querySelectorAll("h1").length) return false;
-      if (!publishedMetadata && !editorial && node.querySelectorAll("p").length < 3) return false;
+      if (!publishedMetadata && !editorial && pageMain
+        && candidateView(pageMain).querySelectorAll("h1").length > view.querySelectorAll("h1").length) return false;
+      if (!publishedMetadata && !editorial && view.querySelectorAll("p").length < 3) return false;
       return length >= (publishedMetadata ? 250 : 500);
     };
     const candidates = Array.from(document.querySelectorAll("article, main, [role='main']"));
-    const semanticArticle = candidates.find(articleRoot);
+    const semanticCandidates = candidates.filter(articleRoot);
+    const eligibleCandidates = semanticCandidates.filter((node) => {
+      const nested = semanticCandidates.filter((other) => other !== node && node.contains(other));
+      if (!nested.length) return true;
+      if (nested.some(readableArticleBody)) return false;
+      // ponytail: retain wrapper mains only when their own body clearly dominates nested articles.
+      return text(ownArticleView(node)).length >= nested.reduce((total, item) => total + candidateText(item).length, 0) * 1.5;
+    });
+    const readableCandidates = eligibleCandidates.filter(readableArticleBody);
+    const rankedCandidates = readableCandidates.length ? readableCandidates : eligibleCandidates;
+    const titleScores = new Map(rankedCandidates.map((node) => [
+      node, headingMatchScore(node, candidateView(node).querySelector("h1, h2"))
+    ]));
+    const bestTitleScore = Math.max(0, ...titleScores.values());
+    const titleMatchedArticles = rankedCandidates.filter((node) => titleScores.get(node) === bestTitleScore && bestTitleScore);
+    const preferredArticles = titleMatchedArticles.length ? titleMatchedArticles : rankedCandidates;
+    const specificArticles = preferredArticles.filter((node) =>
+      !preferredArticles.some((other) => other !== node && node.contains(other))
+    );
+    const editorialSignal = (node) => Boolean(candidateView(node).querySelector(editorialSelector));
+    const semanticArticle = (specificArticles.length ? specificArticles : preferredArticles)
+      .sort((left, right) => Number(editorialSignal(right)) - Number(editorialSignal(left))
+        || candidateText(right).length - candidateText(left).length)[0];
+    const editorialBody = readableArticleBody(semanticArticle);
+    const editorialSource = (() => {
+      if (!editorialBody || !semanticArticle) return editorialBody;
+      const article = document.createElement("article");
+      const mediaWidth = (media) => {
+        const image = media.tagName === "IMG" ? media : media.querySelector("img");
+        return Math.max(
+          media.getBoundingClientRect().width,
+          image?.getBoundingClientRect().width || 0,
+          Number(image?.getAttribute("width")) || 0
+        );
+      };
+      const leadingMedia = Array.from(semanticArticle.querySelectorAll("figure, picture, img"))
+        .filter((media) => !editorialBody.contains(media)
+          && !media.closest(NOISE)
+          && visibleRoot(media)
+          && !media.parentElement?.closest("figure, picture")
+          && mediaWidth(media) >= 240
+          && Boolean(media.compareDocumentPosition(editorialBody) & Node.DOCUMENT_POSITION_FOLLOWING));
+      leadingMedia.forEach((media) => article.append(renderedClone(media)));
+      article.append(renderedClone(editorialBody));
+      return article;
+    })();
+    const articleBody = (() => {
+      if (!xArticle) return null;
+      const richText = Array.from(xArticle.querySelectorAll("[data-testid='twitterArticleRichTextView']"))
+        .find(visibleRoot);
+      if (!richText) return xArticle;
+      const article = document.createElement("article");
+      const cover = Array.from(xArticle.querySelectorAll("[data-testid='tweetPhoto']")).find(visibleRoot);
+      if (cover && !richText.contains(cover)) article.append(renderedClone(cover));
+      article.append(renderedClone(richText));
+      return article;
+    })();
     const source = scope === "selection"
       ? selectedRoot()
-      : wechat || xArticle || thread || semanticArticle || document.querySelector("main, [role='main']") || document.body;
+      : wechat || articleBody || thread || standaloneTweet || editorialSource || semanticArticle
+        || Array.from(document.querySelectorAll("main, [role='main']")).find(visibleRoot) || document.body;
     if (!source) throw new Error("No readable content was found on the current page.");
     const root = renderedClone(source);
     root.querySelectorAll(NOISE).forEach((node) => node.remove());
-    const heading = root.querySelector("h1");
-    const xOwner = xAuthor(xArticle || tweets[0]);
-    const title = (wechat ? text(document.querySelector("#activity-name")) : "")
-      || (thread ? `${xOwner || firstStatus.handle} — Thread` : "")
-      || (xArticle || semanticArticle ? text(heading) : "")
+    const heading = semanticArticle
+      ? candidateView(semanticArticle).querySelector("h1, h2")
+      : root.querySelector("h1, h2");
+    const xArticleView = xArticle ? renderedClone(xArticle) : null;
+    const xArticleTitle = text(xArticleView?.querySelector("[data-testid='twitter-article-title'], h1"));
+    const xOwnerSource = xArticle || primaryTweet
+      || (thread ? tweets.find((tweet) => xStatus(tweet)?.id === primaryStatus?.id) : null);
+    const xOwner = xAuthor(xArticleView || xOwnerSource);
+    const title = (wechat ? text(visibleMatch("#activity-name")) : "")
+      || (thread ? `${xOwner || primaryStatus.handle} — Thread` : "")
+      || (standaloneTweet ? `${xOwner || pageStatus.handle} — X Post` : "")
+      || xArticleTitle
+      || (semanticArticle ? text(heading) : "")
       || document.querySelector("meta[property='og:title']")?.content
       || document.title.trim()
       || text(heading);
-    const author = (wechat ? text(document.querySelector("#js_name")) : "")
+    const author = (wechat ? text(visibleMatch("#js_name")) : "")
       || xOwner
       || document.querySelector("meta[name='author'], meta[property='article:author']")?.content?.trim()
-      || text(document.querySelector("[rel='author'], .author, [itemprop='author']"));
-    const publishedAt = (wechat ? text(document.querySelector("#publish_time")) : "")
-      || document.querySelector("meta[property='article:published_time'], time[datetime]")?.content
-      || document.querySelector("time[datetime]")?.getAttribute("datetime") || "";
-    const canonical = (thread ? firstStatus?.href : "")
+      || (semanticArticle ? text(candidateView(semanticArticle).querySelector("[rel='author'], .author, [itemprop='author']")) : "")
+      || text(root.querySelector("[rel='author'], .author, [itemprop='author']"));
+    const publishedAt = (wechat ? text(visibleMatch("#publish_time")) : "")
+      || (thread || standaloneTweet ? primaryStatus?.publishedAt : "")
+      || document.querySelector("meta[property='article:published_time']")?.content
+      || (semanticArticle ? candidateView(semanticArticle).querySelector("time[datetime]")?.getAttribute("datetime") : "")
+      || (xArticle || semanticArticle || scope === "selection"
+        ? root.querySelector("time[datetime]")?.getAttribute("datetime")
+        : "") || "";
+    const canonical = (thread || standaloneTweet ? primaryStatus?.href : "")
       || url(document.querySelector("link[rel='canonical']")?.getAttribute("href") || "")
       || url(location.href);
-    const genericPage = scope === "page" && !wechat && !xArticle && !thread && !semanticArticle;
-    const mediaRoot = genericPage ? document.body : root;
-    const signalRoot = genericPage ? document.body.cloneNode(true) : root;
+    const genericPage = scope === "page" && !wechat && !xArticle && !thread && !standaloneTweet && !semanticArticle;
+    const mediaRoot = genericPage ? renderedClone(document.body) : root;
+    const signalRoot = genericPage ? mediaRoot.cloneNode(true) : root;
     if (genericPage) signalRoot.querySelectorAll(NOISE).forEach((node) => node.remove());
-    const supportedVideoHost = /(^|\.)((youtube\.com)|(youtu\.be)|(bilibili\.com))$/i.test(location.hostname);
+    const supportedVideoHost = /(^|\.)((youtube\.com)|(youtube-nocookie\.com)|(youtu\.be)|(bilibili\.com))$/i.test(location.hostname);
+    const linkedVideo = Array.from(signalRoot.querySelectorAll("a[href]"), (link) => url(link.getAttribute("href") || ""))
+      .find((href) => /https?:\/\/(?:www\.)?(?:youtube\.com|youtube-nocookie\.com|youtu\.be|bilibili\.com)\//i.test(href))
+      || Array.from(signalRoot.querySelectorAll("iframe[src]"), (frame) => url(frame.getAttribute("src") || ""))
+        .find((href) => /https?:\/\/(?:www\.)?(?:youtube\.com|youtube-nocookie\.com|youtu\.be|(?:player\.)?bilibili\.com)\//i.test(href));
     const transcriptPresent = Boolean(signalRoot.querySelector(transcriptSelector));
-    const videoDetails = videoMarkdown(signalRoot, supportedVideoHost || transcriptPresent ? canonical : "");
-    const rendered = `${block(root).trim()}${videoDetails}`
-      .replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
-    if (!title || !rendered) throw new Error("The rendered page did not contain a readable title and body.");
+    const videoDetails = videoMarkdown(signalRoot, linkedVideo || (supportedVideoHost || transcriptPresent ? canonical : ""));
     const containsVideo = supportedVideoHost
-      || transcriptPresent || Boolean(signalRoot.querySelector("video"));
+      || Boolean(linkedVideo) || transcriptPresent || Boolean(signalRoot.querySelector("video"));
     const videoPage = supportedVideoHost || transcriptPresent;
     const articlePage = Boolean(wechat || xArticle || thread || semanticArticle);
+    const videoOnlyCapture = scope === "page" && videoPage && !articlePage;
+    if (containsVideo) root.querySelectorAll("audio").forEach((node) => node.remove());
+    const renderedTranslation = Boolean((thread || standaloneTweet) && Array.from(root.querySelectorAll("button"))
+      .some((button) => /^(显示原文|show original)$/i.test(
+        (button.getAttribute("aria-label") || text(button)).trim()
+      )));
+    const translationNotice = renderedTranslation
+      ? "> 捕获说明：X 当前显示自动翻译；以下保存的是浏览器中的可见译文。原文请通过来源链接查看。\n\n"
+      : "";
+    const rendered = (videoOnlyCapture ? videoDetails : `${translationNotice}${block(root).trim()}${videoDetails}`)
+      .replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+    if (!title || !rendered) throw new Error("The rendered page did not contain a readable title and body.");
     const captureKind = scope === "selection"
       ? "selection"
-      : thread ? "thread" : articlePage ? "article" : videoPage ? "video" : "html";
+      : thread ? "thread" : standaloneTweet ? "tweet" : articlePage ? "article" : videoPage ? "video" : "html";
     const content = captureKind === "html"
-      ? `[打开保存的 HTML 快照](lbrain-asset://html-snapshot)\n\n- 原页面：[${canonical}](${canonical})${videoDetails}`
+      ? `[打开保存的 HTML 快照](lbrain-asset://html-snapshot)\n\n- [原页面](${markdownUrl(canonical)})${videoDetails}`
       : rendered;
-    const summary = document.querySelector("meta[name='description'], meta[property='og:description']")?.content?.trim()
+    const summary = ((thread || standaloneTweet) ? text(root.querySelector("[data-testid='tweetText']")).slice(0, 240) : "")
+      || document.querySelector("meta[name='description'], meta[property='og:description']")?.content?.trim()
       || text(root).slice(0, 240);
     return {
       schema: "lbrain.capture.v1",
@@ -460,6 +718,7 @@
       published_at: publishedAt,
       content_markdown: content,
       capture_kind: captureKind,
+      rendered_translation: renderedTranslation,
       has_video: containsVideo,
       snapshot_html: captureKind === "html" ? htmlSnapshot(mediaRoot, title, containsVideo) : "",
       preview_characters: rendered.length,

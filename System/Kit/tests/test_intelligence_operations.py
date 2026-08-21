@@ -44,7 +44,31 @@ SKILL_OPERATIONS = ROOT / "Skills/Kit/lbrain-skill-manager/scripts/operations.py
 class IntelligenceOperationTest(unittest.TestCase):
     def copy_repo(self, destination: Path) -> Path:
         copy = destination / "lbrain"
-        shutil.copytree(ROOT, copy, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+        untracked: set[str] = set()
+        if (ROOT / ".git").exists():
+            untracked = set(
+                subprocess.run(
+                    [
+                        "git", "-C", str(ROOT), "ls-files", "--others", "--directory",
+                        "--exclude-standard", "-z",
+                    ],
+                    check=True,
+                    capture_output=True,
+                ).stdout.decode().rstrip("\0").split("\0")
+            )
+
+        def ignored(source: str, names: list[str]) -> set[str]:
+            relative = Path(source).resolve().relative_to(ROOT).as_posix()
+            prefix = "" if relative == "." else f"{relative}/"
+            return {
+                name for name in names
+                if name in {".git", "__pycache__"}
+                or (relative == "Inbox/Captures" and name != "README.md")
+                or f"{prefix}{name}" in untracked
+                or f"{prefix}{name}/" in untracked
+            }
+
+        shutil.copytree(ROOT, copy, ignore=ignored)
         return copy
 
     def run_capture_operation(
@@ -187,6 +211,15 @@ class IntelligenceOperationTest(unittest.TestCase):
             "let target=uri;if(uri.includes('youtube-fixture')){const body=fs.readFileSync(new URL(uri));"
             "await page.route('https://www.youtube.com/**',route=>route.fulfill({contentType:'text/html',body}));"
             "target='https://www.youtube.com/watch?v=abc'}"
+            "if(uri.includes('x-single')){const body=fs.readFileSync(new URL(uri));"
+            "await page.route('https://x.com/**',route=>route.fulfill({contentType:'text/html',body}));"
+            "target='https://x.com/alice/status/900/photo/1'}"
+            "if(uri.includes('x-missing')){const body=fs.readFileSync(new URL(uri));"
+            "await page.route('https://x.com/**',route=>route.fulfill({contentType:'text/html',body}));"
+            "target='https://x.com/alice/status/999'}"
+            "if(uri.includes('x-marked-thread')){const body=fs.readFileSync(new URL(uri));"
+            "await page.route('https://x.com/**',route=>route.fulfill({contentType:'text/html',body}));"
+            "target='https://x.com/alice/status/100'}"
             "await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 10000 });"
             "await page.addScriptTag({ path: process.argv[2] });"
             "const selection=uri.includes('selection-responsive');"
@@ -855,6 +888,331 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertFalse(contains_runtime_state('"next_cursor": "${cursor}"'))
             self.assertFalse(contains_runtime_state('"next_cursor": ""'))
             self.assertFalse(contains_runtime_state("next_cursor: ''"))
+            self.assertTrue(contains_runtime_state('"next_cursor": "opaque-real-cursor-12345"'))
+            self.assertFalse(
+                contains_document_runtime_state(
+                    "# The rise of Cursor: The $300M ARR AI tool that engineers cannot stop using"
+                )
+            )
+            self.assertFalse(
+                contains_document_runtime_state(
+                    "### Referenced:\n\n"
+                    "• The rise of Cursor: The $300M ARR AI tool that engineers can’t stop using "
+                    "\\| Michael Truell (co-founder and CEO): "
+                    "[https://www.lennysnewsletter.com/p/the-rise-of-cursor-michael-truell]"
+                    "(https://www.lennysnewsletter.com/p/the-rise-of-cursor-michael-truell)"
+                )
+            )
+            for heading, title, byline, url in (
+                (
+                    "References",
+                    "Cursor: A practical guide for engineering teams",
+                    "Jane Doe",
+                    "https://example.com/guides/cursor",
+                ),
+                (
+                    "See also",
+                    "Working with Cursor: A field guide",
+                    "Alex Rivera (editor)",
+                    "https://docs.example.org/cursor/field-guide",
+                ),
+                (
+                    "Further reading",
+                    "Why Cursor: Lessons from an AI editor",
+                    "LBrain Editorial Team",
+                    "https://research.example.net/articles/cursor",
+                ),
+                (
+                    "References",
+                    "Cursor: A normal article slug",
+                    "Jane Doe",
+                    "https://example.com/the-rise-of-cursor-michael-truell",
+                ),
+            ):
+                self.assertFalse(
+                    contains_document_runtime_state(
+                        f"### {heading}:\n\n"
+                        f"- {title} \\| {byline}: [{url}]({url})"
+                    )
+                )
+            self.assertTrue(
+                contains_document_runtime_state(
+                    "### References:\n\n"
+                    "- The rise of Cursor: The $300M ARR AI tool that engineers cannot stop using "
+                    "\\| opaque-real-cursor-12345: "
+                    "[https://www.lennysnewsletter.com/p/the-rise-of-cursor-michael-truell]"
+                    "(https://www.lennysnewsletter.com/p/the-rise-of-cursor-michael-truell)"
+                )
+            )
+            self.assertTrue(
+                contains_document_runtime_state(
+                    "### References:\n\n"
+                    "- The rise of Cursor: The $300M ARR AI tool that engineers cannot stop using "
+                    "\\| Michael Truell (co-founder and CEO): "
+                    "[https://www.lennysnewsletter.com/p/the-rise-of-cursor-michael-truell?%63ursor=opaque-real-cursor-12345]"
+                    "(https://www.lennysnewsletter.com/p/the-rise-of-cursor-michael-truell?%63ursor=opaque-real-cursor-12345)"
+                )
+            )
+            self.assertTrue(
+                contains_document_runtime_state(
+                    "### References:\n\n"
+                    "- The rise of Cursor: "
+                    "<span title=\"opaque-real-cursor-12345\">"
+                    "The $300M ARR AI tool that engineers cannot stop using</span> "
+                    "\\| Michael Truell (co-founder and CEO): "
+                    "[https://www.lennysnewsletter.com/p/the-rise-of-cursor-michael-truell]"
+                    "(https://www.lennysnewsletter.com/p/the-rise-of-cursor-michael-truell)"
+                )
+            )
+            self.assertTrue(
+                contains_document_runtime_state(
+                    "### References:\n\n"
+                    "- The rise of Cursor: The $300M ARR AI tool that engineers cannot stop using "
+                    "\\| Michael Truell (co-founder and CEO): "
+                    "[https://opaque-real-cursor-12345.invalid/state]"
+                    "(https://opaque-real-cursor-12345.invalid/state)"
+                )
+            )
+            for unsafe_url in (
+                "https://example.com/%63ursor-guide",
+                "https://example.com/cursor-guide?source=references",
+                "https://example.com/cursor-guide#cursor",
+                "https://xn--cursor-qza.example/reference",
+                "https://foo.xn--cursor-qza.example/reference",
+                "https://abcdefghijklmnop12345.example.com/guide",
+                "https://example.com/abcdefghijklmnop12345",
+                "https://123e4567-e89b-12d3-a456-426614174000.example.com/reference",
+                "https://example.com/123e4567-e89b-12d3-a456-426614174000",
+            ):
+                self.assertTrue(
+                    contains_document_runtime_state(
+                        "### References:\n\n"
+                        "- Cursor: A practical guide for engineering teams "
+                        f"\\| Jane Doe: [{unsafe_url}]({unsafe_url})"
+                    )
+                )
+            self.assertTrue(
+                contains_document_runtime_state(
+                    "### References:\n\n"
+                    "- Cursor: A practical guide for engineering teams "
+                    "\\| Jane Doe: [https://example.com/guides/cursor]"
+                    "(https://example.com/guides/different)"
+                )
+            )
+            for altered_citation in (
+                "HTTPS://WWW.LENNYSNEWSLETTER.COM/P/THE-RISE-OF-CURSOR-MICHAEL-TRUELL",
+                "https://www.lenny\u017fnewsletter.com/p/the-rise-of-cursor-michael-truell",
+                "https://www.lennysnewsletter.com/p/the-r\u0131se-of-cursor-michael-truell",
+            ):
+                self.assertTrue(
+                    contains_document_runtime_state(
+                        "### References:\n\n"
+                        "- The rise of Cursor: The $300M ARR AI tool that engineers cannot stop using "
+                        "\\| Michael Truell (co-founder and CEO): "
+                        f"[{altered_citation}]({altered_citation})"
+                    )
+                )
+            self.assertTrue(
+                contains_document_runtime_state(
+                    "### References:\n\n"
+                    "- The rise of Cursor: The $300M ARR AI tool that engineers cannot stop using "
+                    "\\| private checkpoint opaque-real-cursor-12345 "
+                    "\\| Michael Truell (co-founder and CEO): "
+                    "[https://www.lennysnewsletter.com/p/the-rise-of-cursor-michael-truell]"
+                    "(https://www.lennysnewsletter.com/p/the-rise-of-cursor-michael-truell)"
+                )
+            )
+            self.assertTrue(
+                contains_document_runtime_state(
+                    "### References:\n\n"
+                    "- <!--opaque-real-cursor-12345-->The rise of Cursor: "
+                    "The $300M ARR AI tool that engineers cannot stop using "
+                    "\\| Michael Truell (co-founder and CEO): "
+                    "[https://www.lennysnewsletter.com/p/the-rise-of-cursor-michael-truell]"
+                    "(https://www.lennysnewsletter.com/p/the-rise-of-cursor-michael-truell)"
+                )
+            )
+            self.assertTrue(
+                contains_document_runtime_state(
+                    "The rise of Cursor: A field guide \\| Jane Doe: "
+                    "[https://example.com/guides/cursor]"
+                    "(https://example.com/guides/cursor)"
+                )
+            )
+            self.assertTrue(
+                contains_document_runtime_state(
+                    "### References:\n\n"
+                    "- Cursor: A field guide \\| current value is alpha beta gamma: "
+                    "[https://example.com/guides/cursor]"
+                    "(https://example.com/guides/cursor)"
+                )
+            )
+            self.assertTrue(contains_document_runtime_state("Continue with Cursor: opaque"))
+            self.assertTrue(contains_document_runtime_state("Resume using Cursor: next"))
+            self.assertTrue(
+                contains_document_runtime_state(
+                    "- Continue with Cursor: opaque token value abc"
+                )
+            )
+            self.assertTrue(
+                contains_document_runtime_state(
+                    "### References:\n\n"
+                    "- Continue with Cursor: opaque token value abc "
+                    "\\| Worker: [state](https://example.invalid/state)"
+                )
+            )
+            for runtime_value in (
+                "opaque",
+                "opaque-real-cursor-12345",
+                "alpha beta gamma delta",
+            ):
+                self.assertTrue(
+                    contains_document_runtime_state(
+                        "### References:\n\n"
+                        f"- Runtime state of Cursor: {runtime_value} "
+                        "\\| Michael Truell: [article](https://example.invalid/cursor)"
+                    )
+                )
+            self.assertTrue(
+                contains_document_runtime_state(
+                    "### References:\n\n"
+                    "- The stored value of Cursor: alpha beta gamma delta epsilon "
+                    "\\| Michael Truell: "
+                    "[https://example.invalid/cursor](https://example.invalid/cursor)"
+                )
+            )
+            for runtime_context in ("current value", "active state", "checkpoint value"):
+                self.assertTrue(
+                    contains_document_runtime_state(
+                        "### References:\n\n"
+                        f"- The {runtime_context} of Cursor: alpha beta gamma delta epsilon "
+                        "\\| Michael Truell: "
+                        "[https://example.invalid/cursor](https://example.invalid/cursor)"
+                    )
+                )
+            for runtime_value in (
+                "current value is alpha beta gamma",
+                "active value is alpha beta gamma",
+                "saved token is alpha beta gamma",
+                "continuation value is alpha beta gamma",
+                "last checkpoint is alpha beta gamma",
+            ):
+                self.assertTrue(
+                    contains_document_runtime_state(
+                        "### References:\n\n"
+                        f"- The rise of Cursor: {runtime_value} "
+                        "\\| Michael Truell: "
+                        "[https://example.invalid/cursor](https://example.invalid/cursor)"
+                    )
+                )
+            self.assertTrue(
+                contains_document_runtime_state(
+                    "### References:\n\n"
+                    "- The rise of Cursor: opaque\\| Michael Truell: "
+                    "[https://example.invalid/cursor](https://example.invalid/cursor)"
+                )
+            )
+            self.assertFalse(
+                contains_document_runtime_state(
+                    "# Page 2 about Cursor: How an AI editor changed software"
+                )
+            )
+            self.assertFalse(
+                contains_document_runtime_state(
+                    '<h2><span>The rise of </span><a href="https://example.invalid/cursor">Cursor</a>: '
+                    "The $300M ARR AI tool that engineers cannot stop using</h2>"
+                )
+            )
+            self.assertFalse(
+                contains_document_runtime_state(
+                    "<h2>The rise of Cursor: The $300M ARR AI tool that engineers cannot stop using</h2>\n"
+                    "<div>Article body.</div>"
+                )
+            )
+            self.assertFalse(
+                contains_document_runtime_state(
+                    "<h2>The rise of\nCursor: The $300M ARR AI tool that engineers cannot stop using</h2>"
+                )
+            )
+            self.assertFalse(
+                contains_document_runtime_state("# Cursor: How an AI editor changed software")
+            )
+            self.assertFalse(
+                contains_document_runtime_state("<h2>Cursor: The future of coding</h2>")
+            )
+            self.assertFalse(
+                contains_document_runtime_state("# cursor: Token economics for AI products")
+            )
+            self.assertTrue(
+                contains_document_runtime_state("# Cursor: opaque-real-cursor-12345")
+            )
+            self.assertTrue(
+                contains_document_runtime_state("<h2>Cursor: opaque-real-cursor-12345</h2>")
+            )
+            self.assertTrue(
+                contains_document_runtime_state("# Cursor: 1234567890123456")
+            )
+            self.assertTrue(
+                contains_document_runtime_state("# Cursor: abcDEF1234567890")
+            )
+            self.assertTrue(
+                contains_document_runtime_state("# Cursor: eyJwYWdlIjoyfQ")
+            )
+            self.assertTrue(
+                contains_document_runtime_state(
+                    "<h2>Cursor: <span>eyJw</span><span>YWdlIjoyfQ</span></h2>"
+                )
+            )
+            self.assertTrue(
+                contains_document_runtime_state("# Cursor: eyJw<!-- split -->YWdlIjoyfQ")
+            )
+            self.assertTrue(
+                contains_document_runtime_state("<h2>Cursor: eyJw<wbr>YWdlIjoyfQ</h2>")
+            )
+            self.assertTrue(
+                contains_document_runtime_state("<h2>Cursor: <bdi>eyJw</bdi>YWdlIjoyfQ</h2>")
+            )
+            self.assertTrue(
+                contains_document_runtime_state("<h2>Cur<span>sor</span>: eyJwYWdlIjoyfQ</h2>")
+            )
+            self.assertTrue(
+                contains_document_runtime_state("<h2>Cur<!-- split -->sor: opaque-real-cursor-12345</h2>")
+            )
+            self.assertFalse(
+                contains_document_runtime_state("<h2>Cur<span>sor</span>: How an AI editor changed software</h2>")
+            )
+            self.assertTrue(
+                contains_document_runtime_state("# Cursor: resume from shard seven after item forty two")
+            )
+            self.assertTrue(contains_document_runtime_state("# Cursor: page 2"))
+            self.assertTrue(contains_document_runtime_state("# Cursor: page: 2"))
+            self.assertTrue(contains_document_runtime_state("# Cursor: page=2"))
+            self.assertTrue(
+                contains_document_runtime_state("# Cursor: start after item forty two")
+            )
+            self.assertTrue(
+                contains_document_runtime_state("Cursor: opaque-real-cursor-12345")
+            )
+            self.assertTrue(
+                contains_document_runtime_state(
+                    "Current pagination Cursor: opaque-real-cursor-12345"
+                )
+            )
+            self.assertTrue(
+                contains_document_runtime_state(
+                    "Current pagination state Cursor: opaque-real-cursor-12345"
+                )
+            )
+            self.assertTrue(
+                contains_document_runtime_state(
+                    "Current pagination state Cursor: resume from shard seven after item forty two"
+                )
+            )
+            self.assertTrue(
+                contains_document_runtime_state(
+                    "The stored pagination Cursor: token value is opaque-real-cursor-12345 for next request"
+                )
+            )
             self.assertFalse(contains_code_runtime_state("cursor = 0", python=True))
             self.assertFalse(contains_code_runtime_state('cursor = ""', python=True))
             self.assertFalse(
@@ -1185,13 +1543,13 @@ class IntelligenceOperationTest(unittest.TestCase):
             )
             payload: dict[str, object] = {
                 "schema": "lbrain.capture.v1",
-                "title": "Rendered Article",
-                "summary": "A rendered article saved from the authenticated browser tab.",
+                "title": "Cursor: How an AI editor changed software",
+                "summary": "A rendered article saved from the authenticated browser tab. --- Example Author",
                 "origin": "https://example.invalid/rendered-article",
                 "scope": "page",
                 "author": "Example Author",
                 "published_at": "2026-08-11T09:00:00+08:00",
-                "content_markdown": "# Rendered Article\n\nThe first saved body.",
+                "content_markdown": "# Cursor: How an AI editor changed software\n\nThe first saved body.",
                 "extraction_status": "complete",
                 "assets": [],
             }
@@ -1217,7 +1575,7 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(json.loads(manifest.read_text(encoding="utf-8"))["assets"], [])
             self.assertTrue(dict(saved["git"])["committed"])
             self.assertIn(
-                "capture: Rendered Article",
+                "capture: Cursor: How an AI editor changed software",
                 subprocess.run(
                     ["git", "-C", str(root), "log", "-1", "--format=%s"],
                     text=True,
@@ -1240,7 +1598,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                 "1",
             )
 
-            changed = {**payload, "content_markdown": "# Rendered Article\n\nA changed second body."}
+            changed = {**payload, "content_markdown": "# Cursor: How an AI editor changed software\n\nA changed second body."}
             version_result, versioned = self.run_capture_native_host(root, changed)
             self.assertEqual(version_result.returncode, 0, (version_result.stderr.decode(), versioned))
             self.assertEqual(versioned["status"], "new_version")
@@ -1387,6 +1745,60 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertNotEqual(overlong_result.returncode, 0)
             self.assertEqual(overlong["status"], "failed")
 
+    def test_capture_bundle_localizes_prefix_sharing_asset_placeholders(self) -> None:
+        spec = importlib.util.spec_from_file_location("capture_operations_placeholders", CAPTURE_OPERATIONS)
+        assert spec and spec.loader
+        operations = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(operations)
+        capture_id = "a" * 64
+        rendered = operations.render_bundle(
+            "Prefix assets",
+            "Distinct placeholders must remain distinct.",
+            "https://example.invalid/prefix-assets",
+            "page",
+            (
+                "![One](lbrain-asset://asset-1)\n\n"
+                "![Ten](lbrain-asset://asset-10)\n\n"
+                "Literal lbrain-asset://asset-100\n\n"
+                "[Crafted](lbrain-asset://asset-1/../../other.md)"
+            ),
+            "",
+            "",
+            "complete",
+            capture_id,
+            "b" * 64,
+            "c" * 64,
+            1,
+            f"Inbox/Captures/_assets/{capture_id}/v1/manifest.json",
+            [
+                {
+                    "name": "images/one.png",
+                    "placeholder": "lbrain-asset://asset-1",
+                },
+                {
+                    "name": "images/ten.png",
+                    "placeholder": "lbrain-asset://asset-10",
+                },
+            ],
+            "",
+            "",
+        )
+        self.assertIn(f"![One](_assets/{capture_id}/v1/files/images/one.png)", rendered)
+        self.assertIn(f"![Ten](_assets/{capture_id}/v1/files/images/ten.png)", rendered)
+        self.assertNotIn("one.png0", rendered)
+        self.assertIn("Literal lbrain-asset://asset-100", rendered)
+        self.assertIn("[Crafted](lbrain-asset://asset-1/../../other.md)", rendered)
+
+    def test_capture_frontmatter_accepts_a_closing_delimiter_at_eof(self) -> None:
+        spec = importlib.util.spec_from_file_location("capture_operations_frontmatter", CAPTURE_OPERATIONS)
+        assert spec and spec.loader
+        operations = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(operations)
+        with tempfile.TemporaryDirectory() as temporary:
+            note = Path(temporary) / "legacy.md"
+            note.write_text("---\ncapture_id: " + "a" * 64 + "\n---", encoding="utf-8")
+            self.assertEqual(operations.capture_frontmatter(note), ["capture_id: " + "a" * 64])
+
     def test_native_stream_saves_a_generic_page_as_html_without_download_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -1435,14 +1847,14 @@ class IntelligenceOperationTest(unittest.TestCase):
                     "<img src=\"https://alpha.example.invalid/hero.png?size=2\">"
                     "<a href=\"https://alpha.example.invalid/report.docx?download=1&amp;source=home\">Report</a>"
                     "<audio src=\"https://alpha.example.invalid/lesson.mp3\"></audio>"
-                    "<svg><image href=\"https://alpha.example.invalid/chart.svg\"></image></svg>"
+                    "<svg><image href=\"https://alpha.example.invalid/chart.svg?signature=fixture\"></image></svg>"
                     "</body></html>"
                 ),
                 "extraction_status": "complete",
                 "remote_assets": [{
                     "id": "hero",
                     "url": "https://alpha.example.invalid/hero.png",
-                    "name": "images/001-hero.png",
+                    "name": "images/001-hero",
                     "media_type": "image/png",
                 }, {
                     "id": "hero-large",
@@ -1471,7 +1883,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                     "media_type": "audio/mpeg",
                 }, {
                     "id": "missing-svg",
-                    "url": "https://alpha.example.invalid/chart.svg",
+                    "url": "https://alpha.example.invalid/chart.svg?signature=fixture",
                     "name": "images/chart.svg",
                     "media_type": "image/svg+xml",
                 }],
@@ -1513,6 +1925,8 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertFalse((files / "documents/lesson.bin").exists())
             note = (root / str(saved["target"])).read_text(encoding="utf-8")
             self.assertIn("snapshot/page.html", note)
+            self.assertNotIn("signature=fixture", note)
+            self.assertIn("Media could not be preserved: missing-svg", note)
             self.assertEqual(list(staging.iterdir()), [])
 
             overlap_payload = {
@@ -1963,9 +2377,10 @@ class IntelligenceOperationTest(unittest.TestCase):
     def test_chrome_extension_extracts_rendered_article_with_minimal_permissions(self) -> None:
         manifest = json.loads((CAPTURE_EXTENSION / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["manifest_version"], 3)
+        self.assertEqual(manifest["action"]["default_popup"], "confirm.html")
         self.assertEqual(
             set(manifest["permissions"]),
-            {"activeTab", "contextMenus", "nativeMessaging", "notifications", "pageCapture", "scripting", "storage"},
+            {"activeTab", "alarms", "contextMenus", "nativeMessaging", "notifications", "pageCapture", "scripting", "storage"},
         )
         self.assertNotIn("history", manifest["permissions"])
         self.assertNotIn("tabs", manifest["permissions"])
@@ -1973,7 +2388,10 @@ class IntelligenceOperationTest(unittest.TestCase):
         self.assertEqual(manifest.get("host_permissions", []), [])
         self.assertEqual(set(manifest.get("optional_host_permissions", [])), {"http://*/*", "https://*/*"})
         self.assertNotIn("<all_urls>", json.dumps(manifest))
-        self.assertNotIn("chrome.downloads", (CAPTURE_EXTENSION / "service_worker.js").read_text(encoding="utf-8"))
+        worker = (CAPTURE_EXTENSION / "service_worker.js").read_text(encoding="utf-8")
+        self.assertNotIn("chrome.downloads", worker)
+        self.assertIn('iconUrl: "icon.png"', worker)
+        self.assertTrue((CAPTURE_EXTENSION / "icon.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
 
         chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
         if not chrome.is_file():
@@ -1988,13 +2406,24 @@ class IntelligenceOperationTest(unittest.TestCase):
                 "<!doctype html><html><head>"
                 '<title>Fallback title</title><meta name="author" content="Example Author">'
                 '<link rel="canonical" href="https://example.invalid/authenticated-article">'
-                "</head><body><nav>Navigation noise</nav><article>"
-                "<h1>Authenticated Article</h1><p>Opening <strong>claim</strong>.</p><p>"
+                "</head><body><nav>Navigation noise</nav><article>\n    "
+                "<h1>\n    Authenticated Article\n</h1><p>Opening <strong>claim</strong>.</p><p>"
                 + ("Long authenticated article paragraph. " * 20) + "</p>"
-                "<blockquote>Quoted evidence.</blockquote><ul><li>First item</li><li>Second item</li></ul>"
+                "\n    <blockquote>Quoted evidence.</blockquote>\n    "
+                "<ul><li>First item</li><li>Second item</li></ul>"
+                '<p>Reference <a href="https://example.invalid/source">[1]</a>.</p>'
+                '<p>Literal &lt;img src="https://tracker.invalid/pixel"&gt; and '
+                '![beacon](https://tracker.invalid/markdown).</p>'
+                '<p>Inline <code>safe&#96; ![inline](https://tracker.invalid/inline.png)</code>.</p>'
+                '<p>Price ~~100~~ and <del>real deletion</del>. Literal #AI tag.</p>'
+                '<div>Literal controls:\n---\n-\n=\n==\n~~~js\n===\n    indented code\nAfter.</div>'
                 '<figure><img data-src="https://cdn.example.invalid/figure.png" alt="Figure"><figcaption>Figure caption</figcaption></figure>'
-                '<picture><source srcset="https://cdn.example.invalid/responsive-article.png 2x"><img alt="Responsive article"></picture>'
-                "<table><tr><th>Metric</th><th>Value</th></tr><tr><td>Saved</td><td>Yes</td></tr></table>"
+                '<picture><source srcset="https://cdn.example.invalid/responsive-article.png 2x">'
+                '<img src="https://cdn.example.invalid/responsive-article.png" alt="Responsive article"></picture>'
+                '<p><img src="https://cdn.example.invalid/injection.png" alt="x](https://tracker.invalid/alt) ![y"> '
+                '<a href="https://example.invalid/foo)![x](https://tracker.invalid/href">Safe destination</a></p>'
+                "\n    <table><tr><th>Metric</th><th>Value</th></tr><tr><td>A|B</td><td>Yes</td></tr>"
+                '<tr><td><a href="https://example.invalid/a|b">Pipe link</a></td><td>No</td></tr></table>'
                 '<pre><code>print("saved")</code></pre></article><aside>Recommendation noise</aside>'
                 '<aside class="recommendations"><video src="https://ads.example/promo.mp4"><track kind="subtitles" '
                 'src="https://ads.example/promo.vtt"></video></aside>'
@@ -2005,6 +2434,8 @@ class IntelligenceOperationTest(unittest.TestCase):
             wechat_fixture.write_text(
                 "<!doctype html><html><head><title>WeChat</title>"
                 '<link rel="canonical" href="https://example.invalid/wechat-article"></head><body>'
+                '<div aria-hidden="true"><div id="activity-name">旧标题</div><div id="js_name">旧作者</div>'
+                '<div id="publish_time">2020-01-01</div><div id="js_content">旧正文</div></div>'
                 '<div id="activity-name">微信文章标题</div>'
                 '<div id="js_name">示例作者</div><div id="publish_time">2026-08-11</div>'
                 '<div id="js_content"><p>第一段<strong>重点</strong>。</p>'
@@ -2016,17 +2447,37 @@ class IntelligenceOperationTest(unittest.TestCase):
             x_article_fixture = directory / "x-article.html"
             x_article_fixture.write_text(
                 "<!doctype html><html><head><title>X</title></head><body>"
-                '<article data-testid="twitterArticleReadView"><div data-testid="User-Name">'
+                '<article data-testid="twitterArticleReadView"><div data-testid="User-Name" aria-hidden="true">'
+                '<span>Hidden Author</span><a href="https://x.com/hidden">@hidden</a></div>'
+                '<div data-testid="User-Name">'
                 '<span>Article Author</span><a href="https://x.com/articleauthor">@articleauthor</a></div>'
-                '<h1>Long-form X Article</h1><p>Article opening.</p>'
-                '<figure><img data-src="https://pbs.example.invalid/article.png" alt="Article figure">'
-                '<figcaption>Article caption</figcaption></figure></article><div>Timeline noise</div>'
+                '<div data-testid="twitter-article-title" aria-hidden="true">Aria-hidden X Article title</div>'
+                '<div data-testid="twitter-article-title" style="display:none">Hidden X Article title</div>'
+                '<div data-testid="twitter-article-title">Long-form X Article</div>'
+                '<div data-testid="twitterArticleRichTextView" aria-hidden="true">Hidden stale X Article body.</div>'
+                '<div data-testid="tweetPhoto"><img data-src="https://pbs.example.invalid/cover.png" alt="Cover"></div>'
+                '<div data-testid="twitterArticleRichTextView">'
+                '<div class="public-DraftStyleDefault-block">Article opening.</div>'
+                '<div class="public-DraftStyleDefault-block">Second paragraph.</div>'
+                '<h2>Article section</h2><figure><a href="https://x.com/article/media/1">'
+                '<img data-src="https://pbs.example.invalid/article.png" alt="Article figure"></a>'
+                '<figcaption>Article caption</figcaption></figure><div class="public-DraftStyleDefault-block">After image.</div></div>'
+                '<div data-testid="UserCell">Author footer noise</div></article><div>Timeline noise</div>'
                 "</body></html>",
                 encoding="utf-8",
             )
             x_thread_fixture = directory / "x-thread.html"
             x_thread_fixture.write_text(
                 "<!doctype html><html><head><title>X Thread</title></head><body><main>"
+                '<article data-testid="tweet" style="display:none"><div data-testid="User-Name"><span>Alice</span>'
+                '<a href="https://x.com/alice/status/100"><time datetime="2026-08-11T00:59:00Z">hidden</time></a></div>'
+                '<div data-testid="tweetText">Hidden duplicate.</div></article>'
+                '<article data-testid="tweet" aria-hidden="true"><div data-testid="User-Name"><span>Alice</span>'
+                '<a href="https://x.com/alice/status/100"><time datetime="2026-08-11T00:58:00Z">hidden</time></a></div>'
+                '<div data-testid="tweetText">Aria-hidden duplicate.</div></article>'
+                '<article data-testid="tweet" style="visibility:collapse"><div data-testid="User-Name"><span>Alice</span>'
+                '<a href="https://x.com/alice/status/100"><time datetime="2026-08-11T00:57:00Z">hidden</time></a></div>'
+                '<div data-testid="tweetText">Collapsed duplicate.</div></article>'
                 '<article data-testid="tweet"><div data-testid="User-Name"><span>Alice</span>'
                 '<a href="https://x.com/alice/status/100"><time datetime="2026-08-11T01:00:00Z">Aug 11</time></a></div>'
                 '<div data-testid="tweetText">First author post.</div>'
@@ -2063,7 +2514,10 @@ class IntelligenceOperationTest(unittest.TestCase):
                 '<a href="https://cdn.example.invalid/download?id=signed" type="application/pdf">a signed PDF</a> and '
                 '<a href="https://cdn.example.invalid/brief.docx">a document</a>, '
                 '<a href="https://cdn.example.invalid/notes.rtf">RTF</a>, and '
-                '<a href="https://cdn.example.invalid/notes.odt">ODT</a>.</p>'
+                '<a href="https://cdn.example.invalid/notes.odt">ODT</a>. '
+                '<a href="https://github.com/example/project/blob/main/README.md">source Markdown</a> and '
+                '<a href="https://github.com/example/project/graphs/contributors-data.txt">contributors</a>, plus '
+                '<a href="https://cdn.example.invalid/export.txt" download>an exported text file</a>.</p>'
                 '<video src="blob:https://video.example.invalid/runtime-stream">'
                 '<track kind="subtitles" src="https://video.example.invalid/captions.vtt" label="English">'
                 '</video><audio src="https://video.example.invalid/soundtrack.mp3"></audio>'
@@ -2071,15 +2525,53 @@ class IntelligenceOperationTest(unittest.TestCase):
                 "</article></body></html>",
                 encoding="utf-8",
             )
+            substack_fixture = directory / "substack.html"
+            substack_fixture.write_text(
+                '<!doctype html><html><head><title>Alexander - by Example Author - Newsletter</title><style>.concealed{display:none}</style>'
+                '<meta property="og:type" content="article"><meta property="og:title" content="Alexander">'
+                '<link rel="canonical" href="https://newsletter.example.invalid/p/paid-post">'
+                '</head><body><div class="concealed"><article><h2>Why humans are AI&#39;s biggest bottleneck</h2>'
+                '<p>Hidden account-state copy.</p><p>'
+                + ('Hidden account-state body must not be captured. ' * 30)
+                + '</p></article></div><article class="sponsor"><h2>Alexander</h2><div class="body markup"><p>Sponsored introduction.</p><p>'
+                + ('Sponsored course details. ' * 16)
+                + '</p></div></article><main><h1>Alexander</h1>'
+                '<section><time datetime="2026-08-11">Aug 11</time><p>Private account panel.</p><p>'
+                + ('Account and podcast player context. ' * 100)
+                + '</p></section>'
+                '<article class="post"><div class="shows-post-audio-player-wrapper-outer">'
+                '<div data-testid="audio-player-preview-label">Preview</div><span>0:00–1:25:12</span></div>'
+                '<h2 class="concealed">Hidden stale title</h2><h2>Why humans are AI&#39;s biggest bottleneck</h2>'
+                '<div class="byline-wrapper"><a rel="author">Example Author</a> · <time datetime="2025-12-14">Dec 14</time></div>'
+                '<button class="post-ufi-button">Share</button>'
+                '<figure class="post-header"><img src="https://cdn.example.invalid/paid-cover.png" alt="Paid cover">'
+                '<figcaption>Paid cover caption</figcaption></figure>'
+                '<img class="hero" width="699" src="https://cdn.example.invalid/paid-hero.png" alt="Paid hero">'
+                '<div class="available-content">'
+                '<div class="body markup concealed"><p>' + ('Hidden mobile article body. ' * 30) + '</p></div>'
+                '<div class="body markup">'
+                '<p>Opening context for the authenticated article. '
+                '<span class="concealed">Hidden child state.</span></p><p>'
+                + ('Detailed paid article body with evidence and analysis. ' * 18)
+                + '</p><p>Final takeaways for readers.</p>'
+                '<p><a href="https://youtu.be/example-video">Watch the original video</a></p>'
+                '<video src="https://cdn.example.invalid/opaque-signed-path/private-stream.mp4"></video>'
+                '<img src="https://cdn.example.invalid/paid-figure.png" alt="Paid figure">'
+                '<audio src="https://cdn.example.invalid/private-podcast.mp3?signature=fixture"></audio>'
+                '</div></div></article></main></body></html>',
+                encoding="utf-8",
+            )
             generic_fixture = directory / "generic.html"
             generic_fixture.write_text(
                 "<!doctype html><html><head><title>Alpha School</title>"
                 '<meta property="og:type" content="article"><base href="https://remote.invalid/leak/">'
                 '<link rel="canonical" href="https://alpha.example.invalid/"></head><body>'
+                '<main aria-hidden="true"><h1>Hidden responsive shell</h1></main>'
                 "<header><h1>Alpha School</h1></header><nav>Course navigation</nav><main><p>Choose a course.</p>"
                 '<article class="course-card"><h1>Course card</h1><p>' + ("Course features and pricing. " * 24)
                 + "</p><p>Choose this course.</p></article>"
-                '<img src="https://alpha.example.invalid/hero.png" onerror="leak()">'
+                '<img src="https://alpha.example.invalid/hero.png" onerror="leak()" '
+                'title="The rise of Cursor: A related article">'
                 '<picture><source srcset="https://alpha.example.invalid/responsive-generic.png 2x"><img alt="Responsive generic"></picture>'
                 '<svg><image href="https://alpha.example.invalid/chart.svg"></image></svg>'
                 '<svg xmlns:xlink="http://www.w3.org/1999/xlink"><image xlink:href="https://alpha.example.invalid/xlink-chart.svg"></image></svg>'
@@ -2095,9 +2587,11 @@ class IntelligenceOperationTest(unittest.TestCase):
             )
             main_article_fixture = directory / "main-article.html"
             main_article_fixture.write_text(
-                "<!doctype html><html><head><title>Main article</title>"
-                '<meta property="og:type" content="article"></head><body><main><h1>Main Story</h1>'
-                "<p>Opening paragraph.</p><p>" + ("Long story body. " * 30) + "</p></main></body></html>",
+                "<!doctype html><html><head><title>AI agents — what changes now | Newsletter</title>"
+                '<meta property="og:type" content="article"></head><body><article><h2>AI agents — what changes now</h2>'
+                "<p>Opening paragraph.</p><p>" + ("Long story body. " * 30)
+                + '</p><p>Closing paragraph.</p><iframe src="https://www.youtube-nocookie.com/embed/abc123"></iframe>'
+                '</article></body></html>',
                 encoding="utf-8",
             )
             product_fixture = directory / "product.html"
@@ -2132,9 +2626,9 @@ class IntelligenceOperationTest(unittest.TestCase):
             youtube_fixture.write_text(
                 '<!doctype html><html><head><title>Restricted video</title></head><body><main>'
                 '<h1>Restricted video</h1><p>Sign in to confirm your age.</p><p>This content is restricted.</p>'
-                '<audio src="https://ads.example/audio-only.m4a"></audio><ytd-wrapper>'
-                '<ytd-transcript-renderer><div class="segment">First transcript cue.</div>'
-                '<div class="segment">Second transcript cue.</div></ytd-transcript-renderer></ytd-wrapper>'
+                '<img src="" alt="Empty image"><audio src="https://ads.example/audio-only.m4a"></audio><ytd-wrapper>'
+                '<ytd-transcript-segment-list-renderer><div class="segment">First transcript cue.</div>'
+                '<div class="segment">Second transcript cue.</div></ytd-transcript-segment-list-renderer></ytd-wrapper>'
                 '</main></body></html>', encoding="utf-8",
             )
             transcript_fixture = directory / "transcript-only.html"
@@ -2187,6 +2681,7 @@ class IntelligenceOperationTest(unittest.TestCase):
             timeline_fixture.write_text(
                 '<!doctype html><html><head><title>Alice timeline</title>'
                 '<link rel="canonical" href="https://x.com/alice"></head><body><main>'
+                '<a style="display:none" href="https://x.com/alice/thread/500">Hidden thread marker</a>'
                 '<article data-testid="tweet"><div data-testid="User-Name"><span>Alice</span>'
                 '<a href="https://x.com/alice/status/500"></a></div><div data-testid="tweetText">Standalone one.</div></article>'
                 '<article data-testid="tweet"><div data-testid="User-Name"><span>Alice</span>'
@@ -2195,28 +2690,35 @@ class IntelligenceOperationTest(unittest.TestCase):
             )
             chinese_article_fixture = directory / "chinese-article.html"
             chinese_article_fixture.write_text(
-                '<!doctype html><html><head><title>研究札记</title></head><body><main><h1>研究札记</h1>'
+                '<!doctype html><html><head><title>人工智能未来 | 人工智能周刊</title>'
+                '<meta property="og:title" content="人工智能未来 | 人工智能周刊">'
+                '</head><body><article><h2>人工智能周刊</h2><figure></figure><p>课程介绍。</p><p>'
+                + ('这是更长的赞助课程介绍，不应被识别为页面正文。' * 30)
+                + '</p></article><article><h2>人工智能未来</h2>'
                 '<p><span itemprop="author">张三</span><time datetime="2026-08-11">2026-08-11</time></p>'
                 '<p>' + ('这是一个完整的中文论证段落，包含背景、证据、判断以及可复核的结论。' * 8) + '</p>'
                 '<p>' + ('第二段继续解释取舍、限制与后续行动，形成清晰完整的文章结构。' * 8) + '</p>'
-                '</main></body></html>', encoding="utf-8",
+                '</article></body></html>', encoding="utf-8",
             )
             editorial_product_fixture = directory / "editorial-product.html"
             editorial_product_fixture.write_text(
-                '<!doctype html><html><head><title>Product analysis</title>'
+                '<!doctype html><html><head><title>Main Story</title>'
                 '<meta property="og:type" content="article"><meta property="article:published_time" content="2026-08-11">'
-                '</head><body><main><h1>Product analysis</h1><p>'
+                '</head><body><main><h1>Main Story</h1><p>'
                 + ('Independent editorial evidence and analysis. ' * 20)
                 + '</p><section class="content-item"><p>' + ('First editorial section. ' * 20)
                 + '</p></section><section class="content-item"><p>' + ('Second editorial section. ' * 20)
                 + '</p></section><figure><figcaption>Evidence</figcaption></figure>'
                 '<aside itemscope itemtype="https://schema.org/Product"><h2>Related product</h2><p>Small recommendation.</p></aside>'
-                '<p>Final editorial conclusion.</p></main></body></html>', encoding="utf-8",
+                '<article><h2>Embedded unrelated note</h2><time datetime="2026-08-10">Aug 10</time>'
+                '<p>Embedded note one.</p><p>' + ('Unrelated embedded note. ' * 15)
+                + '</p><p>Embedded note three.</p></article><p>Final editorial conclusion.</p></main></body></html>', encoding="utf-8",
             )
             (
                 captured, wechat, x_article, x_thread, media_capture, generic, main_article,
                 product, plain_article, interposed_thread, timeline, chinese_article, editorial_product,
                 product_article,
+                substack_article,
                 unknown_video,
                 youtube_video,
                 transcript_video,
@@ -2229,6 +2731,7 @@ class IntelligenceOperationTest(unittest.TestCase):
                     generic_fixture, main_article_fixture, product_fixture, plain_article_fixture,
                     interposed_thread_fixture, timeline_fixture, chinese_article_fixture, editorial_product_fixture,
                     product_article_fixture,
+                    substack_fixture,
                     unknown_video_fixture,
                     youtube_fixture,
                     transcript_fixture,
@@ -2240,17 +2743,63 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(captured["title"], "Authenticated Article")
             self.assertEqual(captured["author"], "Example Author")
             self.assertEqual(captured["origin"], "https://example.invalid/authenticated-article")
+            markdown = captured["content_markdown"]
+            lines = markdown.splitlines()
+            self.assertIn("# Authenticated Article", lines)
+            self.assertIn("- First item", lines)
+            self.assertIn("| Metric | Value |", lines)
+            self.assertEqual(markdown.count("&#32;"), 1)
             self.assertIn("Opening **claim**.", captured["content_markdown"])
             self.assertIn("> Quoted evidence.", captured["content_markdown"])
             self.assertIn("- First item", captured["content_markdown"])
+            self.assertIn(r"[\[1\]](https://example.invalid/source)", captured["content_markdown"])
+            self.assertNotIn("[[1]]", captured["content_markdown"])
+            self.assertIn(r"\<img src=", captured["content_markdown"])
+            self.assertIn(r"\!\[beacon\]", captured["content_markdown"])
+            self.assertIn("``safe` ![inline](https://tracker.invalid/inline.png)``", captured["content_markdown"])
+            self.assertIn(r"Price \~\~100\~\~ and ~~real deletion~~.", captured["content_markdown"])
+            self.assertIn(r"Literal \#AI tag.", captured["content_markdown"])
+            self.assertIn(r"\---", captured["content_markdown"])
+            self.assertIn("\n\\-\n", captured["content_markdown"])
+            self.assertIn(r"\=", captured["content_markdown"])
+            self.assertIn(r"\==", captured["content_markdown"])
+            self.assertIn(r"\~\~\~js", captured["content_markdown"])
+            self.assertIn(r"\===", captured["content_markdown"])
+            self.assertIn("&#32;   indented code", captured["content_markdown"])
+            self.assertNotIn("https://tracker.invalid/pixel", {asset["url"] for asset in captured["remote_assets"]})
+            self.assertIn(r"x\](https://tracker.invalid/alt) \!\[y", captured["content_markdown"])
+            self.assertIn("(<https://example.invalid/foo)![x](https://tracker.invalid/href>)", captured["content_markdown"])
             self.assertIn("![Figure](https://cdn.example.invalid/figure.png)", captured["content_markdown"])
             self.assertIn("![Responsive article](https://cdn.example.invalid/responsive-article.png)", captured["content_markdown"])
             self.assertIn("Figure caption", captured["content_markdown"])
             self.assertIn("| Metric | Value |", captured["content_markdown"])
+            self.assertIn(r"| A\|B | Yes |", captured["content_markdown"])
+            self.assertIn("[Pipe link](https://example.invalid/a%7Cb)", captured["content_markdown"])
             self.assertNotIn("Navigation noise", captured["content_markdown"])
             self.assertNotIn("Recommendation noise", captured["content_markdown"])
             self.assertNotIn("ads.example", captured["content_markdown"])
             self.assertFalse(captured["has_video"])
+            self.assertEqual(substack_article["capture_kind"], "article")
+            self.assertEqual(substack_article["title"], "Why humans are AI's biggest bottleneck")
+            self.assertEqual(substack_article["author"], "Example Author")
+            self.assertEqual(substack_article["published_at"], "2025-12-14")
+            self.assertTrue(substack_article["has_video"])
+            self.assertIn("Detailed paid article body", substack_article["content_markdown"])
+            self.assertIn("![Paid cover](https://cdn.example.invalid/paid-cover.png)", substack_article["content_markdown"])
+            self.assertIn("![Paid hero](https://cdn.example.invalid/paid-hero.png)", substack_article["content_markdown"])
+            self.assertIn("Paid cover caption", substack_article["content_markdown"])
+            self.assertNotIn("Hidden account-state", substack_article["content_markdown"])
+            self.assertNotIn("Hidden child state", substack_article["content_markdown"])
+            self.assertNotIn("Hidden mobile article body", substack_article["content_markdown"])
+            self.assertNotIn("Private account panel", substack_article["content_markdown"])
+            self.assertNotIn("Preview", substack_article["content_markdown"])
+            self.assertNotIn("0:00", substack_article["content_markdown"])
+            self.assertNotIn("Share", substack_article["content_markdown"])
+            self.assertNotIn("Example Author · Dec 14", substack_article["content_markdown"])
+            self.assertIn("https://youtu.be/example-video", substack_article["content_markdown"])
+            self.assertFalse(any(asset["media_type"].startswith("audio/") for asset in substack_article["remote_assets"]))
+            self.assertNotIn("private-podcast", substack_article["content_markdown"])
+            self.assertNotIn("private-stream", substack_article["content_markdown"])
             self.assertEqual(wechat["title"], "微信文章标题")
             self.assertEqual(wechat["author"], "示例作者")
             self.assertEqual(wechat["published_at"], "2026-08-11")
@@ -2261,8 +2810,16 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertNotIn("推荐噪声", wechat["content_markdown"])
             self.assertEqual(x_article["title"], "Long-form X Article")
             self.assertEqual(x_article["author"], "Article Author")
-            self.assertIn("Article opening.", x_article["content_markdown"])
+            self.assertIn("Article opening.\n\nSecond paragraph.", x_article["content_markdown"])
+            self.assertIn("## Article section", x_article["content_markdown"])
+            self.assertIn("![Cover](https://pbs.example.invalid/cover.png)", x_article["content_markdown"])
+            self.assertIn(
+                "[![Article figure](https://pbs.example.invalid/article.png)](https://x.com/article/media/1)",
+                x_article["content_markdown"],
+            )
             self.assertIn("Article caption", x_article["content_markdown"])
+            self.assertIn("*Article caption*\n\nAfter image.", x_article["content_markdown"])
+            self.assertNotIn("Author footer noise", x_article["content_markdown"])
             self.assertNotIn("Timeline noise", x_article["content_markdown"])
             self.assertEqual(x_thread["title"], "Alice — Thread")
             self.assertEqual(x_thread["author"], "Alice")
@@ -2270,9 +2827,16 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertIn("First author post.", x_thread["content_markdown"])
             self.assertIn("Quoted Bob: useful evidence.", x_thread["content_markdown"])
             self.assertIn("Second author post.", x_thread["content_markdown"])
+            self.assertNotIn("**Alice", x_thread["content_markdown"])
+            self.assertIn("![Thread responsive](https://pbs.example.invalid/thread-responsive.png)", x_thread["content_markdown"])
+            self.assertNotIn("[![Thread responsive]", x_thread["content_markdown"])
+            self.assertIn("## Thread sources", x_thread["content_markdown"])
+            self.assertIn("1. [Post 1](https://x.com/alice/status/100)", x_thread["content_markdown"])
             self.assertIn("https://pbs.example.invalid/thread-responsive.png", x_thread["content_markdown"])
             self.assertIn("Media-only reply", x_thread["content_markdown"])
             self.assertNotIn("Unrelated reply.", x_thread["content_markdown"])
+            self.assertNotIn("Aria-hidden duplicate.", x_thread["content_markdown"])
+            self.assertNotIn("Collapsed duplicate.", x_thread["content_markdown"])
             self.assertNotIn("Reply to another chain.", x_thread["content_markdown"])
             self.assertNotIn("Recommended same-author post.", x_thread["content_markdown"])
             self.assertNotIn("Action noise", x_thread["content_markdown"])
@@ -2282,6 +2846,9 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertIn("https://cdn.example.invalid/brief.docx", remote)
             self.assertIn("https://cdn.example.invalid/notes.rtf", remote)
             self.assertIn("https://cdn.example.invalid/notes.odt", remote)
+            self.assertNotIn("https://github.com/example/project/blob/main/README.md", remote)
+            self.assertNotIn("https://github.com/example/project/graphs/contributors-data.txt", remote)
+            self.assertIn("https://cdn.example.invalid/export.txt", remote)
             self.assertIn("https://video.example.invalid/captions.vtt", remote)
             self.assertNotIn("https://video.example.invalid/soundtrack.mp3", remote)
             self.assertFalse(any(value.endswith((".mp4", ".mov", ".webm")) for value in remote))
@@ -2299,6 +2866,7 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertNotIn("<script", generic["snapshot_html"])
             self.assertNotIn("private form value", generic["snapshot_html"])
             self.assertNotIn("onerror", generic["snapshot_html"])
+            self.assertNotIn("The rise of Cursor", generic["snapshot_html"])
             self.assertNotIn("javascript:", generic["snapshot_html"])
             self.assertNotIn("<base", generic["snapshot_html"])
             self.assertNotIn("icons.svg", generic["snapshot_html"])
@@ -2314,8 +2882,10 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertIn("https://alpha.example.invalid/responsive-generic.png", generic_media)
             self.assertIn("https://alpha.example.invalid/responsive-generic.png", generic["snapshot_html"])
             self.assertEqual(main_article["capture_kind"], "article")
-            self.assertEqual(main_article["title"], "Main Story")
+            self.assertEqual(main_article["title"], "AI agents — what changes now")
             self.assertIn("Long story body.", main_article["content_markdown"])
+            self.assertTrue(main_article["has_video"])
+            self.assertIn("https://www.youtube-nocookie.com/embed/abc123", main_article["content_markdown"])
             self.assertEqual(product["capture_kind"], "html")
             self.assertEqual(product["title"], "Plans")
             self.assertEqual(plain_article["capture_kind"], "article")
@@ -2330,8 +2900,9 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertIn("https://x.com/alice", timeline["content_markdown"])
             self.assertNotIn("/status/500", timeline["content_markdown"])
             self.assertEqual(chinese_article["capture_kind"], "article")
-            self.assertEqual(chinese_article["title"], "研究札记")
+            self.assertEqual(chinese_article["title"], "人工智能未来")
             self.assertEqual(editorial_product["capture_kind"], "article")
+            self.assertEqual(editorial_product["title"], "Main Story")
             self.assertIn("Independent editorial evidence", editorial_product["content_markdown"])
             self.assertEqual(product_article["capture_kind"], "html")
             self.assertEqual(unknown_video["capture_kind"], "html")
@@ -2346,6 +2917,10 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertEqual(youtube_video["content_markdown"].count("First transcript cue."), 1)
             self.assertEqual(youtube_video["content_markdown"].count("Second transcript cue."), 1)
             self.assertIn("First transcript cue.\nSecond transcript cue.", youtube_video["content_markdown"])
+            self.assertNotIn("Sign in to confirm your age.", youtube_video["content_markdown"])
+            self.assertNotIn("https://www.youtube.com/watch?v=abc", {
+                asset["url"] for asset in youtube_video["remote_assets"]
+            })
             self.assertFalse(any(asset["media_type"].startswith(("audio/", "video/")) for asset in youtube_video["remote_assets"]))
             self.assertEqual(transcript_video["capture_kind"], "video")
             self.assertIn("https://training.example/replay/7", transcript_video["content_markdown"])
@@ -2355,6 +2930,96 @@ class IntelligenceOperationTest(unittest.TestCase):
             self.assertIn("Alice: First answer.", interview["content_markdown"])
             self.assertEqual(selection_capture["capture_kind"], "selection")
             self.assertIn("https://cdn.example/selected.png", selection_capture["content_markdown"])
+
+    def test_chrome_extension_extracts_single_x_post_as_markdown(self) -> None:
+        chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        if not chrome.is_file():
+            candidate = shutil.which("google-chrome") or shutil.which("chromium")
+            if not candidate:
+                self.skipTest("Chrome or Chromium is not installed")
+            chrome = Path(candidate)
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = Path(temporary) / "x-single.html"
+            fixture.write_text(
+                '<!doctype html><html><head><title>X</title></head><body><main>'
+                '<article data-testid="tweet"><div data-testid="User-Name"><span>Alice</span>'
+                '<a href="https://x.com/alice">@alice</a><a href="https://x.com/alice/status/900">'
+                '<time datetime="2026-08-11T01:00:00Z">Aug 11</time></a></div>'
+                '<div>Translated from English <button aria-label="Show original">Show original</button>'
+                '<button aria-label="About translation">About translation</button></div>'
+                '<div data-testid="tweetText">Single post with <a href="https://example.invalid/source">a source</a>.</div>'
+                '<div data-testid="quoteTweet">Quoted evidence.</div><div data-testid="tweetPhoto">'
+                '<img src="https://pbs.example.invalid/single.png" alt="Chart"></div>'
+                '<div role="group">Action noise</div></article>'
+                '<article data-testid="tweet"><div data-testid="User-Name"><span>Reply User</span>'
+                '<a href="https://x.com/replier/status/901"></a></div>'
+                '<div data-testid="tweetText">Unrelated reply.</div></article></main></body></html>',
+                encoding="utf-8",
+            )
+            missing_fixture = Path(temporary) / "x-missing.html"
+            missing_fixture.write_text(
+                '<!doctype html><html><head><title>X recommendations</title></head><body><main>'
+                '<article data-testid="tweet"><div data-testid="User-Name"><span>Alice</span>'
+                '<a href="https://x.com/alice/status/101"></a></div>'
+                '<div data-testid="tweetText">Recommended one.</div></article>'
+                '<article data-testid="tweet"><div data-testid="User-Name"><span>Alice</span>'
+                '<a href="https://x.com/alice/status/102"></a></div><div>Replying to '
+                '<a href="https://x.com/alice">@alice</a></div>'
+                '<div data-testid="tweetText">Recommended two.</div></article></main></body></html>',
+                encoding="utf-8",
+            )
+            capture, missing = self.run_browser_fixtures(chrome, [fixture, missing_fixture])
+            self.assertEqual(capture["capture_kind"], "tweet")
+            self.assertEqual(capture["title"], "Alice — X Post")
+            self.assertEqual(capture["author"], "Alice")
+            self.assertEqual(capture["published_at"], "2026-08-11T01:00:00Z")
+            self.assertEqual(capture["origin"], "https://x.com/alice/status/900")
+            self.assertEqual(capture["summary"], "Single post with a source.")
+            self.assertIn("Single post with [a source](https://example.invalid/source).", capture["content_markdown"])
+            self.assertIn("Quoted evidence.", capture["content_markdown"])
+            self.assertIn("https://pbs.example.invalid/single.png", capture["content_markdown"])
+            self.assertTrue(capture["rendered_translation"])
+            self.assertIn("浏览器中的可见译文", capture["content_markdown"])
+            self.assertNotIn("Show original", capture["content_markdown"])
+            self.assertNotIn("Translated from English", capture["content_markdown"])
+            self.assertNotIn("Unrelated reply.", capture["content_markdown"])
+            self.assertNotIn("Action noise", capture["content_markdown"])
+            self.assertEqual(missing["capture_kind"], "html")
+            self.assertEqual(missing["origin"], "https://x.com/alice/status/999")
+            self.assertEqual(missing["author"], "")
+            self.assertEqual(missing["published_at"], "")
+
+    def test_chrome_extension_uses_x_thread_marker_for_contiguous_author_posts(self) -> None:
+        chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        if not chrome.is_file():
+            candidate = shutil.which("google-chrome") or shutil.which("chromium")
+            if not candidate:
+                self.skipTest("Chrome or Chromium is not installed")
+            chrome = Path(candidate)
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = Path(temporary) / "x-marked-thread.html"
+            fixture.write_text(
+                '<!doctype html><html><head><title>X</title></head><body><main>'
+                '<a href="https://x.com/alice/thread/100">Thread</a>'
+                '<article data-testid="tweet"><div data-testid="User-Name"><span>Alice</span>'
+                '<a href="https://x.com/alice/status/100"><time datetime="2026-08-11T01:00:00Z">1</time></a></div>'
+                '<div data-testid="tweetText">First author post.</div></article>'
+                '<article data-testid="tweet"><div data-testid="User-Name"><span>Alice</span>'
+                '<a href="https://x.com/alice/status/101"><time datetime="2026-08-11T01:01:00Z">2</time></a></div>'
+                '<div data-testid="tweetText">Second author post.</div></article>'
+                '<article data-testid="tweet"><div data-testid="User-Name"><span>Reply User</span>'
+                '<a href="https://x.com/replier/status/901"></a></div>'
+                '<div data-testid="tweetText">Unrelated reply.</div></article></main></body></html>',
+                encoding="utf-8",
+            )
+            [capture] = self.run_browser_fixtures(chrome, [fixture])
+            self.assertEqual(capture["capture_kind"], "thread")
+            self.assertEqual(capture["title"], "Alice — Thread")
+            self.assertEqual(capture["origin"], "https://x.com/alice/status/100")
+            self.assertEqual(capture["summary"], "First author post.")
+            self.assertIn("First author post.", capture["content_markdown"])
+            self.assertIn("Second author post.", capture["content_markdown"])
+            self.assertNotIn("Unrelated reply.", capture["content_markdown"])
 
     def test_extension_builds_direct_pdf_capture_without_saving_video_binary(self) -> None:
         script = (
@@ -2366,12 +3031,25 @@ class IntelligenceOperationTest(unittest.TestCase):
             "eval(fs.readFileSync(process.argv[1],'utf8'));"
             "(async()=>{const pdf=LBrainCaptureWorker.directCapture({url:'https://example.invalid/report.pdf',title:'Annual Report'});"
             "const video=LBrainCaptureWorker.directCapture({url:'https://example.invalid/movie.mp4',title:'Recorded talk'});"
-            "const signed=LBrainCaptureWorker.directCapture({url:'https://example.invalid/download?id=signed',title:'Signed report',mimeType:'application/pdf'});"
+            "const signedUrl='https://example.invalid/report.pdf?Policy=private&Signature=fixture&Key-Pair-Id=key';"
+            "const signed=LBrainCaptureWorker.directCapture({url:signedUrl,title:signedUrl,mimeType:'application/pdf'});"
+            "const edgeSigned=LBrainCaptureWorker.directCapture({url:'https://example.invalid/report.pdf?hdnea=fixture~hmac=private&auth_key=secret&jwt=token',title:'Edge signed report',mimeType:'application/pdf'});"
             "const readable=LBrainCaptureWorker.directCapture({url:'https://example.invalid/2026%20%E5%B9%B4%E6%8A%A5.pdf',title:'Readable report'});"
             "const malformed=LBrainCaptureWorker.directCapture({url:'https://example.invalid/%E0%A4%A',title:'Malformed',mimeType:'application/pdf'});"
             "const longName=LBrainCaptureWorker.directCapture({url:'https://example.invalid/" + ("a" * 260) + ".pdf',title:'Long',mimeType:'application/pdf'});"
             "const prepared=await LBrainCaptureWorker.preparePayload(pdf);"
-            "console.log(JSON.stringify([pdf,video,signed,readable,malformed,longName,prepared,LBrainCaptureWorker.previewFor(pdf)]));})().catch(error=>{console.error(error);process.exit(1)});"
+            "const preparedWhitespace=await LBrainCaptureWorker.preparePayload({...pdf,title:' Annual Report ',author:' Example Author ',published_at:' 2026-08-11 ',content_markdown:' Body '});"
+            "const rotating=(signature)=>({schema:'lbrain.capture.v1',title:'Signed image',summary:'Image',origin:'https://example.invalid/post',scope:'page',author:'',published_at:'',capture_kind:'article',content_markdown:'![Image](https://cdn.invalid/a%7Cb.png?Policy=private&Signature='+signature+')',remote_assets:[{id:'image-1',url:'https://cdn.invalid/a|b.png?Policy=private&Signature='+signature,name:'images/a.png',media_type:'image/png'}]});"
+            "const preparedRotating=[await LBrainCaptureWorker.preparePayload(rotating('one')),await LBrainCaptureWorker.preparePayload(rotating('two'))];"
+            "const overlap=(signature)=>({schema:'lbrain.capture.v1',title:'Overlapping images',summary:'Images',origin:'https://example.invalid/post',scope:'page',author:'',published_at:'',capture_kind:'article',content_markdown:'![Base](https://cdn.invalid/hero.png) ![Signed](https://cdn.invalid/hero.png?Policy=private&Signature='+signature+')',remote_assets:[{id:'image-1',url:'https://cdn.invalid/hero.png',name:'images/base.png',media_type:'image/png'},{id:'image-2',url:'https://cdn.invalid/hero.png?Policy=private&Signature='+signature,name:'images/signed.png',media_type:'image/png'}]});"
+            "const preparedOverlap=[await LBrainCaptureWorker.preparePayload(overlap('one')),await LBrainCaptureWorker.preparePayload(overlap('two'))];"
+            "const routed=[await LBrainCaptureWorker.preparePayload({...pdf,origin:'https://app.invalid/#/doc/1'}),await LBrainCaptureWorker.preparePayload({...pdf,origin:'https://app.invalid/#/doc/2'})];"
+            "const raw='https://example.invalid/post?podcast_rss_token=fixture&part=1';"
+            "const privateLink='https://cdn.invalid/private.html?Policy=private&Signature=fixture&Key-Pair-Id=key';"
+            "const preparedSigned=await LBrainCaptureWorker.preparePayload({title:'Saved '+raw,summary:'Summary '+raw,author:'Author '+raw,published_at:'Date '+raw,origin:raw,content_markdown:'[Original]('+raw+') [Private]('+privateLink+') [OAuth](https://app.invalid/callback#id_token=fixture-secret) [Callback](https://app.invalid/#callback?code=fixture-secret) [Route](https://app.invalid/#/doc/1) [Normal](https://cdn.invalid/public.html?id=signed) [Install](https://docs.invalid/guide#install) [Video](https://www.youtube.com/watch?v=abc#t=120)',snapshot_html:'<a href=\"https://example.invalid/post?podcast_rss_token=fixture&amp;part=1\">Original</a><a href=\"https://cdn.invalid/private.html?Policy=private&amp;Signature=fixture&amp;Key-Pair-Id=key\">Private</a>',capture_kind:'html'});"
+            "const translated=LBrainCaptureWorker.previewFor({title:'Translated X',origin:'https://x.com/a/status/1',capture_kind:'tweet',"
+            "rendered_translation:true,preview_characters:3,remote_assets:[]});"
+            "console.log(JSON.stringify([pdf,video,signed,edgeSigned,readable,malformed,longName,prepared,preparedWhitespace,preparedSigned,preparedRotating,preparedOverlap,routed,LBrainCaptureWorker.previewFor(pdf),translated]));})().catch(error=>{console.error(error);process.exit(1)});"
         )
         result = subprocess.run(
             ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
@@ -2380,44 +3058,70 @@ class IntelligenceOperationTest(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        pdf, video, signed, readable, malformed, long_name, prepared, preview = json.loads(result.stdout)
+        pdf, video, signed, edge_signed, readable, malformed, long_name, prepared, prepared_whitespace, prepared_signed, prepared_rotating, prepared_overlap, routed, preview, translated = json.loads(result.stdout)
         self.assertEqual(pdf["remote_assets"][0]["media_type"], "application/pdf")
         self.assertIn("lbrain-asset://direct-document", pdf["content_markdown"])
         self.assertEqual(video["remote_assets"], [])
         self.assertIn("https://example.invalid/movie.mp4", video["content_markdown"])
         self.assertEqual(signed["remote_assets"][0]["media_type"], "application/pdf")
         self.assertTrue(str(signed["remote_assets"][0]["name"]).endswith(".pdf"))
+        self.assertEqual(signed["origin"], "https://example.invalid/report.pdf")
+        self.assertEqual(signed["title"], "https://example.invalid/report.pdf")
+        self.assertIn("?Policy=private&Signature=fixture", signed["remote_assets"][0]["url"])
+        self.assertEqual(edge_signed["origin"], "https://example.invalid/report.pdf")
+        self.assertIn("?hdnea=fixture", edge_signed["remote_assets"][0]["url"])
         self.assertEqual(readable["remote_assets"][0]["name"], "documents/2026 年报.pdf")
         self.assertTrue(malformed["remote_assets"][0]["name"].endswith(".pdf"))
         self.assertLessEqual(len(long_name["remote_assets"][0]["name"].split("/", 1)[1].encode()), 160)
         source_identity = "\0".join((pdf["title"], pdf["author"], pdf["published_at"], pdf["content_markdown"]))
         self.assertEqual(prepared["source_content_hash"], hashlib.sha256(source_identity.encode()).hexdigest())
         self.assertEqual(prepared["source_content_markdown"], pdf["content_markdown"])
+        whitespace_identity = "\0".join(("Annual Report", "Example Author", "2026-08-11", "Body"))
+        self.assertEqual(prepared_whitespace["source_content_hash"], hashlib.sha256(whitespace_identity.encode()).hexdigest())
+        self.assertEqual(prepared_whitespace["title"], "Annual Report")
+        self.assertEqual(prepared_whitespace["content_markdown"], "Body")
+        self.assertEqual(prepared_signed["origin"], "https://example.invalid/post")
+        self.assertNotIn("podcast_rss_token", prepared_signed["content_markdown"])
+        self.assertNotIn("podcast_rss_token", prepared_signed["snapshot_html"])
+        self.assertNotIn("podcast_rss_token", prepared_signed["source_content_markdown"])
+        self.assertNotIn("Policy=private", prepared_signed["content_markdown"])
+        self.assertNotIn("Policy=private", prepared_signed["snapshot_html"])
+        self.assertIn("https://cdn.invalid/public.html?id=signed", prepared_signed["content_markdown"])
+        self.assertIn("https://docs.invalid/guide#install", prepared_signed["content_markdown"])
+        self.assertIn("https://www.youtube.com/watch?v=abc#t=120", prepared_signed["content_markdown"])
+        self.assertNotIn("id_token", prepared_signed["content_markdown"])
+        self.assertNotIn("#callback?code", prepared_signed["content_markdown"])
+        self.assertIn("https://app.invalid/#/doc/1", prepared_signed["content_markdown"])
+        self.assertEqual(prepared_rotating[0]["source_content_hash"], prepared_rotating[1]["source_content_hash"])
+        self.assertIn("lbrain-asset://image-1", prepared_rotating[0]["source_content_markdown"])
+        self.assertIn("Signature=one", prepared_rotating[0]["content_markdown"])
+        self.assertEqual(prepared_overlap[0]["source_content_hash"], prepared_overlap[1]["source_content_hash"])
+        self.assertIn("lbrain-asset://image-1", prepared_overlap[0]["source_content_markdown"])
+        self.assertIn("lbrain-asset://image-2", prepared_overlap[0]["source_content_markdown"])
+        self.assertNotIn("Policy=", prepared_overlap[0]["source_content_markdown"])
+        self.assertEqual([item["origin"] for item in routed], ["https://app.invalid/#/doc/1", "https://app.invalid/#/doc/2"])
+        for field in ("title", "summary", "author", "published_at"):
+            self.assertNotIn("podcast_rss_token", prepared_signed[field])
         self.assertEqual(preview["details"][0], ["保存内容", "原始文档"])
+        self.assertIn("自动译文", translated["summary"])
+        self.assertIn("显示原文", translated["summary"])
 
-    def test_extension_cancelled_confirmation_has_no_native_write(self) -> None:
+    def test_extension_requests_temporary_access_for_cross_origin_images(self) -> None:
         script = (
-            "const fs=require('fs');let handler;let messageHandler,connectHandler;let nativeWrites=0;let calls=0,delivered;const cached={};"
-            "global.caches={async open(){return{async put(key,response){cached[key]=await response.text()},"
-            "async match(key){return cached[key]===undefined?undefined:new Response(cached[key])},async delete(key){delete cached[key]}}}};"
-            "global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(fn){messageHandler=fn}},onConnect:{addListener(fn){connectHandler=fn}},"
-            "getURL(value){return 'chrome-extension://test/'+value},lastError:null,connectNative(){nativeWrites++;}},"
-            "contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},"
-            "action:{onClicked:{addListener(fn){handler=fn}}},"
-            "storage:{local:{async get(){return{}},async remove(){},async set(){}}},"
-            "scripting:{async executeScript(){calls++;if(calls===1)return[{result:'text/html'}];if(calls===2)return[{}];"
-            "return[{result:{schema:'lbrain.capture.v1',title:'Alpha School',summary:'Home',"
-            "origin:'https://alpha.example.invalid/',scope:'page',author:'',published_at:'',"
-            "content_markdown:'[HTML](lbrain-asset://html-snapshot)',capture_kind:'html',snapshot_html:'<main>Alpha</main>',"
-            "preview_characters:5,extraction_status:'complete',remote_assets:[],assets:[]}}]}},"
-            "windows:{async create(options){const id=new URL(options.url).searchParams.get('id');let listener;"
-            "const port={name:'lbrain-confirm',onMessage:{addListener(fn){listener=fn}},postMessage(message){delivered=message}};"
-            "queueMicrotask(()=>{connectHandler(port);listener({type:'ready',id})});return{id:9}},onRemoved:{addListener(){}}},permissions:{async remove(){}},"
-            "notifications:{async create(){throw new Error('unexpected notification')},onButtonClicked:{addListener(){}}}};"
+            "const fs=require('fs');"
+            "global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}},onConnect:{addListener(){}},lastError:null},"
+            "contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},"
+            "windows:{onRemoved:{addListener(){}}},notifications:{onButtonClicked:{addListener(){}}}};"
             "eval(fs.readFileSync(process.argv[1],'utf8'));"
-            "handler({id:7,url:'https://alpha.example.invalid/',title:'Alpha School'}).then(()=>{"
-            "console.log(JSON.stringify({nativeWrites,calls,cached:Object.keys(cached).length,kind:delivered.preview.details[0][1]}))"
-            "}).catch(error=>{console.error(error);process.exit(1)});"
+            "const preview=LBrainCaptureWorker.previewFor({title:'Article',origin:'https://canonical.invalid/post',capture_kind:'article',preview_characters:10,remote_assets:["
+            "{url:'https://cdn.invalid/image.png',name:'images/image.png',media_type:'image/png'},"
+            "{url:'https://files.invalid/report.pdf',name:'documents/report.pdf',media_type:'application/pdf'},"
+            "{url:'https://canonical.invalid/figure.png',name:'images/figure.png',media_type:'image/png'},"
+            "{url:'https://media.invalid/video.mp4',name:'video.mp4',media_type:'video/mp4'},"
+            "{url:'https://*/wildcard.png',name:'images/wildcard.png',media_type:'image/png'},"
+            "{url:'https://*.example.com/wildcard.png',name:'images/subdomain-wildcard.png',media_type:'image/png'},"
+            "{url:'https://article.invalid/local.png',name:'images/local.png',media_type:'image/png'}]},'https://article.invalid/current');"
+            "console.log(JSON.stringify(preview.permission_origins));"
         )
         result = subprocess.run(
             ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
@@ -2428,7 +3132,99 @@ class IntelligenceOperationTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             json.loads(result.stdout),
-            {"nativeWrites": 0, "calls": 3, "cached": 0, "kind": "HTML 快照"},
+            ["https://cdn.invalid/*", "https://files.invalid/*", "https://canonical.invalid/*"],
+        )
+
+    def test_native_receiver_rewrites_markdown_safe_pipe_urls(self) -> None:
+        spec = importlib.util.spec_from_file_location("capture_host_pipe_url", CAPTURE_NATIVE_HOST)
+        assert spec and spec.loader
+        host = importlib.util.module_from_spec(spec)
+        with mock.patch.object(sys, "path", [str(CAPTURE_NATIVE_HOST.parent), *sys.path]):
+            spec.loader.exec_module(host)
+        self.assertEqual(
+            host.replace_exact_url(
+                "[Pipe link](https://example.invalid/a%7Cb)",
+                "https://example.invalid/a|b",
+                "lbrain-asset://asset-1",
+            ),
+            "[Pipe link](lbrain-asset://asset-1)",
+        )
+        webp = b"RIFF\x04\x00\x00\x00WEBP"
+        png = b"\x89PNG\r\n\x1a\n"
+        vtt = b"WEBVTT\n\n00:00.000 --> 00:01.000\nCaption\n"
+        self.assertEqual(host.permitted_media_type(webp, "image/webp", "image/jpeg"), "image/webp")
+        self.assertEqual(host.permitted_media_type(png, "image/png", "image/jpeg"), "image/png")
+        self.assertEqual(host.permitted_media_type(vtt, "text/plain", "text/vtt"), "text/vtt")
+        self.assertEqual(host.permitted_media_type(b"plain text", "text/plain", "text/markdown"), "text/markdown")
+        self.assertEqual(host.permitted_media_type(b"plain text", "text/plain", "text/plain"), "text/plain")
+        self.assertEqual(host.permitted_media_type(b"<html>", "text/html", "text/plain"), "")
+        self.assertEqual(host.permitted_media_type(b'{"error":"denied"}', "application/json", "image/jpeg"), "")
+        self.assertEqual(host.permitted_media_type(b'{"error":"denied"}', "application/json", "application/pdf"), "")
+        for declared in ("text/plain", "text/csv", "text/markdown", "text/vtt", "application/x-subrip"):
+            self.assertEqual(host.permitted_media_type(b'{"error":"denied"}', "application/json", declared), "")
+        self.assertEqual(
+            host.stored_asset_name({"name": "images/photo.jpg"}, "image/webp"),
+            "images/photo.webp",
+        )
+        self.assertEqual(
+            host.stored_asset_name({"name": "documents/report.docx"}, "application/pdf"),
+            "documents/report.pdf",
+        )
+
+    def test_extension_cancelled_confirmation_has_no_native_write(self) -> None:
+        script = r'''
+const fs=require("fs"),{webcrypto}=require("crypto");
+let messageHandler,connectHandler,nativeWrites=0,calls=0;const cached={},shared={};
+const session={async get(key){return{[key]:shared[key]}},async set(values){Object.assign(shared,values)},
+  async remove(key){delete shared[key]}};
+global.caches={async open(){return{async put(key,response){cached[key]=await response.text()},
+  async match(key){return cached[key]===undefined?undefined:new Response(cached[key])},
+  async delete(key){delete cached[key]}}},async delete(){}};
+global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},
+  onMessage:{addListener(fn){messageHandler=fn}},onConnect:{addListener(fn){connectHandler=fn}},getURL(value){return"chrome-extension://test/"+value},
+  lastError:null,connectNative(){nativeWrites++}},contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},
+  action:{onClicked:{addListener(){}}},storage:{session,local:{async get(){return{}},async remove(){},async set(){}}},
+  scripting:{async executeScript(){calls++;if(calls===1)return[{result:"text/html"}];if(calls===2)return[{}];
+    return[{result:{schema:"lbrain.capture.v1",title:"Alpha School",summary:"Home",
+      origin:"https://alpha.example.invalid/",scope:"page",author:"",published_at:"",
+      content_markdown:"[Signed](https://cdn.invalid/report?X-Amz-Signature=fixture-secret)",capture_kind:"html",
+      snapshot_html:"<a href='https://cdn.invalid/report?X-Amz-Signature=fixture-secret'>Alpha</a>",
+      preview_characters:5,extraction_status:"complete",remote_assets:[{id:"signed",name:"documents/report.pdf",
+        media_type:"application/pdf",url:"https://cdn.invalid/report?X-Amz-Signature=fixture-secret"}],assets:[]}}]}},
+  windows:{onRemoved:{addListener(){}}},permissions:{async remove(){return true}},
+  notifications:{async create(){throw new Error("unexpected notification")},onButtonClicked:{addListener(){}}}};
+global.crypto=webcrypto;eval(fs.readFileSync(process.argv[1],"utf8"));
+function send(message){return new Promise(resolve=>messageHandler(message,{},resolve))}
+async function waitFor(predicate){for(let i=0;i<50;i++){if(predicate())return;await Promise.resolve()}throw new Error("not ready")}
+(async()=>{const tab={id:7,url:"https://alpha.example.invalid/",title:"Alpha School"};
+  const preparing=await send({type:"confirmation.prepare",tab,scope:"page"});
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.phase==="ready");
+  const kind=shared["lbrain-popup-job-v1"].preview.details[0][1];
+  const beforeClose={cached:Object.keys(cached).length,signed:Object.values(cached).join("").includes("fixture-secret")};
+  let listener,disconnect;connectHandler({name:"lbrain-popup",onMessage:{addListener(fn){listener=fn}},
+    onDisconnect:{addListener(fn){disconnect=fn}},postMessage(){}});listener({type:"watch",id:preparing.id});
+  disconnect();await waitFor(()=>!shared["lbrain-popup-job-v1"]);
+  console.log(JSON.stringify({nativeWrites,calls,beforeClose,cached:Object.keys(cached).length,kind,
+    job:Boolean(shared["lbrain-popup-job-v1"])}))})()
+  .catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                "nativeWrites": 0,
+                "calls": 3,
+                "beforeClose": {"cached": 0, "signed": False},
+                "cached": 0,
+                "kind": "HTML 快照",
+                "job": False,
+            },
         )
 
     def test_extension_stream_waits_for_each_native_ack(self) -> None:
@@ -2443,7 +3239,7 @@ class IntelligenceOperationTest(unittest.TestCase):
             "contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},"
             "windows:{onRemoved:{addListener(){}}},notifications:{onButtonClicked:{addListener(){}}}};"
             "eval(fs.readFileSync(process.argv[1],'utf8'));"
-            "const bytes=new Blob([new Uint8Array(900000)]);"
+            "const blob=new Blob([new Uint8Array(900000)]);const bytes={size:blob.size,reader:blob.stream().getReader()};"
             "LBrainCaptureWorker.streamCapture({schema:'lbrain.capture.v1'},{kind:'binary',mediaType:'application/pdf',bytes,attachments:[]})"
             ".then(result=>console.log(JSON.stringify({status:result.status,chunks,overlap,hashes})))"
             ".catch(error=>{console.error(error);process.exit(1)});"
@@ -2460,6 +3256,286 @@ class IntelligenceOperationTest(unittest.TestCase):
         self.assertGreaterEqual(output["chunks"], 4)
         self.assertFalse(output["overlap"])
         self.assertTrue(output["hashes"])
+
+    def test_extension_reuses_partial_receipt_after_chrome_storage_round_trip(self) -> None:
+        script = r'''
+const fs=require("fs"),{webcrypto}=require("crypto");
+const local={},payloads=[];
+const persistedKey=value=>String(value).split("\0",1)[0];
+const storage={
+  async get(request){if(request===null)return{...local};const key=persistedKey(request);return local[key]===undefined?{}:{[key]:local[key]}},
+  async set(values){for(const [key,value] of Object.entries(values))local[persistedKey(key)]=value},
+  async remove(request){if(local[request]!==undefined)delete local[request];else delete local[persistedKey(request)]}
+};
+function connectNative(){let onMessage;const chunks=[];return{
+  onMessage:{addListener(fn){onMessage=fn}},onDisconnect:{addListener(){}},disconnect(){},
+  postMessage(message){
+    if(message.type==="chunk"){
+      if(message.channel==="payload")chunks.push(Buffer.from(message.data,"base64"));
+      queueMicrotask(()=>onMessage({type:"ack",channel:message.channel,sequence:message.sequence}));
+    }
+    if(message.type==="end"){
+      const payload=JSON.parse(Buffer.concat(chunks).toString());payloads.push(payload);
+      const recovered=Boolean(payload.recovery_target&&payload.expected_hash);
+      queueMicrotask(()=>onMessage({
+        status:payloads.length===1?"partial":recovered?"saved":"new_version",
+        target:payloads.length===1?"Inbox/Captures/recovery.md":recovered?payload.recovery_target:"Inbox/Captures/recovery-v2.md",
+        capture_id:"recovery",version:payloads.length===1||recovered?1:2,
+        expected_hash:"a".repeat(64),source_content_hash:payload.source_content_hash
+      }));
+    }
+  }
+}};
+global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}},
+  onConnect:{addListener(){}},lastError:null,connectNative},contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},
+  action:{onClicked:{addListener(){}}},windows:{onRemoved:{addListener(){}}},
+  storage:{local:storage,session:{async set(){}}},notifications:{async create(){},onButtonClicked:{addListener(){}}}};
+global.crypto=webcrypto;
+eval(fs.readFileSync(process.argv[1],"utf8"));
+const capture={schema:"lbrain.capture.v1",title:"Recovery",summary:"Recovery",origin:"https://example.invalid/recovery/",
+  scope:"page",author:"",published_at:"",content_markdown:"Recovery body",capture_kind:"video",
+  extraction_status:"complete",remote_assets:[]};
+(async()=>{
+  const first=await LBrainCaptureWorker.savePrepared({id:7,url:capture.origin,title:capture.title},capture);
+  const retryCapture={...capture,origin:"https://example.invalid/recovery"};
+  const second=await LBrainCaptureWorker.savePrepared(
+    {id:7,url:retryCapture.origin,title:retryCapture.title},retryCapture);
+  const legacyCapture={...capture,title:"Legacy recovery",summary:"Legacy recovery",
+    origin:"https://example.invalid/legacy-recovery",content_markdown:"Legacy recovery body"};
+  const legacyPayload=await LBrainCaptureWorker.preparePayload(legacyCapture);
+  const legacyIdentity=`${legacyCapture.origin}\0${legacyCapture.scope}`;
+  const legacyId=Buffer.from(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(legacyIdentity))).toString("hex");
+  const legacyKey=`capture-recovery:${legacyCapture.origin}///`;
+  local[legacyKey]={recovery_target:`Inbox/Captures/legacy-recovery-${legacyId.slice(0,8)}.md`,expected_hash:"b".repeat(64),
+    source_content_hash:legacyPayload.source_content_hash};
+  const legacy=await LBrainCaptureWorker.savePrepared(
+    {id:8,url:legacyCapture.origin,title:legacyCapture.title},legacyCapture);
+  const jsonCapture={...capture,title:"JSON recovery",summary:"JSON recovery",
+    origin:"https://example.invalid/json-recovery/",content_markdown:"JSON recovery body"};
+  const jsonRetry={...jsonCapture,origin:"https://example.invalid/json-recovery"};
+  const jsonPayload=await LBrainCaptureWorker.preparePayload(jsonRetry);
+  const jsonIdentity=`${jsonRetry.origin}\0${jsonRetry.scope}`;
+  const jsonId=Buffer.from(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(jsonIdentity))).toString("hex");
+  const jsonKey=`capture-recovery:${JSON.stringify([jsonCapture.origin,jsonCapture.scope])}`;
+  local[jsonKey]={recovery_target:`Inbox/Captures/json-recovery-${jsonId.slice(0,8)}.md`,
+    expected_hash:"f".repeat(64),source_content_hash:jsonPayload.source_content_hash};
+  const jsonRecovery=await LBrainCaptureWorker.savePrepared(
+    {id:9,url:jsonRetry.origin,title:jsonRetry.title},jsonRetry);
+  const nulCapture={...capture,title:"NUL recovery",summary:"NUL recovery",
+    origin:"https://example.invalid/nul-recovery",content_markdown:"NUL recovery body"};
+  const nulPayload=await LBrainCaptureWorker.preparePayload(nulCapture);
+  const nulIdentity=`${nulCapture.origin}\0${nulCapture.scope}`;
+  const nulId=Buffer.from(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(nulIdentity))).toString("hex");
+  const nulKey=`capture-recovery:${nulIdentity}`;
+  local[nulKey]={recovery_target:`Inbox/Captures/nul-recovery-${nulId.slice(0,8)}.md`,
+    expected_hash:"1".repeat(64),source_content_hash:nulPayload.source_content_hash};
+  const nulRecovery=await LBrainCaptureWorker.savePrepared(
+    {id:10,url:nulCapture.origin,title:nulCapture.title},nulCapture);
+  const wrongScopeCapture={...capture,title:"Wrong scope",summary:"Wrong scope",
+    origin:"https://example.invalid/wrong-scope",content_markdown:"Wrong scope body"};
+  const wrongScopePayload=await LBrainCaptureWorker.preparePayload(wrongScopeCapture);
+  const selectionIdentity=`${wrongScopeCapture.origin}\0selection`;
+  const selectionId=Buffer.from(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(selectionIdentity))).toString("hex");
+  const wrongScopeKey=`capture-recovery:${wrongScopeCapture.origin}`;
+  local[wrongScopeKey]={recovery_target:`Inbox/Captures/wrong-scope-${selectionId.slice(0,8)}.md`,
+    expected_hash:"c".repeat(64),source_content_hash:wrongScopePayload.source_content_hash};
+  const wrongScope=await LBrainCaptureWorker.savePrepared(
+    {id:11,url:wrongScopeCapture.origin,title:wrongScopeCapture.title},wrongScopeCapture);
+  const staleCapture={...capture,title:"Stale recovery",summary:"Stale recovery",
+    origin:"https://example.invalid/stale-recovery",content_markdown:"Changed body"};
+  const staleIdentity=`${staleCapture.origin}\0${staleCapture.scope}`;
+  const staleId=Buffer.from(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(staleIdentity))).toString("hex");
+  const staleKey=`capture-recovery:${staleCapture.origin}`;
+  local[staleKey]={recovery_target:`Inbox/Captures/stale-recovery-${staleId.slice(0,8)}.md`,
+    expected_hash:"d".repeat(64),source_content_hash:"e".repeat(64)};
+  const stale=await LBrainCaptureWorker.savePrepared(
+    {id:12,url:staleCapture.origin,title:staleCapture.title},staleCapture);
+  console.log(JSON.stringify({first:first.status,second:second.status,version:second.version,
+    recovery_target:payloads[1].recovery_target,expected_hash:payloads[1].expected_hash,
+    legacy:legacy.status,legacy_version:legacy.version,legacy_recovery_target:payloads[2].recovery_target,
+    legacy_expected_hash:payloads[2].expected_hash,legacy_removed:local[legacyKey]===undefined,
+    json:jsonRecovery.status,json_recovery_target:payloads[3].recovery_target,
+    json_removed:local[jsonKey]===undefined,nul:nulRecovery.status,
+    nul_recovery_target:payloads[4].recovery_target,nul_removed:local[nulKey]===undefined,
+    wrong_scope:wrongScope.status,wrong_scope_recovery_target:payloads[5].recovery_target||null,
+    wrong_scope_preserved:local[wrongScopeKey]!==undefined,stale:stale.status,
+    stale_recovery_target:payloads[6].recovery_target||null,stale_removed:local[staleKey]===undefined}));
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                "first": "partial",
+                "second": "saved",
+                "version": 1,
+                "recovery_target": "Inbox/Captures/recovery.md",
+                "expected_hash": "a" * 64,
+                "legacy": "saved",
+                "legacy_version": 1,
+                "legacy_recovery_target": "Inbox/Captures/legacy-recovery-"
+                + hashlib.sha256(b"https://example.invalid/legacy-recovery\0page").hexdigest()[:8]
+                + ".md",
+                "legacy_expected_hash": "b" * 64,
+                "legacy_removed": True,
+                "json": "saved",
+                "json_recovery_target": "Inbox/Captures/json-recovery-"
+                + hashlib.sha256(b"https://example.invalid/json-recovery\0page").hexdigest()[:8]
+                + ".md",
+                "json_removed": True,
+                "nul": "saved",
+                "nul_recovery_target": "Inbox/Captures/nul-recovery-"
+                + hashlib.sha256(b"https://example.invalid/nul-recovery\0page").hexdigest()[:8]
+                + ".md",
+                "nul_removed": True,
+                "wrong_scope": "new_version",
+                "wrong_scope_recovery_target": None,
+                "wrong_scope_preserved": True,
+                "stale": "new_version",
+                "stale_recovery_target": None,
+                "stale_removed": True,
+            },
+        )
+
+    def test_extension_retries_without_mhtml_when_its_stream_cannot_be_read(self) -> None:
+        script = (
+            "const fs=require('fs');let listeners=[];let attempts=0;let ended=[],channels=[[],[]];"
+            "function port(){const index=attempts++;let onMessage;return{onMessage:{addListener(fn){onMessage=fn}},"
+            "onDisconnect:{addListener(){}},disconnect(){},postMessage(message){"
+            "if(message.type==='chunk'){channels[index].push(message.channel);queueMicrotask(()=>onMessage({type:'ack',channel:message.channel,sequence:message.sequence}))};"
+            "if(message.type==='end'){ended.push(index);queueMicrotask(()=>onMessage({status:'saved',target:'Inbox/Captures/example.md',capture_id:'id',version:1}))}}}};"
+            "global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}},onConnect:{addListener(){}},lastError:null,connectNative:port},"
+            "contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},"
+            "windows:{onRemoved:{addListener(){}}},notifications:{onButtonClicked:{addListener(){}}}};"
+            "eval(fs.readFileSync(process.argv[1],'utf8'));"
+            "const broken={size:8,reader:{async read(){throw new Error('network error')},releaseLock(){}}};"
+            "LBrainCaptureWorker.streamCaptureWithFallback({schema:'lbrain.capture.v1'},{kind:'mhtml',mediaType:'multipart/related',bytes:broken,attachments:[{id:'image',mediaType:'image/png',bytes:new Blob(['image'])}]})"
+            ".then(result=>console.log(JSON.stringify({status:result.status,attempts,ended,secondAsset:channels[1].includes('asset:image')})))"
+            ".catch(error=>{console.error(error);process.exit(1)});"
+        )
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            {"status": "saved", "attempts": 2, "ended": [1], "secondAsset": True},
+        )
+
+    def test_extension_creates_mhtml_after_fetching_attachments(self) -> None:
+        script = (
+            "const fs=require('fs');let fetched=false,snapshotAfterFetch=false,credentials='';"
+            "global.fetch=async(_url,options)=>{fetched=true;credentials=options.credentials;return{ok:true,headers:{get(){return'image/png'}},async blob(){return new Blob(['image'])}}};"
+            "global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}},onConnect:{addListener(){}},lastError:null},"
+            "contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},"
+            "scripting:{async executeScript(){}},pageCapture:{saveAsMHTML(_options,done){snapshotAfterFetch=fetched;done(new Blob(['snapshot']))}},"
+            "windows:{onRemoved:{addListener(){}}},notifications:{onButtonClicked:{addListener(){}}}};"
+            "eval(fs.readFileSync(process.argv[1],'utf8'));"
+            "LBrainCaptureWorker.snapshotFor({id:7,url:'https://evil.invalid/current'},{capture_kind:'article',origin:'https://example.invalid/canonical',remote_assets:[{id:'image',url:'https://example.invalid/image.png',name:'images/image.png',media_type:'image/png'}]})"
+            ".then(snapshot=>console.log(JSON.stringify({snapshotAfterFetch,attachments:snapshot.attachments.length,streamed:Boolean(snapshot.bytes.reader),credentials})))"
+            ".catch(error=>{console.error(error);process.exit(1)});"
+        )
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout), {"snapshotAfterFetch": True, "attachments": 1, "streamed": True, "credentials": "omit"}
+        )
+
+    def test_extension_does_not_follow_a_credentialed_cross_origin_redirect(self) -> None:
+        script = (
+            "const fs=require('fs');const calls=[];"
+            "global.fetch=async(_url,options)=>{calls.push({credentials:options.credentials,redirect:options.redirect||'follow'});"
+            "if(options.credentials==='include')throw new TypeError('redirect blocked');"
+            "return{ok:true,headers:{get(){return'image/png'}},async blob(){return new Blob(['image'])}}};"
+            "global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}},onConnect:{addListener(){}},lastError:null},"
+            "contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},"
+            "scripting:{async executeScript(){}},pageCapture:{saveAsMHTML(_options,done){done(new Blob(['snapshot']))}},"
+            "windows:{onRemoved:{addListener(){}}},notifications:{onButtonClicked:{addListener(){}}}};"
+            "eval(fs.readFileSync(process.argv[1],'utf8'));"
+            "LBrainCaptureWorker.snapshotFor({id:7,url:'https://article.invalid/post'},{capture_kind:'article',origin:'https://article.invalid/post',remote_assets:[{id:'image',url:'https://article.invalid/redirect',name:'images/image.png',media_type:'image/png'}]})"
+            ".then(snapshot=>console.log(JSON.stringify({calls,attachments:snapshot.attachments.length})))"
+            ".catch(error=>{console.error(error);process.exit(1)});"
+        )
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {
+            "calls": [
+                {"credentials": "include", "redirect": "error"},
+                {"credentials": "omit", "redirect": "follow"},
+            ],
+            "attachments": 1,
+        })
+
+    def test_extension_keeps_fetched_assets_when_mhtml_is_unavailable(self) -> None:
+        script = (
+            "const fs=require('fs');let credentials='';"
+            "global.fetch=async(_url,options)=>{credentials=options.credentials;return{ok:true,headers:{get(){return'image/png'}},async blob(){return new Blob(['image'])}}};"
+            "let mhtmlCalls=0;"
+            "global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}},onConnect:{addListener(){}},lastError:{message:'network error'}},"
+            "contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},"
+            "scripting:{async executeScript(){}},pageCapture:{saveAsMHTML(){mhtmlCalls+=1;throw new Error('network error')}},"
+            "windows:{onRemoved:{addListener(){}}},notifications:{onButtonClicked:{addListener(){}}}};"
+            "eval(fs.readFileSync(process.argv[1],'utf8'));"
+            "LBrainCaptureWorker.snapshotFor({id:7,url:'https://article.invalid/post'},{capture_kind:'html',origin:'https://article.invalid/post',remote_assets:[{id:'image',url:'https://article.invalid/image.png',name:'images/image.png',media_type:'image/png'}]})"
+            ".then(snapshot=>console.log(JSON.stringify({kind:snapshot.kind,attachments:snapshot.attachments.length,bytes:snapshot.bytes.length,mhtmlCalls,credentials})))"
+            ".catch(error=>{console.error(error);process.exit(1)});"
+        )
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            {"kind": "none", "attachments": 1, "bytes": 0, "mhtmlCalls": 0, "credentials": "include"},
+        )
+
+    def test_extension_bounds_attachment_fetch_time(self) -> None:
+        script = (
+            "const fs=require('fs');const timeouts=[];let bounded=0,active=0,maxActive=0;"
+            "global.AbortSignal={timeout(value){timeouts.push(value);return{aborted:false}}};"
+            "global.fetch=async(_url,options)=>{bounded+=Number(Boolean(options.signal));active++;maxActive=Math.max(maxActive,active);"
+            "await new Promise(resolve=>setTimeout(resolve,5));active--;throw new Error('offline')};"
+            "global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}},onConnect:{addListener(){}},lastError:null},"
+            "contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},"
+            "scripting:{async executeScript(){}},windows:{onRemoved:{addListener(){}}},notifications:{onButtonClicked:{addListener(){}}}};"
+            "eval(fs.readFileSync(process.argv[1],'utf8'));"
+            "Promise.allSettled([LBrainCaptureWorker.snapshotFor({id:7,url:'https://article.invalid/post'},{capture_kind:'html',origin:'https://article.invalid/post',remote_assets:[{id:'image',url:'https://cdn.invalid/image.png',name:'images/image.png',media_type:'image/png'},{id:'document',url:'https://files.invalid/report.pdf',name:'documents/report.pdf',media_type:'application/pdf'}]}),"
+            "LBrainCaptureWorker.snapshotFor({id:8,url:'https://files.invalid/report.pdf'},{capture_kind:'document',origin:'https://files.invalid/report.pdf',remote_assets:[{id:'direct-document',url:'https://files.invalid/report.pdf',name:'documents/report.pdf',media_type:'application/pdf'}]})])"
+            ".then(results=>console.log(JSON.stringify({timeouts,bounded,maxActive,attachments:results[0].value.attachments.length,direct:results[1].status})))"
+            ".catch(error=>{console.error(error);process.exit(1)});"
+        )
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout), {"timeouts": [30000, 30000], "bounded": 4, "maxActive": 3, "attachments": 0, "direct": "rejected"}
+        )
 
     def test_native_receiver_does_not_hold_every_attachment_open(self) -> None:
         script = r'''
@@ -2496,24 +3572,308 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "130")
 
-    def test_extension_confirmation_releases_only_new_permissions(self) -> None:
-        script = (
-            "const fs=require('fs');const listeners={},nodes={},cached={};let decision,requested,closed=0,cachedAtDecision=false,reserved=false,reservedBeforePermissions=true;"
-            "for(const id of ['#title','#summary','#details','#save','#cancel'])nodes[id]={textContent:'',disabled:false,"
-            "addEventListener(type,fn){listeners[id+type]=fn},append(){}};"
-            "global.document={querySelector(id){return nodes[id]},createElement(){return{textContent:''}}};"
-            "global.location={search:'?id=stored'};global.window={close(){closed++}};"
-            "global.caches={async open(){return{async put(key,response){cached[key]=await response.text()},async delete(key){delete cached[key]}}}};"
-            "global.chrome={runtime:{getURL(value){return 'chrome-extension://test/'+value},connect(){return{onMessage:{addListener(fn){"
-            "queueMicrotask(()=>fn({type:'preview',preview:{title:'Saved',summary:'',permission_origins:['https://existing.invalid/*','https://new.invalid/*'],details:[]},"
-            "capture:{schema:'lbrain.capture.v1'},tab:{id:7}}))}},postMessage(){},disconnect(){}}},"
-            "async sendMessage(message){if(message.type==='confirmation.reserve')reserved=true;decision=message;cachedAtDecision=Object.keys(cached).length===1;return{status:'saved'}}},"
-            "windows:{async getCurrent(){return{id:19}}},"
-            "permissions:{async contains({origins}){reservedBeforePermissions=reservedBeforePermissions&&reserved;return origins[0].includes('existing')},async request({origins}){requested=origins;return true},"
-            "async remove(){throw new Error('worker owns permission cleanup')}}};"
-            "eval(fs.readFileSync(process.argv[1],'utf8'));setTimeout(async()=>{await listeners['#saveclick']();"
-            "console.log(JSON.stringify({requested,release:decision.release_origins,closed,cachedAtDecision,reservedBeforePermissions}))},0);"
+    def test_bundle_escapes_untrusted_metadata_and_extracted_text(self) -> None:
+        spec = importlib.util.spec_from_file_location("capture_operations_markdown_text", CAPTURE_OPERATIONS)
+        assert spec and spec.loader
+        operations = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(operations)
+        beacon = "![beacon](https://tracker.invalid/pixel.png)"
+        rendered = operations.render_bundle(
+            beacon, "summary", f"https://example.invalid/{beacon}", "page", "Safe body.",
+            beacon, beacon, "complete", "capture-id", "a" * 64, "b" * 64, 1,
+            "Inbox/Captures/_assets/capture-id/v1/manifest.json", [], "", beacon,
         )
+        markdown = rendered.split("---\n", 2)[2]
+        self.assertNotIn(beacon, markdown)
+        self.assertIn(r"\!\[beacon\]", markdown)
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "captions.vtt"
+            source.write_text(
+                f"WEBVTT\n\n00:00 --> 00:01\n{beacon}\n<img src=https://tracker.invalid/html>\n",
+                encoding="utf-8",
+            )
+            enriched, _ = operations.enriched_bundle_content("Safe body.", [{
+                "name": "captions.vtt", "media_type": "text/vtt", "_source": source
+            }])
+        self.assertNotIn(beacon, enriched)
+        self.assertNotIn("<img", enriched)
+        self.assertIn(r"\!\[beacon\]", enriched)
+
+    def test_binary_disclosure_uses_full_parser_only_for_sensitive_chunks(self) -> None:
+        spec = importlib.util.spec_from_file_location("capture_operations_binary_scan", CAPTURE_OPERATIONS)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        operations = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(operations)
+        with tempfile.TemporaryDirectory() as temporary:
+            asset = Path(temporary) / "document.bin"
+            asset.write_bytes(b"%PDF-1.7\n" + b"ordinary document bytes\n" * 1000)
+            with mock.patch.object(operations, "reject_secrets") as reject, mock.patch.object(
+                operations.shutil, "which", return_value=None
+            ):
+                operations.reject_binary_secret_file(ROOT, asset, "application/octet-stream")
+            reject.assert_not_called()
+
+            asset.write_bytes(b'prefix api_key = "fixture-secret-value-12345" suffix')
+            with mock.patch.object(operations, "reject_secrets") as reject:
+                operations.reject_binary_secret_file(ROOT, asset, "application/octet-stream")
+            reject.assert_called()
+
+    def test_extension_popup_renders_immediately_and_maps_save_states(self) -> None:
+        html = (CAPTURE_EXTENSION / "confirm.html").read_text(encoding="utf-8")
+        self.assertIn('data-phase="preparing"', html)
+        self.assertNotIn("aria-busy", html)
+        script = r'''
+const fs=require("fs"),vm=require("vm");
+const source=fs.readFileSync(process.argv[1],"utf8");
+const deferred=()=>{let resolve;const promise=new Promise(done=>{resolve=done});return{promise,resolve}};
+const settle=async()=>{for(let i=0;i<12;i++)await Promise.resolve()};
+async function scenario(status){
+  const listeners={},nodes={},sent=[];
+  const element=id=>nodes[id]||(nodes[id]={id,textContent:"",disabled:false,hidden:false,dataset:{},attributes:{},
+    addEventListener(type,fn){listeners[`${id}:${type}`]=fn},append(){},replaceChildren(){this.textContent=""},
+    setAttribute(name,value){this.attributes[name]=String(value)},removeAttribute(name){delete this.attributes[name]},
+    classList:{add(){},remove(){},toggle(){}}});
+  const body=element("body");body.dataset.phase="preparing";
+  const document={body,querySelector(selector){return selector==="body"?body:element(selector.replace(/^#/,""))},
+    createElement(tag){return element(`created-${tag}-${Object.keys(nodes).length}`)}};
+  let prepare,decide,portListener,prepareCount=0;
+  const tab={id:7,title:"Rendered article",url:"https://example.invalid/article"};
+  const ready={id:"job-1",phase:"ready",tab,preview:{title:"Rendered article",summary:"Readable body",
+    permission_origins:[],details:[["保存内容","文章正文"]]}};
+  const chrome={tabs:{async query(){return[tab]}},runtime:{
+    connect(options){if(options.name!=="lbrain-popup")throw new Error("wrong port");return{
+      onMessage:{addListener(fn){portListener=fn}},postMessage(message){sent.push(message)},disconnect(){}}},
+    sendMessage(message){sent.push(message);
+      if(message.type==="confirmation.prepare"){
+        if(++prepareCount===1){prepare=deferred();return prepare.promise}
+        return Promise.resolve({id:"job-2",phase:"preparing",tab})}
+      if(message.type==="confirmation.preflight")return Promise.resolve({reserved:true,missing:[]});
+      if(message.type==="confirmation.permissions")return Promise.resolve({recorded:true});
+      if(message.type==="confirmation.decide"){decide=deferred();return decide.promise}
+      if(message.type==="confirmation.cancel")return Promise.resolve({cancelled:true});
+      throw new Error(`unexpected ${message.type}`)}},
+    permissions:{async contains(){return true},async request(){return true},async remove(){return true}}};
+  const context={chrome,document,location:{search:""},window:{close(){}},URLSearchParams,URL,Response,console,
+    setTimeout,clearTimeout,queueMicrotask};
+  vm.createContext(context);vm.runInContext(source,context);
+  const initial={phase:body.dataset.phase,saveDisabled:element("save").disabled};
+  await settle();
+  const prepareBeforeExtraction={phase:body.dataset.phase,saveDisabled:element("save").disabled,
+    requested:sent.find(message=>message.type==="confirmation.prepare")};
+  const prepared=status==="preparation_failed"
+    ? {id:"job-1",phase:"failed",tab,error:"extraction unavailable"}
+    : ready;
+  prepare.resolve(prepared);await settle();
+  if(portListener)portListener(prepared);await settle();
+  if(status==="preparation_failed")return{initial,prepareBeforeExtraction,preparationFailure:{
+    phase:body.dataset.phase,title:element("status-title").textContent,message:element("status-message").textContent}};
+  const readyState={phase:body.dataset.phase,saveDisabled:element("save").disabled};
+  const click=listeners["save:click"]();
+  const saving={phase:body.dataset.phase,saveDisabled:element("save").disabled,detailsHidden:element("details").hidden,
+    message:element("status-message").textContent};
+  if(portListener)portListener({type:"job",job:{...ready,phase:"saving"}});await settle();
+  const backgroundSaving={phase:body.dataset.phase,message:element("status-message").textContent};
+  await settle();
+  const terminal=status==="failed"
+    ? {id:"job-1",phase:"failed",tab,error:"disk unavailable"}
+    : {id:"job-1",phase:"complete",tab,receipt:{status,target:"Inbox/Captures/article.md",capture_id:"article",version:1}};
+  decide.resolve(terminal);await click;await settle();
+  if(portListener)portListener(terminal);await settle();
+  const final={phase:body.dataset.phase,text:Object.values(nodes).map(node=>node.textContent).join(" "),
+    saveDisabled:element("save").disabled,actionsHidden:element("actions").hidden,saveText:element("save").textContent};
+  let repeat=null;
+  if(status!=="failed"){
+    const offset=sent.length;await listeners["save:click"]();await settle();
+    const afterPrepare=body.dataset.phase;const repeated=sent.slice(offset);
+    const readyAgain={...ready,id:"job-2"};
+    if(portListener)portListener({type:"job",job:readyAgain});await settle();
+    repeat={afterPrepare,watched:repeated.some(message=>message.type==="watch"&&message.id==="job-2"),
+      messages:repeated.filter(message=>message.type?.startsWith("confirmation.")),
+      readyPhase:body.dataset.phase,saveDisabled:element("save").disabled};
+  }
+  return{initial,prepareBeforeExtraction,readyState,saving,backgroundSaving,final,repeat,
+    watched:sent.some(message=>message.type==="watch"&&message.id==="job-1")};
+}
+(async()=>console.log(JSON.stringify({saved:await scenario("saved"),already:await scenario("already_saved"),
+  partial:await scenario("partial"),failed:await scenario("failed"),prepareFailed:await scenario("preparation_failed")})))()
+  .catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "confirm.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        for scenario in (output["saved"], output["already"], output["failed"]):
+            self.assertEqual(scenario["initial"], {"phase": "preparing", "saveDisabled": True})
+            self.assertEqual(scenario["prepareBeforeExtraction"]["phase"], "preparing")
+            self.assertTrue(scenario["prepareBeforeExtraction"]["saveDisabled"])
+            self.assertEqual(scenario["prepareBeforeExtraction"]["requested"], {
+                "type": "confirmation.prepare",
+                "tab": {"id": 7, "title": "Rendered article", "url": "https://example.invalid/article"},
+                "scope": "page",
+            })
+            self.assertEqual(scenario["readyState"], {"phase": "ready", "saveDisabled": False})
+            self.assertEqual(scenario["saving"]["phase"], "saving")
+            self.assertTrue(scenario["saving"]["saveDisabled"])
+            self.assertTrue(scenario["saving"]["detailsHidden"])
+            self.assertIn("正在交给 LBrain 保存", scenario["saving"]["message"])
+            self.assertNotIn("关闭弹窗也会继续", scenario["saving"]["message"])
+            self.assertEqual(scenario["backgroundSaving"]["phase"], "saving")
+            self.assertIn("关闭弹窗也会继续", scenario["backgroundSaving"]["message"])
+            self.assertTrue(scenario["watched"])
+        self.assertEqual(output["saved"]["final"]["phase"], "complete")
+        self.assertIn("保存成功", output["saved"]["final"]["text"])
+        self.assertFalse(output["saved"]["final"]["saveDisabled"])
+        self.assertFalse(output["saved"]["final"]["actionsHidden"])
+        self.assertIn("再次保存", output["saved"]["final"]["saveText"])
+        self.assertEqual(output["already"]["final"]["phase"], "complete")
+        self.assertIn("已保存", output["already"]["final"]["text"])
+        self.assertIn("Inbox/Captures/article.md", output["already"]["final"]["text"])
+        self.assertEqual(output["partial"]["final"]["phase"], "complete")
+        self.assertIn("部分媒体缺失", output["partial"]["final"]["text"])
+        self.assertIn("Inbox/Captures/article.md", output["partial"]["final"]["text"])
+        for status in ("saved", "already"):
+            self.assertEqual(output[status]["repeat"]["afterPrepare"], "preparing")
+            self.assertTrue(output[status]["repeat"]["watched"])
+            self.assertEqual(output[status]["repeat"]["readyPhase"], "ready")
+            self.assertFalse(output[status]["repeat"]["saveDisabled"])
+            self.assertEqual(output[status]["repeat"]["messages"], [
+                {"type": "confirmation.cancel", "id": "job-1"},
+                {
+                    "type": "confirmation.prepare",
+                    "tab": {"id": 7, "title": "Rendered article", "url": "https://example.invalid/article"},
+                    "scope": "page",
+                },
+            ])
+        self.assertEqual(output["failed"]["final"]["phase"], "failed")
+        self.assertIn("disk unavailable", output["failed"]["final"]["text"])
+        self.assertEqual(output["prepareFailed"]["preparationFailure"]["phase"], "failed")
+        self.assertEqual(output["prepareFailed"]["preparationFailure"]["title"], "读取失败")
+        self.assertIn("extraction unavailable", output["prepareFailed"]["preparationFailure"]["message"])
+
+    def test_extension_popup_native_failure_repreflights_without_releasing_retry_lease(self) -> None:
+        script = r'''
+const fs=require("fs"),vm=require("vm");const source=fs.readFileSync(process.argv[1],"utf8");
+const deferred=()=>{let resolve;const promise=new Promise(done=>{resolve=done});return{promise,resolve}};
+const settle=async()=>{for(let i=0;i<16;i++)await Promise.resolve()};
+async function scenario(popup){
+  const listeners={},nodes={},messages=[];let popupListener,preflights=0,decides=0,closes=0;
+  const decideFailure=deferred(),secondPreflight=deferred();
+  const element=id=>nodes[id]||(nodes[id]={textContent:"",disabled:false,hidden:false,dataset:{},
+    addEventListener(type,fn){listeners[`${id}:${type}`]=fn},append(){},replaceChildren(){},setAttribute(){},removeAttribute(){},
+    classList:{add(){},remove(){},toggle(){}}});
+  const body=element("body");body.dataset.phase="preparing";
+  const document={body,querySelector(selector){return selector==="body"?body:element(selector.replace(/^#/,""))},
+    createElement(tag){return element(`created-${tag}-${Object.keys(nodes).length}`)}};
+  const tab={id:7,title:"Saved",url:"https://example.invalid/article"};
+  const preview={title:"Saved",summary:"",permission_origins:[],details:[]};
+  const ready={id:popup?"popup":"legacy",phase:"ready",tab,preview};
+  const chrome={tabs:{async query(){return[tab]}},runtime:{
+    connect({name}){if(name==="lbrain-popup")return{onMessage:{addListener(fn){popupListener=fn}},postMessage(){},disconnect(){}};
+      let listener;return{onMessage:{addListener(fn){listener=fn}},postMessage(){queueMicrotask(()=>listener({type:"preview",preview,
+        capture:{schema:"lbrain.capture.v1"},tab}))},disconnect(){}}},
+    async sendMessage(message){messages.push(message);
+      if(message.type==="confirmation.prepare")return ready;
+      if(message.type==="confirmation.preflight"){
+        preflights++;if(popup&&preflights===2)return secondPreflight.promise;return{reserved:true,missing:[]}}
+      if(message.type==="confirmation.reserve")return{reserved:true};
+      if(message.type==="confirmation.decide"){
+        decides++;if(decides===1){if(popup){
+            queueMicrotask(()=>popupListener({type:"job",job:{...ready,phase:"failed",error:"native failed"}}));
+            return decideFailure.promise}
+          return{error:"native failed"}}
+        return{id:"popup",phase:"complete",tab,receipt:{status:"saved",target:"Inbox/Captures/saved.md",capture_id:"saved",version:1}}}
+      if(message.type==="confirmation.release")return{released:true};
+      throw new Error(`unexpected ${message.type}`)}},windows:{async getCurrent(){return{id:19}}},
+    permissions:{async contains(){return true},async request(){return true},async remove(){return true}}};
+  const caches={async open(){return{async put(){},async delete(){}}}};
+  const context={chrome,caches,document,location:{search:popup?"":"?id=legacy"},window:{close(){closes++}},URLSearchParams,URL,
+    Response,console,setTimeout,clearTimeout,queueMicrotask};vm.createContext(context);vm.runInContext(source,context);await settle();
+  const firstClick=listeners["save:click"]();let productionTiming=null;
+  if(popup){
+    await settle();const whilePreflight={phase:body.dataset.phase,preflights,saveDisabled:element("save").disabled};
+    secondPreflight.resolve({reserved:true,missing:[]});await settle();
+    const preflightFinished={phase:body.dataset.phase,preflights,saveDisabled:element("save").disabled};
+    decideFailure.resolve({error:"native failed"});await firstClick;await settle();
+    productionTiming={whilePreflight,preflightFinished,afterDecideError:preflights};
+  }else{await firstClick;await settle()}
+  const afterFailure={phase:body.dataset.phase,preflights,releases:messages.filter(value=>value.type==="confirmation.release").length,
+    enabled:!element("save").disabled};
+  await listeners["save:click"]();await settle();
+  return{afterFailure,productionTiming,final:body.dataset.phase,decides,closes,
+    releases:messages.filter(value=>value.type==="confirmation.release").length};
+}
+(async()=>console.log(JSON.stringify({popup:await scenario(true),legacy:await scenario(false)})))()
+  .catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "confirm.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["popup"]["afterFailure"], {
+            "phase": "failed", "preflights": 2, "releases": 0, "enabled": True,
+        })
+        self.assertEqual(output["popup"]["productionTiming"], {
+            "whilePreflight": {"phase": "failed", "preflights": 2, "saveDisabled": True},
+            "preflightFinished": {"phase": "failed", "preflights": 2, "saveDisabled": False},
+            "afterDecideError": 2,
+        })
+        self.assertEqual(output["popup"]["final"], "complete")
+        self.assertEqual(output["popup"]["decides"], 2)
+        self.assertEqual(output["popup"]["releases"], 0)
+        self.assertEqual(output["legacy"]["afterFailure"], {
+            "phase": "failed", "preflights": 2, "releases": 1, "enabled": True,
+        })
+        self.assertEqual(output["legacy"]["decides"], 2)
+        self.assertEqual(output["legacy"]["closes"], 1)
+
+    def test_extension_confirmation_releases_only_new_permissions(self) -> None:
+        script = r'''
+const fs=require("fs");const listeners={},nodes={},messages=[],events=[];
+let requested,preflightResolve,permissionResolve,containsCalls=0;
+const element=id=>nodes[id]||(nodes[id]={textContent:"",disabled:false,hidden:false,dataset:{},
+  addEventListener(type,fn){listeners[`${id}:${type}`]=fn},append(){},replaceChildren(){},
+  setAttribute(){},removeAttribute(){},classList:{add(){},remove(){},toggle(){}}});
+const body=element("body");body.dataset.phase="preparing";
+global.document={body,querySelector(selector){return selector==="body"?body:element(selector.replace(/^#/,""))},
+  createElement(tag){return element(`created-${tag}-${Object.keys(nodes).length}`)}};
+global.location={search:""};global.window={close(){}};
+const tab={id:7,title:"Saved",url:"https://example.invalid/article"};
+const ready={id:"stored",phase:"ready",tab,preview:{title:"Saved",summary:"",
+  permission_origins:["https://existing.invalid/*","https://new.invalid/*"],details:[]}};
+global.chrome={tabs:{async query(){return[tab]}},runtime:{connect(){return{onMessage:{addListener(){}},postMessage(){},disconnect(){}}},
+  async sendMessage(message){messages.push(message);
+    events.push(`runtime:${message.type}`);
+    if(message.type==="confirmation.prepare")return ready;
+    if(message.type==="confirmation.preflight")return new Promise(resolve=>{preflightResolve=resolve});
+    if(message.type==="confirmation.arm")return{armed:true,started:false};
+    if(message.type==="confirmation.permission_result")return{id:"stored",phase:"complete",tab,
+      receipt:{status:"saved",target:"Inbox/Captures/saved.md",capture_id:"saved",version:1}};
+    throw new Error(`unexpected ${message.type}`)}},
+  permissions:{async contains(){containsCalls++;return false},request({origins}){events.push("permission.request");requested=origins;
+      return new Promise(resolve=>{permissionResolve=resolve})},
+    async remove(){throw new Error("worker owns permission cleanup")}}};
+eval(fs.readFileSync(process.argv[1],"utf8"));
+(async()=>{while(!preflightResolve)await Promise.resolve();const disabledBeforePreflight=nodes.save.disabled;
+  const preflight=messages.find(value=>value.type==="confirmation.preflight");
+  preflightResolve({reserved:true,missing:["https://new.invalid/*"]});for(let i=0;i<8;i++)await Promise.resolve();
+  const enabledAfterPreflight=!nodes.save.disabled;const offset=events.length;const click=listeners["save:click"]();
+  const immediate={events:events.slice(offset),phase:body.dataset.phase};permissionResolve(true);await click;
+  const permissionResult=messages.find(value=>value.type==="confirmation.permission_result");
+  console.log(JSON.stringify({requested,disabledBeforePreflight,enabledAfterPreflight,preflight,immediate,
+    permissionResult,releases:messages.filter(value=>value.type==="confirmation.release").length,containsCalls}))})()
+  .catch(error=>{console.error(error);process.exit(1)});
+'''
         result = subprocess.run(
             ["node", "-e", script, str(CAPTURE_EXTENSION / "confirm.js")],
             text=True,
@@ -2523,97 +3883,572 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertEqual(result.returncode, 0, result.stderr)
         output = json.loads(result.stdout)
         self.assertEqual(output["requested"], ["https://new.invalid/*"])
-        self.assertEqual(output["release"], ["https://new.invalid/*"])
-        self.assertEqual(output["closed"], 1)
-        self.assertTrue(output["cachedAtDecision"])
-        self.assertTrue(output["reservedBeforePermissions"])
+        self.assertTrue(output["disabledBeforePreflight"])
+        self.assertTrue(output["enabledAfterPreflight"])
+        self.assertEqual(output["preflight"], {
+            "type": "confirmation.preflight",
+            "id": "stored",
+            "window_id": None,
+            "permission_origins": ["https://existing.invalid/*", "https://new.invalid/*"],
+        })
+        self.assertEqual(output["immediate"], {
+            "events": ["runtime:confirmation.arm", "permission.request"],
+            "phase": "saving",
+        })
+        self.assertEqual(output["permissionResult"], {
+            "type": "confirmation.permission_result", "id": "stored", "granted": True,
+        })
+        self.assertEqual(output["releases"], 0)
+        self.assertEqual(output["containsCalls"], 0)
 
-    def test_extension_save_reservation_survives_worker_restart(self) -> None:
-        script = (
-            "const fs=require('fs'),vm=require('vm'),{webcrypto}=require('crypto');const shared={},removed=[];let failRemove=false;"
-            "function worker(){let handler,startup,removedWindow;const session={async get(key){return{[key]:shared[key]}},"
-            "async set(value){Object.assign(shared,value)},async remove(key){delete shared[key]}};"
-            "const chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(fn){startup=fn}},"
-            "onMessage:{addListener(fn){handler=fn}},onConnect:{addListener(){}},lastError:null,"
-            "getURL(value){return 'chrome-extension://test/'+value}},contextMenus:{removeAll(){},create(){},"
-            "onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},windows:{onRemoved:{addListener(fn){removedWindow=fn}}},"
-            "permissions:{async remove({origins}){if(failRemove)return false;removed.push(...origins);return true},async contains(){return failRemove}},"
-            "notifications:{onButtonClicked:{addListener(){}}},storage:{session,local:{async get(){return{}},async set(){},async remove(){}}}};"
-            "const caches={async open(){return{async match(){return undefined},async delete(){}}},async delete(){}};"
-            "const context={chrome,caches,crypto:webcrypto,URL,TextEncoder,Blob,Response,setTimeout,clearTimeout,console};"
-            "vm.createContext(context);vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),context);return{handler,startup,removedWindow}}"
-            "function send(handler,message){return new Promise(resolve=>handler(message,{},resolve))}"
-            "(async()=>{const first=worker();const reserved=await send(first.handler,{type:'confirmation.reserve',id:'capture-1',"
-            "window_id:19,permission_origins:['https://new.invalid/*','https://second.invalid/*']});"
-            "await send(first.handler,{type:'confirmation.permissions',id:'capture-1',origins:['https://new.invalid/*']});"
-            "await send(first.handler,{type:'confirmation.permissions',id:'capture-1',origins:['https://second.invalid/*']});"
-            "const restarted=worker();restarted.removedWindow(19);await new Promise(resolve=>setTimeout(resolve,0));"
-            "const second=worker();await send(second.handler,{type:'confirmation.reserve',id:'capture-2'});"
-            "const decided=await send(worker().handler,{type:'confirmation.decide',id:'capture-2'});"
-            "shared['lbrain-save-reservation-v1']={id:'busy',created:Date.now(),window_id:20,state:'saving'};"
-            "const closing=worker();closing.removedWindow(20);await new Promise(resolve=>setTimeout(resolve,0));"
-            "const concurrent=await send(worker().handler,{type:'confirmation.reserve',id:'concurrent'});"
-            "delete shared['lbrain-save-reservation-v1'];"
-            "shared['lbrain-save-reservation-v1']={id:'stale',created:Date.now()-660000,release_origins:['https://crash.invalid/*']};"
-            "const third=worker();await send(third.handler,{type:'confirmation.reserve',id:'capture-3'});await third.startup();"
-            "shared['lbrain-save-reservation-v1']={id:'retry',created:Date.now(),release_origins:['https://retry.invalid/*']};"
-            "failRemove=true;await worker().startup();const retainedOnFailure=Boolean(shared['lbrain-save-reservation-v1']);"
-            "failRemove=false;await worker().startup();"
-            "console.log(JSON.stringify({reserved:reserved.reserved,error:decided.error,concurrent:concurrent.error,removed,retainedOnFailure,stale:Boolean(shared['lbrain-save-reservation-v1'])}))})()"
-            ".catch(error=>{console.error(error);process.exit(1)});"
-        )
+    def test_extension_popup_reconnect_repreflights_after_worker_cleanup(self) -> None:
+        script = r'''
+const fs=require("fs"),vm=require("vm");const source=fs.readFileSync(process.argv[1],"utf8");
+const settle=async()=>{for(let i=0;i<20;i++)await Promise.resolve()};
+const listeners={},nodes={},disconnects=[],watches=[];let connects=0,preflights=0,decides=0,lease=false;
+const element=id=>nodes[id]||(nodes[id]={textContent:"",disabled:false,hidden:false,dataset:{},
+  addEventListener(type,fn){listeners[`${id}:${type}`]=fn},append(){},replaceChildren(){},setAttribute(){},removeAttribute(){},
+  classList:{add(){},remove(){},toggle(){}}});const body=element("body");body.dataset.phase="preparing";
+const document={body,querySelector(selector){return selector==="body"?body:element(selector.replace(/^#/,""))},
+  createElement(tag){return element(`created-${tag}-${Object.keys(nodes).length}`)}};
+const tab={id:7,title:"Reconnect",url:"https://example.invalid/reconnect.mp4"};
+const ready={id:"job-reconnect",phase:"ready",tab,preview:{title:"Reconnect",summary:"",permission_origins:[],details:[]}};
+const chrome={tabs:{async query(){return[tab]}},runtime:{connect({name}){if(name!=="lbrain-popup")throw new Error("wrong port");
+    connects++;let messageListener;const index=disconnects.length;return{onMessage:{addListener(fn){messageListener=fn}},
+      onDisconnect:{addListener(fn){disconnects[index]=fn}},postMessage(message){watches.push(message);
+        queueMicrotask(()=>messageListener({type:"job",job:ready}))},disconnect(){}}},
+  async sendMessage(message){
+    if(message.type==="confirmation.prepare")return ready;
+    if(message.type==="confirmation.preflight"){preflights++;lease=true;return{reserved:true,missing:[]}}
+    if(message.type==="confirmation.decide"){decides++;if(!lease)return{error:"This capture no longer owns the save slot."};
+      lease=false;return{...ready,phase:"complete",receipt:{status:"saved",target:"Inbox/Captures/reconnect.md",
+        capture_id:"reconnect",version:1}}}
+    throw new Error(`unexpected ${message.type}`)}},permissions:{async request(){throw new Error("unexpected permission request")},
+    async contains(){throw new Error("UI must not query permission state")},async remove(){return true}}};
+const context={chrome,document,location:{search:""},window:{close(){}},URLSearchParams,URL,Response,console,
+  setTimeout,clearTimeout,queueMicrotask};vm.createContext(context);vm.runInContext(source,context);
+(async()=>{await settle();const initial={connects,preflights,lease,phase:body.dataset.phase};
+  lease=false;disconnects[0]();await settle();
+  const reconnected={connects,preflights,lease,phase:body.dataset.phase,saveDisabled:element("save").disabled,
+    watches:watches.map(value=>value.id)};
+  await listeners["save:click"]();await settle();
+  console.log(JSON.stringify({initial,reconnected,final:{phase:body.dataset.phase,decides,lease}}));
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
         result = subprocess.run(
-            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "confirm.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["initial"], {
+            "connects": 1, "preflights": 1, "lease": True, "phase": "ready",
+        })
+        self.assertEqual(output["reconnected"], {
+            "connects": 2,
+            "preflights": 2,
+            "lease": True,
+            "phase": "ready",
+            "saveDisabled": False,
+            "watches": ["job-reconnect", "job-reconnect"],
+        })
+        self.assertEqual(output["final"], {"phase": "complete", "decides": 1, "lease": False})
+
+    def test_extension_does_not_request_an_unjournaled_permission(self) -> None:
+        script = r'''
+const fs=require("fs");const listeners={},nodes={};let requested=0,decided=false,preflight=false;
+const element=id=>nodes[id]||(nodes[id]={textContent:"",disabled:false,hidden:false,dataset:{},
+  addEventListener(type,fn){listeners[`${id}:${type}`]=fn},append(){},replaceChildren(){},
+  setAttribute(){},removeAttribute(){},classList:{add(){},remove(){},toggle(){}}});
+const body=element("body");body.dataset.phase="preparing";
+global.document={body,querySelector(selector){return selector==="body"?body:element(selector.replace(/^#/,""))},
+  createElement(tag){return element(`created-${tag}-${Object.keys(nodes).length}`)}};
+global.location={search:""};global.window={close(){}};
+const tab={id:7,title:"Saved",url:"https://example.invalid/article"};
+global.chrome={tabs:{async query(){return[tab]}},runtime:{connect(){return{onMessage:{addListener(){}},postMessage(){},disconnect(){}}},
+  async sendMessage(message){
+    if(message.type==="confirmation.prepare")return{id:"stored",phase:"ready",tab,
+      preview:{title:"Saved",summary:"",permission_origins:["https://new.invalid/*"],details:[]}};
+    if(message.type==="confirmation.preflight"){preflight=true;return{reserved:true,missing:[],warning:"journal failed"}};
+    if(message.type==="confirmation.decide"){decided=true;return{id:"stored",phase:"complete",tab,
+      receipt:{status:"partial",target:"Inbox/Captures/saved.md",capture_id:"saved",version:1}}}
+    throw new Error(`unexpected ${message.type}`)}},
+  permissions:{async contains(){return false},async request(){requested++;return true},async remove(){}}};
+eval(fs.readFileSync(process.argv[1],"utf8"));
+setTimeout(async()=>{await listeners["save:click"]();console.log(JSON.stringify({requested,decided,preflight}))},0);
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "confirm.js")],
             text=True,
             capture_output=True,
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        output = json.loads(result.stdout)
-        self.assertTrue(output["reserved"])
-        self.assertIn("confirmation is no longer available", output["error"])
-        self.assertNotIn("owns the save slot", output["error"])
-        self.assertIn("already being saved", output["concurrent"])
-        self.assertEqual(output["removed"], [
-            "https://new.invalid/*", "https://second.invalid/*", "https://crash.invalid/*", "https://retry.invalid/*",
-        ])
-        self.assertTrue(output["retainedOnFailure"])
-        self.assertFalse(output["stale"])
+        self.assertEqual(json.loads(result.stdout), {"requested": 0, "decided": True, "preflight": True})
 
-    def test_extension_keeps_the_lease_when_the_confirmation_window_closes_during_save(self) -> None:
+    def test_extension_legacy_busy_preflight_requires_recovery_click_before_save(self) -> None:
+        script = r'''
+const fs=require("fs"),vm=require("vm");const source=fs.readFileSync(process.argv[1],"utf8");
+const settle=async()=>{for(let i=0;i<20;i++)await Promise.resolve()};
+const listeners={},nodes={},messages=[];let ownerBusy=true,preflights=0,decides=0,puts=0,closes=0,requests=0;
+const element=id=>nodes[id]||(nodes[id]={textContent:"",disabled:false,hidden:false,dataset:{},
+  addEventListener(type,fn){listeners[`${id}:${type}`]=fn},append(){},replaceChildren(){},setAttribute(){},removeAttribute(){},
+  classList:{add(){},remove(){},toggle(){}}});const body=element("body");body.dataset.phase="preparing";
+const document={body,querySelector(selector){return selector==="body"?body:element(selector.replace(/^#/,""))},
+  createElement(tag){return element(`created-${tag}-${Object.keys(nodes).length}`)}};
+const tab={id:7,title:"Legacy busy",url:"https://example.invalid/legacy.mp4"};
+const preview={title:"Legacy busy",summary:"",permission_origins:[],details:[]};
+const chrome={runtime:{connect({name}){if(name!=="lbrain-confirm")throw new Error("wrong port");let listener;return{
+      onMessage:{addListener(fn){listener=fn}},postMessage(){queueMicrotask(()=>listener({type:"preview",preview,
+        capture:{schema:"lbrain.capture.v1"},tab}))},disconnect(){}}},
+    async sendMessage(message){messages.push(message);
+      if(message.type==="confirmation.preflight"){
+        preflights++;return ownerBusy?{error:"Another LBrain capture is already being saved."}:{reserved:true,missing:[]}}
+      if(message.type==="confirmation.decide"){decides++;return{status:"saved",target:"Inbox/Captures/legacy.md",
+        capture_id:"legacy",version:1}}
+      if(message.type==="confirmation.release")return{released:true};
+      throw new Error(`unexpected ${message.type}`)}},windows:{async getCurrent(){return{id:19}}},permissions:{
+    async request(){requests++;return true},async contains(){throw new Error("UI must not query permission state")},
+    async remove(){return true}}};
+const caches={async open(){return{async put(){puts++},async delete(){}}}};
+const context={chrome,caches,document,location:{search:"?id=legacy-busy"},window:{close(){closes++}},
+  URLSearchParams,URL,Response,console,setTimeout,clearTimeout,queueMicrotask};vm.createContext(context);vm.runInContext(source,context);
+(async()=>{await settle();const initial={phase:body.dataset.phase,title:element("status-title").textContent,
+    previewHidden:element("preview").hidden,saveText:element("save").textContent,enabled:!element("save").disabled,
+    preflights,decides,puts};
+  ownerBusy=false;await listeners["save:click"]();await settle();
+  const recovered={phase:body.dataset.phase,saveText:element("save").textContent,enabled:!element("save").disabled,
+    preflights,decides,puts,closes};
+  await listeners["save:click"]();await settle();
+  console.log(JSON.stringify({initial,recovered,final:{preflights,decides,puts,closes,requests},
+    preflightWindows:messages.filter(value=>value.type==="confirmation.preflight").map(value=>value.window_id)}));
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "confirm.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["initial"], {
+            "phase": "failed",
+            "title": "准备失败",
+            "previewHidden": True,
+            "saveText": "重新读取",
+            "enabled": True,
+            "preflights": 1,
+            "decides": 0,
+            "puts": 0,
+        })
+        self.assertEqual(output["recovered"], {
+            "phase": "ready",
+            "saveText": "确认保存",
+            "enabled": True,
+            "preflights": 2,
+            "decides": 0,
+            "puts": 0,
+            "closes": 0,
+        })
+        self.assertEqual(output["final"], {
+            "preflights": 2, "decides": 1, "puts": 1, "closes": 1, "requests": 0,
+        })
+        self.assertEqual(output["preflightWindows"], [19, 19])
+
+    def test_extension_legacy_initial_read_failure_reconnects_before_save(self) -> None:
+        script = r'''
+const fs=require("fs"),vm=require("vm");const source=fs.readFileSync(process.argv[1],"utf8");
+const settle=async()=>{for(let i=0;i<10;i++)await Promise.resolve()};
+const listeners={},nodes={},posts=[],messages=[];let connections=0,disconnects=0;
+const element=id=>nodes[id]||(nodes[id]={textContent:"",disabled:false,hidden:false,dataset:{},
+  addEventListener(type,fn){listeners[`${id}:${type}`]=fn},append(){},replaceChildren(){}});
+const body=element("body");body.dataset.phase="preparing";
+const document={body,querySelector(selector){return selector==="body"?body:element(selector.replace(/^#/,""))},
+  createElement(tag){return element(`created-${tag}`)}};
+const chrome={runtime:{connect({name}){if(name!=="lbrain-confirm")throw new Error("wrong port");connections++;
+      let listener;const attempt=connections;return{onMessage:{addListener(fn){listener=fn}},
+        postMessage(message){posts.push(message);if(attempt===1)queueMicrotask(()=>listener({type:"error",error:"read failed"}))},
+        disconnect(){disconnects++}}},async sendMessage(message){messages.push(message);throw new Error("must not save")}}};
+const context={chrome,caches:{},document,location:{search:"?id=legacy-read"},window:{close(){}},
+  URLSearchParams,URL,console,queueMicrotask};vm.createContext(context);vm.runInContext(source,context);
+(async()=>{await settle();const failed={phase:body.dataset.phase,saveText:element("save").textContent,
+    connections,disconnects};await listeners["save:click"]();await settle();
+  console.log(JSON.stringify({failed,retry:{phase:body.dataset.phase,title:element("status-title").textContent,
+    connections,disconnects,posts,messages}}))})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "confirm.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["failed"], {
+            "phase": "failed", "saveText": "重新读取", "connections": 1, "disconnects": 1,
+        })
+        self.assertEqual(output["retry"], {
+            "phase": "preparing", "title": "正在读取当前页面…", "connections": 2,
+            "disconnects": 1,
+            "posts": [
+                {"type": "ready", "id": "legacy-read"},
+                {"type": "ready", "id": "legacy-read"},
+            ],
+            "messages": [],
+        })
+
+    def test_extension_legacy_worker_restart_closes_instead_of_retrying_lost_confirmation(self) -> None:
+        script = r'''
+const fs=require("fs"),vm=require("vm");const source=fs.readFileSync(process.argv[1],"utf8");
+const settle=async()=>{for(let i=0;i<10;i++)await Promise.resolve()};
+const listeners={},nodes={},posts=[],messages=[];let connections=0,disconnects=0,closes=0;
+const element=id=>nodes[id]||(nodes[id]={textContent:"",disabled:false,hidden:false,dataset:{},
+  addEventListener(type,fn){listeners[`${id}:${type}`]=fn},append(){},replaceChildren(){}});
+const body=element("body");body.dataset.phase="preparing";
+const document={body,querySelector(selector){return selector==="body"?body:element(selector.replace(/^#/,""))},
+  createElement(tag){return element(`created-${tag}`)}};
+const chrome={runtime:{connect({name}){if(name!=="lbrain-confirm")throw new Error("wrong port");connections++;
+      let listener;return{onMessage:{addListener(fn){listener=fn}},postMessage(message){posts.push(message);
+        queueMicrotask(()=>listener({type:"error",error:"This capture confirmation is no longer available."}))},
+        disconnect(){disconnects++}}},async sendMessage(message){messages.push(message);throw new Error("must not save")}}};
+const context={chrome,caches:{},document,location:{search:"?id=legacy-lost"},window:{close(){closes++}},
+  URLSearchParams,URL,console,queueMicrotask};vm.createContext(context);vm.runInContext(source,context);
+(async()=>{await settle();const failed={phase:body.dataset.phase,title:element("status-title").textContent,
+    saveText:element("save").textContent,connections,disconnects};await listeners["save:click"]();await settle();
+  console.log(JSON.stringify({failed,afterClick:{connections,disconnects,closes,posts,messages}}))})()
+  .catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "confirm.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["failed"], {
+            "phase": "failed", "title": "读取已中断", "saveText": "关闭后重新发起",
+            "connections": 1, "disconnects": 1,
+        })
+        self.assertEqual(output["afterClick"], {
+            "connections": 1, "disconnects": 1, "closes": 1,
+            "posts": [{"type": "ready", "id": "legacy-lost"}], "messages": [],
+        })
+
+    def test_extension_stale_confirmation_removes_late_grant_and_repreflights(self) -> None:
+        script = r'''
+const fs=require("fs"),vm=require("vm");const source=fs.readFileSync(process.argv[1],"utf8");
+const settle=async()=>{for(let i=0;i<20;i++)await Promise.resolve()};
+async function scenario(popup){
+  const listeners={},nodes={},messages=[],events=[],removed=[];let popupListener,preflights=0,decides=0,closed=0,
+    directRemovals=0;
+  const element=id=>nodes[id]||(nodes[id]={textContent:"",disabled:false,hidden:false,dataset:{},
+    addEventListener(type,fn){listeners[`${id}:${type}`]=fn},append(){},replaceChildren(){},setAttribute(){},removeAttribute(){},
+    classList:{add(){},remove(){},toggle(){}}});const body=element("body");body.dataset.phase="preparing";
+  const document={body,querySelector(selector){return selector==="body"?body:element(selector.replace(/^#/,""))},
+    createElement(tag){return element(`created-${tag}-${Object.keys(nodes).length}`)}};
+  const tab={id:7,title:"Stale",url:"https://example.invalid/article"},origin="https://late.invalid/*";
+  const preview={title:"Stale",summary:"",permission_origins:[origin],details:[]};
+  const ready={id:popup?"popup-a":"legacy-a",phase:"ready",tab,preview};
+  const chrome={tabs:{async query(){return[tab]}},runtime:{connect({name}){
+      if(name==="lbrain-popup")return{onMessage:{addListener(fn){popupListener=fn}},postMessage(){},disconnect(){}};
+      let listener;return{onMessage:{addListener(fn){listener=fn}},postMessage(){queueMicrotask(()=>listener({
+        type:"preview",preview,capture:{schema:"lbrain.capture.v1"},tab}))},disconnect(){}}},
+    async sendMessage(message){messages.push(message);events.push(`runtime:${message.type}`);
+      if(message.type==="confirmation.prepare")return ready;
+      if(message.type==="confirmation.preflight"){preflights++;return{reserved:true,missing:[origin]}}
+      if(message.type==="confirmation.arm")return{error:"This capture no longer owns the save slot."};
+      if(message.type==="confirmation.decide"){decides++;return{error:"This capture no longer owns the save slot."}}
+      if(message.type==="confirmation.permissions"&&message.cleanup){removed.push(...message.origins);
+        return{recorded:true,released:true}}
+      if(message.type==="confirmation.release")return{released:true};
+      throw new Error(`unexpected ${message.type}`)}},windows:{async getCurrent(){return{id:19}}},permissions:{
+      request({origins}){events.push("permission.request");return Promise.resolve(origins.includes(origin))},
+      async remove(){directRemovals++;throw new Error("UI must delegate cleanup to the worker")},
+      async contains(){throw new Error("UI must not query permission state")}}};
+  const caches={async open(){return{async put(){events.push("cache.put")},async delete(){events.push("cache.delete")}}}};
+  const context={chrome,caches,document,location:{search:popup?"":"?id=legacy-a"},window:{close(){closed++}},
+    URLSearchParams,URL,Response,console,setTimeout,clearTimeout,queueMicrotask};
+  vm.createContext(context);vm.runInContext(source,context);await settle();
+  const offset=events.length,click=listeners["save:click"]();const immediate=events.slice(offset);await click;await settle();
+  return{immediate,events:events.slice(offset),phase:body.dataset.phase,preflights,decides,removed,
+    enabled:!element("save").disabled,closed,directRemovals,
+    cleanup:messages.filter(value=>value.type==="confirmation.permissions"&&value.cleanup),
+    releases:messages.filter(value=>value.type==="confirmation.release").length,
+    permissionResults:messages.filter(value=>value.type==="confirmation.permission_result").length};
+}
+(async()=>console.log(JSON.stringify({popup:await scenario(true),legacy:await scenario(false)})))()
+  .catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "confirm.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["popup"]["immediate"], ["runtime:confirmation.arm", "permission.request"])
+        self.assertEqual(output["popup"]["phase"], "failed")
+        self.assertEqual(output["popup"]["preflights"], 2)
+        self.assertEqual(output["popup"]["removed"], ["https://late.invalid/*"])
+        self.assertEqual(output["popup"]["directRemovals"], 0)
+        self.assertEqual(output["popup"]["cleanup"], [{
+            "type": "confirmation.permissions", "id": "popup-a",
+            "origins": ["https://late.invalid/*"], "cleanup": True,
+        }])
+        self.assertLess(
+            output["popup"]["events"].index("runtime:confirmation.permissions"),
+            output["popup"]["events"].index("runtime:confirmation.preflight"),
+        )
+        self.assertTrue(output["popup"]["enabled"])
+        self.assertEqual(output["popup"]["decides"], 0)
+        self.assertEqual(output["popup"]["permissionResults"], 0)
+        self.assertEqual(output["popup"]["releases"], 0)
+        self.assertEqual(output["legacy"]["immediate"], ["permission.request"])
+        self.assertEqual(output["legacy"]["phase"], "failed")
+        self.assertEqual(output["legacy"]["preflights"], 2)
+        self.assertEqual(output["legacy"]["removed"], ["https://late.invalid/*"])
+        self.assertEqual(output["legacy"]["directRemovals"], 0)
+        self.assertEqual(output["legacy"]["cleanup"], [{
+            "type": "confirmation.permissions", "id": "legacy-a",
+            "origins": ["https://late.invalid/*"], "cleanup": True,
+        }])
+        self.assertLess(
+            output["legacy"]["events"].index("runtime:confirmation.permissions"),
+            output["legacy"]["events"].index("runtime:confirmation.preflight"),
+        )
+        self.assertTrue(output["legacy"]["enabled"])
+        self.assertEqual(output["legacy"]["decides"], 1)
+        self.assertEqual(output["legacy"]["releases"], 1)
+        self.assertEqual(output["legacy"]["closed"], 0)
+
+    def test_extension_stale_confirmation_journals_failed_late_grant_cleanup(self) -> None:
+        script = r'''
+const fs=require("fs"),vm=require("vm"),{webcrypto}=require("crypto");
+const confirmSource=fs.readFileSync(process.argv[1],"utf8");
+const workerSource=fs.readFileSync(process.argv[2],"utf8");
+const shared={},local={},granted=new Set(),workerRemovals=[];let workerHandler,startup,permissionAdded,
+  workerFailure="",directRemovals=0;
+const storage=values=>({async get(key){if(key===null)return{...values};return{[key]:values[key]}},
+  async set(entries){Object.assign(values,entries)},async remove(key){delete values[key]}});
+const workerChrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(fn){startup=fn}},
+    onMessage:{addListener(fn){workerHandler=fn}},onConnect:{addListener(){}},lastError:null,
+    getURL(value){return`chrome-extension://test/${value}`}},
+  contextMenus:{removeAll(){},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},
+  windows:{onRemoved:{addListener(){}}},permissions:{onAdded:{addListener(fn){permissionAdded=fn}},
+    async contains({origins}){return origins.every(origin=>granted.has(origin))},
+    async remove({origins}){workerRemovals.push({failure:workerFailure,origins:[...origins]});
+      if(workerFailure==="throw")throw new Error("temporary remove failure");
+      if(workerFailure==="false")return false;
+      for(const origin of origins)granted.delete(origin);return true}},
+  storage:{session:storage(shared),local:storage(local),onChanged:{addListener(){}}},
+  notifications:{async create(){},onButtonClicked:{addListener(){}}},tabs:{async create(){}}};
+const workerContext={chrome:workerChrome,caches:{async open(){return{async match(){},async delete(){}}},async delete(){}},
+  crypto:webcrypto,URL,URLSearchParams,TextEncoder,Blob,Response,setTimeout,clearTimeout,queueMicrotask,console};
+vm.createContext(workerContext);vm.runInContext(workerSource,workerContext);
+const workerSend=message=>new Promise(resolve=>workerHandler(message,{},resolve));
+const settle=async()=>{for(let i=0;i<30;i++)await Promise.resolve()};
+const waitFor=async predicate=>{for(let i=0;i<100;i++){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,0))}
+  throw new Error("condition did not settle")};
+async function scenario(failure){
+  const listeners={},nodes={},messages=[];
+  const origin=`https://${failure}.late.invalid/*`,id=`stale-${failure}`;
+  const element=key=>nodes[key]||(nodes[key]={textContent:"",disabled:false,hidden:false,dataset:{},
+    addEventListener(type,fn){listeners[`${key}:${type}`]=fn},append(){},replaceChildren(){},setAttribute(){},
+    removeAttribute(){},classList:{add(){},remove(){},toggle(){}}});
+  const body=element("body");body.dataset.phase="preparing";
+  const document={body,querySelector(selector){return selector==="body"?body:element(selector.replace(/^#/,""))},
+    createElement(tag){return element(`created-${tag}-${Object.keys(nodes).length}`)}};
+  const tab={id:7,title:"Stale",url:"https://example.invalid/article"};
+  const preview={title:"Stale",summary:"",permission_origins:[origin],details:[]};
+  const chrome={tabs:{async query(){return[tab]}},runtime:{connect(){return{onMessage:{addListener(){}},
+        onDisconnect:{addListener(){}},postMessage(){},disconnect(){}}},
+      async sendMessage(message){messages.push(message);
+        if(message.type==="confirmation.prepare")return{id,phase:"ready",tab,preview};
+        if(message.type==="confirmation.preflight")return{reserved:true,missing:[origin]};
+        if(message.type==="confirmation.arm")return{error:"This capture no longer owns the save slot."};
+        if(message.type==="confirmation.permissions"&&message.cleanup)return workerSend(message);
+        throw new Error(`unexpected ${message.type}`)}},permissions:{
+      async request(){granted.add(origin);return true},
+      async remove(){directRemovals++;throw new Error("UI must delegate cleanup to the worker")},
+      async contains(){throw new Error("UI must not query permission state")}}};
+  const context={chrome,caches:{async open(){return{async delete(){}}}},document,location:{search:""},window:{close(){}},
+    URLSearchParams,URL,Response,console,setTimeout,clearTimeout,queueMicrotask};
+  vm.createContext(context);vm.runInContext(confirmSource,context);await settle();
+  workerFailure=failure;await listeners["save:click"]();await settle();
+  const cleanupMessages=messages.filter(message=>message.type==="confirmation.permissions"&&message.cleanup);
+  const retained={journal:[...(local["lbrain-temporary-origins-v1"]||[])],granted:granted.has(origin)};
+  workerFailure="";
+  if(failure==="false")await workerSend(cleanupMessages[0]);
+  else await startup();
+  await settle();
+  return{cleanupMessages,retained,afterRecovery:{journal:local["lbrain-temporary-origins-v1"]||[],
+    granted:granted.has(origin)}};
+}
+(async()=>{
+  const returnedFalse=await scenario("false"),threw=await scenario("throw");
+  const transferOrigin="https://shared.late.invalid/*";granted.add(transferOrigin);
+  await workerSend({type:"confirmation.reserve",id:"active-b",permission_origins:[transferOrigin]});
+  const beforeTransferRemovals=workerRemovals.length;
+  const transferResponse=await workerSend({type:"confirmation.permissions",id:"stale-a",origins:[transferOrigin],cleanup:true});
+  const transfer={response:transferResponse,removalDelta:workerRemovals.length-beforeTransferRemovals,
+    granted:granted.has(transferOrigin),journal:[...(local["lbrain-temporary-origins-v1"]||[])],
+    reservation:shared["lbrain-save-reservation-v1"]?.id||null,
+    releaseOrigins:shared["lbrain-save-reservation-v1"]?.release_origins||[]};
+  await workerSend({type:"confirmation.release",id:"active-b"});
+  transfer.afterRelease={granted:granted.has(transferOrigin),journal:local["lbrain-temporary-origins-v1"]||[],
+    reservation:shared["lbrain-save-reservation-v1"]?.id||null};
+
+  const orphanOrigin="https://orphan-added.invalid/*";workerFailure="throw";granted.add(orphanOrigin);
+  permissionAdded({origins:[orphanOrigin]});
+  await waitFor(()=>(local["lbrain-temporary-origins-v1"]||[]).includes(orphanOrigin));
+  const orphanAdded={journal:[...local["lbrain-temporary-origins-v1"]],granted:granted.has(orphanOrigin)};
+  workerFailure="";await startup();await settle();
+  orphanAdded.afterStartup={journal:local["lbrain-temporary-origins-v1"]||[],granted:granted.has(orphanOrigin)};
+  console.log(JSON.stringify({returnedFalse,threw,transfer,orphanAdded,directRemovals,workerRemovals}));
+})()
+  .catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            [
+                "node", "-e", script,
+                str(CAPTURE_EXTENSION / "confirm.js"),
+                str(CAPTURE_EXTENSION / "service_worker.js"),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        for name, failure, origin in (
+            ("returnedFalse", "false", "https://false.late.invalid/*"),
+            ("threw", "throw", "https://throw.late.invalid/*"),
+        ):
+            self.assertEqual(output[name]["cleanupMessages"], [{
+                "type": "confirmation.permissions",
+                "id": f"stale-{failure}",
+                "origins": [origin],
+                "cleanup": True,
+            }])
+            self.assertEqual(output[name]["retained"], {"journal": [origin], "granted": True})
+            self.assertEqual(output[name]["afterRecovery"], {"journal": [], "granted": False})
+        self.assertEqual(output["directRemovals"], 0)
+        self.assertEqual(output["transfer"], {
+            "response": {"recorded": True, "released": False},
+            "removalDelta": 0,
+            "granted": True,
+            "journal": ["https://shared.late.invalid/*"],
+            "reservation": "active-b",
+            "releaseOrigins": ["https://shared.late.invalid/*"],
+            "afterRelease": {"granted": False, "journal": [], "reservation": None},
+        })
+        self.assertEqual(output["orphanAdded"], {
+            "journal": ["https://orphan-added.invalid/*"],
+            "granted": True,
+            "afterStartup": {"journal": [], "granted": False},
+        })
+        self.assertEqual(output["workerRemovals"], [
+            {"failure": "false", "origins": ["https://false.late.invalid/*"]},
+            {"failure": "", "origins": ["https://false.late.invalid/*"]},
+            {"failure": "throw", "origins": ["https://throw.late.invalid/*"]},
+            {"failure": "", "origins": ["https://throw.late.invalid/*"]},
+            {"failure": "", "origins": ["https://shared.late.invalid/*"]},
+            {"failure": "throw", "origins": ["https://orphan-added.invalid/*"]},
+            {"failure": "", "origins": ["https://orphan-added.invalid/*"]},
+        ])
+
+    def test_extension_popup_permission_intent_survives_ui_loss_and_runs_once(self) -> None:
         script = r'''
 const fs=require("fs"),{webcrypto}=require("crypto");
-let action,connectHandler,messageHandler,removedWindow,nativeMessage,nativeDone,id,preview,endSeen=false;
-const shared={},removed=[];
-const session={async get(key){return{[key]:shared[key]}},async set(value){Object.assign(shared,value)},async remove(key){delete shared[key]}};
-const nativePort={onMessage:{addListener(fn){nativeMessage=fn}},onDisconnect:{addListener(){}},postMessage(message){
-  if(message.type==="chunk")queueMicrotask(()=>nativeMessage({type:"ack",channel:message.channel,sequence:message.sequence}));
-  if(message.type==="end")endSeen=true;
-}};
-global.caches={async open(){return{async match(){return new Response(JSON.stringify({capture:preview.capture,tab:preview.tab}))},async delete(){}}},async delete(){}};
+let messageHandler,permissionAdded,nativeConnections=0;const shared={},local={},cached={},nativeReplies=[];
+const granted=new Set(),removed=[];
+const storage=values=>({async get(key){if(key===null)return{...values};return{[key]:values[key]}},
+  async set(entries){Object.assign(values,entries)},async remove(key){delete values[key]}});
+global.caches={async open(){return{async put(key,response){cached[key]=await response.text()},
+  async match(key){return cached[key]===undefined?undefined:new Response(cached[key])},
+  async delete(key){delete cached[key]}}},async delete(){for(const key of Object.keys(cached))delete cached[key]}};
+function connectNative(){nativeConnections++;let listener;return{onMessage:{addListener(fn){listener=fn}},
+  onDisconnect:{addListener(){}},disconnect(){},postMessage(message){
+    if(message.type==="chunk")queueMicrotask(()=>listener({type:"ack",channel:message.channel,sequence:message.sequence}));
+    if(message.type==="end")nativeReplies.push(value=>listener(value))}}}
 global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(fn){messageHandler=fn}},
-  onConnect:{addListener(fn){connectHandler=fn}},getURL(value){return"chrome-extension://test/"+value},connectNative(){return nativePort},lastError:null},
-  contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(fn){action=fn}}},
-  windows:{async create(options){id=new URL(options.url).searchParams.get("id");let listener;const port={name:"lbrain-confirm",onMessage:{addListener(fn){listener=fn}},postMessage(message){preview=message}};
-    queueMicrotask(()=>{connectHandler(port);listener({type:"ready",id})});return{id:19}},onRemoved:{addListener(fn){removedWindow=fn}}},
-  permissions:{async remove({origins}){removed.push(...origins);return true},async contains(){return false}},
-  storage:{session,local:{async get(){return{}},async set(){},async remove(){}}},notifications:{async create(){},onButtonClicked:{addListener(){}}}};
-global.crypto=webcrypto;
-eval(fs.readFileSync(process.argv[1],"utf8"));
+  onConnect:{addListener(){}},getURL(value){return"chrome-extension://test/"+value},connectNative,lastError:null},
+  contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},
+  windows:{onRemoved:{addListener(){}}},permissions:{onAdded:{addListener(fn){permissionAdded=fn}},
+    async contains({origins}){return origins.every(origin=>granted.has(origin))},
+    async remove({origins}){let changed=false;for(const origin of origins){
+      if(granted.delete(origin)){removed.push(origin);changed=true}}return changed}},
+  storage:{session:storage(shared),local:storage(local),onChanged:{addListener(){}}},
+  notifications:{async create(){},onButtonClicked:{addListener(){}}},tabs:{async create(){}}};
+global.crypto=webcrypto;eval(fs.readFileSync(process.argv[1],"utf8"));
 function send(message){return new Promise(resolve=>messageHandler(message,{},resolve))}
+async function waitFor(predicate){for(let i=0;i<200;i++){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,0))}
+  throw new Error("condition did not settle")}
+async function ready(number){const tab={id:number,url:`https://example.invalid/${number}.mp4`,title:`Movie ${number}`};
+  const job=await send({type:"confirmation.prepare",tab,scope:"page"});
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.id===job.id&&shared["lbrain-popup-job-v1"].phase==="ready");return job}
+async function finish(status,label){await waitFor(()=>nativeReplies.length===1);nativeReplies.shift()({status,
+  target:`Inbox/Captures/${label}.md`,capture_id:label,version:1});
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.phase==="complete");
+  await waitFor(()=>!shared["lbrain-save-reservation-v1"]);return shared["lbrain-popup-job-v1"]}
+async function clear(id){await send({type:"confirmation.cancel",id})}
 (async()=>{
-  await action({id:7,url:"https://example.invalid/movie.mp4",title:"Movie"});
-  await send({type:"confirmation.reserve",id,window_id:19,permission_origins:["https://new.invalid/*"]});
-  await send({type:"confirmation.permissions",id,origins:["https://new.invalid/*"]});
-  const decide=send({type:"confirmation.decide",id});
-  while(!endSeen)await new Promise(resolve=>setTimeout(resolve,0));
-  removedWindow(19);
-  let secondResolved=false;const second=send({type:"confirmation.reserve",id:"second"}).then(value=>{secondResolved=true;return value});
-  await new Promise(resolve=>setTimeout(resolve,0));
-  const during={state:shared["lbrain-save-reservation-v1"].state,secondResolved,removed:[...removed]};
-  nativeMessage({status:"saved",target:"Inbox/Captures/movie.md",capture_id:"movie",version:1});
-  const saved=await decide;const next=await second;
-  console.log(JSON.stringify({during,saved:saved.status,next:next.reserved,removed}));
+  const lostOrigin="https://lost.invalid/*";let job=await ready(1);
+  const lostPreflight=await send({type:"confirmation.preflight",id:job.id,permission_origins:[lostOrigin]});
+  const lostArm=await send({type:"confirmation.arm",id:job.id});
+  granted.add(lostOrigin);permissionAdded({origins:[lostOrigin]});
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.phase==="saving"&&nativeConnections===1);
+  const lostSaving={phase:shared["lbrain-popup-job-v1"].phase,nativeConnections};
+  const lostComplete=await finish("saved","lost");const afterLost={phase:lostComplete.phase,
+    removed:[...removed],granted:[...granted],journal:local["lbrain-temporary-origins-v1"]||[]};
+  await clear(job.id);
+
+  const earlyOrigin="https://early.invalid/*";job=await ready(2);
+  await send({type:"confirmation.preflight",id:job.id,permission_origins:[earlyOrigin]});
+  granted.add(earlyOrigin);permissionAdded({origins:[earlyOrigin]});
+  await new Promise(resolve=>setTimeout(resolve,0));const beforeArm=nativeConnections;
+  const earlyArm=await send({type:"confirmation.arm",id:job.id});
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.phase==="saving");
+  const earlyComplete=await finish("saved","early");const afterEarly={phase:earlyComplete.phase,nativeConnections};
+  await clear(job.id);
+
+  const deniedOrigin="https://denied.invalid/*";job=await ready(3);
+  await send({type:"confirmation.preflight",id:job.id,permission_origins:[deniedOrigin]});
+  const deniedArm=await send({type:"confirmation.arm",id:job.id});
+  const denied=send({type:"confirmation.permission_result",id:job.id,granted:false});
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.phase==="saving"&&nativeReplies.length===1);
+  const duplicateResult=send({type:"confirmation.permission_result",id:job.id,granted:false});
+  permissionAdded({origins:[deniedOrigin]});await new Promise(resolve=>setTimeout(resolve,0));
+  const deniedDuring={phase:shared["lbrain-popup-job-v1"].phase,nativeConnections};
+  nativeReplies.shift()({status:"partial",target:"Inbox/Captures/denied.md",capture_id:"denied",version:1});
+  const [deniedComplete,duplicateComplete]=await Promise.all([denied,duplicateResult]);
+  await waitFor(()=>!shared["lbrain-save-reservation-v1"]);const afterDenied={
+    phases:[deniedComplete.phase,duplicateComplete.phase],statuses:[deniedComplete.receipt.status,duplicateComplete.receipt.status],
+    nativeConnections,journal:local["lbrain-temporary-origins-v1"]||[]};
+  await clear(job.id);
+
+  const expiredOrigin="https://expired.invalid/*";job=await ready(4);
+  await send({type:"confirmation.preflight",id:job.id,permission_origins:[expiredOrigin]});
+  granted.add(expiredOrigin);shared["lbrain-save-reservation-v1"].save_intent=true;
+  shared["lbrain-save-reservation-v1"].created=Date.now()-11*60*1000;
+  const beforeExpired=nativeConnections;permissionAdded({origins:[expiredOrigin]});
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.phase==="failed");
+  await waitFor(()=>!shared["lbrain-save-reservation-v1"]);const expired={phase:shared["lbrain-popup-job-v1"].phase,
+    preview:Boolean(shared["lbrain-popup-job-v1"].preview),nativeDelta:nativeConnections-beforeExpired,
+    granted:[...granted],journal:local["lbrain-temporary-origins-v1"]||[]};
+  console.log(JSON.stringify({lostPreflight,lostArm,lostSaving,afterLost,beforeArm,earlyArm,afterEarly,
+    deniedArm,deniedDuring,afterDenied,expired,nativeConnections,removed}));
 })().catch(error=>{console.error(error);process.exit(1)});
 '''
         result = subprocess.run(
@@ -2625,10 +4460,972 @@ function send(message){return new Promise(resolve=>messageHandler(message,{},res
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         output = json.loads(result.stdout)
-        self.assertEqual(output["during"], {"state": "saving", "secondResolved": False, "removed": []})
-        self.assertEqual(output["saved"], "saved")
-        self.assertTrue(output["next"])
+        self.assertEqual(output["lostPreflight"], {"reserved": True, "missing": ["https://lost.invalid/*"]})
+        self.assertEqual(output["lostArm"], {"armed": True, "started": False})
+        self.assertEqual(output["lostSaving"], {"phase": "saving", "nativeConnections": 1})
+        self.assertEqual(output["afterLost"], {
+            "phase": "complete", "removed": ["https://lost.invalid/*"], "granted": [], "journal": [],
+        })
+        self.assertEqual(output["beforeArm"], 1)
+        self.assertEqual(output["earlyArm"], {"armed": True, "started": True})
+        self.assertEqual(output["afterEarly"], {"phase": "complete", "nativeConnections": 2})
+        self.assertEqual(output["deniedArm"], {"armed": True, "started": False})
+        self.assertEqual(output["deniedDuring"], {"phase": "saving", "nativeConnections": 3})
+        self.assertEqual(output["afterDenied"], {
+            "phases": ["complete", "complete"], "statuses": ["partial", "partial"],
+            "nativeConnections": 3, "journal": [],
+        })
+        self.assertEqual(output["expired"], {
+            "phase": "failed", "preview": True, "nativeDelta": 0, "granted": [], "journal": [],
+        })
+        self.assertEqual(output["nativeConnections"], 3)
+        self.assertEqual(output["removed"], ["https://lost.invalid/*", "https://early.invalid/*", "https://expired.invalid/*"])
+
+    def test_extension_popup_port_arm_marker_waits_for_runtime_arm_and_keeps_terminal(self) -> None:
+        script = r'''
+const fs=require("fs"),{webcrypto}=require("crypto");
+let messageHandler,connectHandler,nativeConnections=0;
+const shared={},local={},cached={},granted=new Set(),removed=[],nativeReplies=[];
+const storage=values=>({async get(key){if(key===null)return{...values};return{[key]:values[key]}},
+  async set(entries){Object.assign(values,entries)},async remove(key){delete values[key]}});
+global.caches={async open(){return{async put(key,response){cached[key]=await response.text()},
+  async match(key){return cached[key]===undefined?undefined:new Response(cached[key])},
+  async delete(key){delete cached[key]}}},async delete(){for(const key of Object.keys(cached))delete cached[key]}};
+function connectNative(){nativeConnections++;let listener;return{onMessage:{addListener(fn){listener=fn}},
+  onDisconnect:{addListener(){}},disconnect(){},postMessage(message){
+    if(message.type==="chunk")queueMicrotask(()=>listener({type:"ack",channel:message.channel,sequence:message.sequence}));
+    if(message.type==="end")nativeReplies.push(value=>listener(value))}}}
+global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(fn){messageHandler=fn}},
+  onConnect:{addListener(fn){connectHandler=fn}},getURL(value){return`chrome-extension://test/${value}`},
+  connectNative,lastError:null},contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},
+  action:{onClicked:{addListener(){}}},windows:{onRemoved:{addListener(){}}},permissions:{onAdded:{addListener(){}},
+    async contains({origins}){return origins.every(origin=>granted.has(origin))},
+    async remove({origins}){for(const origin of origins)if(granted.delete(origin))removed.push(origin);return true}},
+  storage:{session:storage(shared),local:storage(local),onChanged:{addListener(){}}},
+  notifications:{async create(){},onButtonClicked:{addListener(){}}},tabs:{async create(){}}};
+global.crypto=webcrypto;eval(fs.readFileSync(process.argv[1],"utf8"));
+const send=message=>new Promise(resolve=>messageHandler(message,{},resolve));
+const waitFor=async predicate=>{for(let i=0;i<100;i++){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,0))}
+  throw new Error("condition did not settle")};
+function watch(id){let listener,disconnect;const port={name:"lbrain-popup",onMessage:{addListener(fn){listener=fn}},
+  onDisconnect:{addListener(fn){disconnect=fn}},postMessage(){}};connectHandler(port);listener({type:"watch",id});
+  return{arm(){listener({type:"arm",id})},close(){disconnect()}}}
+async function scenario(number,status){
+  const tab={id:number,url:`https://example.invalid/${status}.mp4`,title:`Fast ${status}`};
+  const preparing=await send({type:"confirmation.prepare",tab,scope:"page"});
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.id===preparing.id&&shared["lbrain-popup-job-v1"].phase==="ready");
+  const id=preparing.id,origin=`https://${status}.fast.invalid/*`;
+  const preflight=await send({type:"confirmation.preflight",id,permission_origins:[origin]});
+  const popup=watch(id);granted.add(origin);
+  const beforeNative=nativeConnections;popup.arm();popup.close();
+  await waitFor(()=>shared["lbrain-save-reservation-v1"]?.id===id&&shared["lbrain-save-reservation-v1"].awaiting_arm===true);
+  const marker={phase:shared["lbrain-popup-job-v1"].phase,saveIntent:shared["lbrain-save-reservation-v1"].save_intent,
+    awaitingArm:shared["lbrain-save-reservation-v1"].awaiting_arm,nativeDelta:nativeConnections-beforeNative,
+    journal:[...(local["lbrain-temporary-origins-v1"]||[])]};
+  const runtimeArm=await send({type:"confirmation.arm",id});
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.phase==="saving"&&nativeReplies.length===1);
+  const duringSaving={phase:shared["lbrain-popup-job-v1"].phase,
+    awaitingArm:Boolean(shared["lbrain-save-reservation-v1"]?.awaiting_arm),nativeDelta:nativeConnections-beforeNative};
+  const duplicateArm=await send({type:"confirmation.arm",id});
+  nativeReplies.shift()(status==="failed"?{status:"failed",error:"disk unavailable"}
+    :{status:"saved",target:"Inbox/Captures/fast.md",capture_id:"fast",version:1});
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.id===id&&shared["lbrain-popup-job-v1"].phase===(status==="failed"?"failed":"complete"));
+  const terminal={phase:shared["lbrain-popup-job-v1"].phase,error:shared["lbrain-popup-job-v1"].error||null,
+    receipt:shared["lbrain-popup-job-v1"].receipt?.status||null};
+  const lateArm=await send({type:"confirmation.arm",id});
+  const permissionResult=await send({type:"confirmation.permission_result",id,granted:true});
+  const afterLate={phase:shared["lbrain-popup-job-v1"].phase,error:shared["lbrain-popup-job-v1"].error||null,
+    receipt:shared["lbrain-popup-job-v1"].receipt?.status||null,nativeDelta:nativeConnections-beforeNative,
+    reservation:shared["lbrain-save-reservation-v1"]?.id||null,journal:local["lbrain-temporary-origins-v1"]||[]};
+  await send({type:"confirmation.cancel",id});
+  return{preflight,marker,runtimeArm,duringSaving,duplicateArm,terminal,lateArm,
+    permissionPhase:permissionResult.phase,permissionError:permissionResult.error||null,
+    permissionReceipt:permissionResult.receipt?.status||null,afterLate};
+}
+(async()=>console.log(JSON.stringify({complete:await scenario(1,"saved"),failed:await scenario(2,"failed"),
+  nativeConnections,removed})))().catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["complete"], {
+            "preflight": {"reserved": True, "missing": ["https://saved.fast.invalid/*"]},
+            "marker": {
+                "phase": "ready", "saveIntent": True, "awaitingArm": True, "nativeDelta": 0,
+                "journal": ["https://saved.fast.invalid/*"],
+            },
+            "runtimeArm": {"armed": True, "started": True},
+            "duringSaving": {"phase": "saving", "awaitingArm": False, "nativeDelta": 1},
+            "duplicateArm": {"armed": True, "started": True},
+            "terminal": {"phase": "complete", "error": None, "receipt": "saved"},
+            "lateArm": {"armed": True, "started": True},
+            "permissionPhase": "complete",
+            "permissionError": None,
+            "permissionReceipt": "saved",
+            "afterLate": {
+                "phase": "complete", "error": None, "receipt": "saved", "nativeDelta": 1,
+                "reservation": None, "journal": [],
+            },
+        })
+        self.assertEqual(output["failed"], {
+            "preflight": {"reserved": True, "missing": ["https://failed.fast.invalid/*"]},
+            "marker": {
+                "phase": "ready", "saveIntent": True, "awaitingArm": True, "nativeDelta": 0,
+                "journal": ["https://failed.fast.invalid/*"],
+            },
+            "runtimeArm": {"armed": True, "started": True},
+            "duringSaving": {"phase": "saving", "awaitingArm": False, "nativeDelta": 1},
+            "duplicateArm": {"armed": True, "started": True},
+            "terminal": {"phase": "failed", "error": "disk unavailable", "receipt": None},
+            "lateArm": {"armed": True, "started": True},
+            "permissionPhase": "failed",
+            "permissionError": "disk unavailable",
+            "permissionReceipt": None,
+            "afterLate": {
+                "phase": "failed", "error": "disk unavailable", "receipt": None, "nativeDelta": 1,
+                "reservation": None, "journal": [],
+            },
+        })
+        self.assertEqual(output["nativeConnections"], 2)
+        self.assertEqual(output["removed"], ["https://saved.fast.invalid/*", "https://failed.fast.invalid/*"])
+
+    def test_extension_save_reservation_survives_worker_restart(self) -> None:
+        script = (
+            "const fs=require('fs'),vm=require('vm'),{webcrypto}=require('crypto');const shared={},persistent={},removed=[];let failRemove=false;"
+            "function worker(){let handler,startup;const session={async get(key){return{[key]:shared[key]}},"
+            "async set(value){Object.assign(shared,value)},async remove(key){delete shared[key]}};"
+            "const chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(fn){startup=fn}},"
+            "onMessage:{addListener(fn){handler=fn}},onConnect:{addListener(){}},lastError:null,"
+            "getURL(value){return 'chrome-extension://test/'+value}},contextMenus:{removeAll(){},create(){},"
+            "onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},windows:{onRemoved:{addListener(){}}},"
+            "permissions:{async remove({origins}){if(failRemove)return false;removed.push(...origins);return true},async contains(){return failRemove}},"
+            "notifications:{onButtonClicked:{addListener(){}}},storage:{session,local:{async get(key){return{[key]:persistent[key]}},async set(value){Object.assign(persistent,value)},async remove(key){delete persistent[key]}}}};"
+            "const caches={async open(){return{async match(){return undefined},async delete(){}}},async delete(){}};"
+            "const context={chrome,caches,crypto:webcrypto,URL,TextEncoder,Blob,Response,setTimeout,clearTimeout,console};"
+            "vm.createContext(context);vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),context);return{handler,startup}}"
+            "function send(handler,message){return new Promise(resolve=>handler(message,{},resolve))}"
+            "(async()=>{const first=worker();const reserved=await send(first.handler,{type:'confirmation.reserve',id:'capture-1',"
+            "permission_origins:['https://new.invalid/*','https://second.invalid/*','https://*/*','https://*.example.com/*']});"
+            "const allowed=[...shared['lbrain-save-reservation-v1'].allowed_origins];"
+            "await send(first.handler,{type:'confirmation.permissions',id:'capture-1',origins:['https://new.invalid/*']});"
+            "await send(first.handler,{type:'confirmation.permissions',id:'capture-1',origins:['https://second.invalid/*']});"
+            "const restarted=worker();await restarted.startup();"
+            "const second=worker();await send(second.handler,{type:'confirmation.reserve',id:'capture-2'});"
+            "const decided=await send(worker().handler,{type:'confirmation.decide',id:'capture-2'});"
+            "shared['lbrain-save-reservation-v1']={id:'busy',created:Date.now(),state:'saving'};"
+            "const concurrent=await send(worker().handler,{type:'confirmation.reserve',id:'concurrent'});"
+            "delete shared['lbrain-save-reservation-v1'];"
+            "shared['lbrain-save-reservation-v1']={id:'stale',created:Date.now()-660000,release_origins:['https://crash.invalid/*']};"
+            "const third=worker();await send(third.handler,{type:'confirmation.reserve',id:'capture-3'});await third.startup();"
+            "shared['lbrain-save-reservation-v1']={id:'retry',created:Date.now(),release_origins:['https://retry.invalid/*']};"
+            "persistent['lbrain-temporary-origins-v1']=['https://retry.invalid/*'];"
+            "failRemove=true;await worker().startup();const retainedOnFailure=Boolean(shared['lbrain-save-reservation-v1']);"
+            "const journalRetainedOnFailure=Boolean(persistent['lbrain-temporary-origins-v1']);"
+            "failRemove=false;await worker().startup();"
+            "persistent['lbrain-temporary-origins-v1']=['https://browser-restart.invalid/*'];await worker().startup();"
+            "console.log(JSON.stringify({reserved:reserved.reserved,allowed,error:decided.error,concurrent:concurrent.reserved,removed,retainedOnFailure,journalRetainedOnFailure,stale:Boolean(shared['lbrain-save-reservation-v1']),journal:Boolean(persistent['lbrain-temporary-origins-v1'])}))})()"
+            ".catch(error=>{console.error(error);process.exit(1)});"
+        )
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertTrue(output["reserved"])
+        self.assertEqual(output["allowed"], ["https://new.invalid/*", "https://second.invalid/*"])
+        self.assertIn("confirmation is no longer available", output["error"])
+        self.assertNotIn("owns the save slot", output["error"])
+        self.assertTrue(output["concurrent"])
+        self.assertEqual(output["removed"], [
+            "https://new.invalid/*", "https://second.invalid/*", "https://crash.invalid/*", "https://retry.invalid/*",
+            "https://browser-restart.invalid/*",
+        ])
+        self.assertTrue(output["retainedOnFailure"])
+        self.assertTrue(output["journalRetainedOnFailure"])
+        self.assertFalse(output["stale"])
+        self.assertFalse(output["journal"])
+
+    def test_extension_popup_capture_ownership_survives_only_after_arm_and_reconciles_restart(self) -> None:
+        script = r'''
+const fs=require("fs"),vm=require("vm"),{webcrypto}=require("crypto");
+const source=fs.readFileSync(process.argv[1],"utf8");
+const shared={},local={},cached={},granted=new Set(),removed=[],nativeReplies=[];let nativeConnections=0;
+const storage=values=>({async get(key){if(key===null)return{...values};return{[key]:values[key]}},
+  async set(entries){Object.assign(values,entries)},async remove(key){delete values[key]}});
+const caches={async match(key){return cached[key]===undefined?undefined:new Response(cached[key])},async open(){return{
+  async put(key,response){cached[key]=await response.text()},
+  async match(key){return cached[key]===undefined?undefined:new Response(cached[key])},
+  async delete(key){delete cached[key]}}},async delete(){for(const key of Object.keys(cached))delete cached[key]}};
+function video(tab){return{schema:"lbrain.capture.v1",title:tab.title,
+  summary:"Original video link captured without the video binary.",origin:tab.url,scope:"page",author:"",published_at:"",
+  content_markdown:"Video",capture_kind:"video",has_video:true,preview_characters:0,extraction_status:"complete",
+  remote_assets:[],assets:[]}}
+function worker(){let handler,connectHandler,permissionAdded;const chrome={runtime:{onInstalled:{addListener(){}},
+  onStartup:{addListener(){}},onMessage:{addListener(fn){handler=fn}},onConnect:{addListener(fn){connectHandler=fn}},
+  getURL(value){return"chrome-extension://test/"+value},lastError:null,connectNative(){nativeConnections++;let listener;return{
+    onMessage:{addListener(fn){listener=fn}},onDisconnect:{addListener(){}},disconnect(){},postMessage(message){
+      if(message.type==="chunk")queueMicrotask(()=>listener({type:"ack",channel:message.channel,sequence:message.sequence}));
+      if(message.type==="end")nativeReplies.push(value=>listener(value))}}}},
+  contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},
+  windows:{onRemoved:{addListener(){}}},permissions:{onAdded:{addListener(fn){permissionAdded=fn}},
+    async contains({origins}){return origins.every(origin=>granted.has(origin))},
+    async remove({origins}){let changed=false;for(const origin of origins)if(granted.delete(origin)){
+      removed.push(origin);changed=true}return changed}},storage:{session:storage(shared),local:storage(local),
+      onChanged:{addListener(){}}},notifications:{async create(){},onButtonClicked:{addListener(){}}},tabs:{async create(){}}};
+  const context={chrome,caches,crypto:webcrypto,URL,TextEncoder,Blob,Response,AbortSignal,setTimeout,clearTimeout,
+    queueMicrotask,console,btoa:value=>Buffer.from(value,"binary").toString("base64")};
+  vm.createContext(context);vm.runInContext(source,context);return{handler,connectHandler,permissionAdded}}
+function send(worker,message){return new Promise(resolve=>worker.handler(message,{},resolve))}
+function watch(worker,id){const messages=[];let receive,disconnect;const port={name:"lbrain-popup",
+  onMessage:{addListener(fn){receive=fn}},onDisconnect:{addListener(fn){disconnect=fn}},
+  postMessage(message){messages.push(message)}};worker.connectHandler(port);receive({type:"watch",id});
+  return{messages,close(){disconnect()}}}
+async function waitFor(predicate){for(let i=0;i<200;i++){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,0))}
+  throw new Error("condition did not settle")}
+(async()=>{
+  const tab={id:7,url:"https://example.invalid/restart.mp4",title:"Restart"};const first=worker();
+  const prepared=await send(first,{type:"confirmation.prepare",tab,scope:"page"});
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.phase==="ready");
+  const preRestart={phase:shared["lbrain-popup-job-v1"].phase,cache:Object.keys(cached).length};
+
+  const restarted=worker(),lostWatch=watch(restarted,prepared.id);
+  await waitFor(()=>lostWatch.messages.some(message=>message.job?.phase==="failed"));
+  const lostJob=lostWatch.messages.at(-1).job;
+  const lost={phase:lostJob.phase,preview:Boolean(lostJob.preview),cache:Object.keys(cached).length};
+  await send(restarted,{type:"confirmation.cancel",id:prepared.id});
+  const reread=await send(restarted,{type:"confirmation.prepare",tab,scope:"page"});
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.id===reread.id&&shared["lbrain-popup-job-v1"].phase==="ready");
+  const rereadResult={phase:reread.phase,fresh:reread.id!==prepared.id,stored:shared["lbrain-popup-job-v1"].phase};
+
+  const origin="https://armed.invalid/*";
+  await send(restarted,{type:"confirmation.preflight",id:reread.id,permission_origins:[origin]});
+  const armed=await send(restarted,{type:"confirmation.arm",id:reread.id});
+  const afterArm={cache:Object.keys(cached).length,saveIntent:Boolean(shared["lbrain-save-reservation-v1"]?.save_intent)};
+  const armedRestart=worker(),restoredWatch=watch(armedRestart,reread.id);
+  await waitFor(()=>restoredWatch.messages.some(message=>message.job?.phase==="ready"));
+  granted.add(origin);armedRestart.permissionAdded({origins:[origin]});
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.phase==="saving"&&nativeReplies.length===1);
+  nativeReplies.shift()({status:"saved",target:"Inbox/Captures/restart.md",capture_id:"restart",version:1});
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.phase==="complete"&&!shared["lbrain-save-reservation-v1"]);
+  const completed={phase:shared["lbrain-popup-job-v1"].phase,status:shared["lbrain-popup-job-v1"].receipt.status,
+    cache:Object.keys(cached).length,permission:granted.has(origin),journal:local["lbrain-temporary-origins-v1"]||[]};
+
+  for(const values of [shared,local,cached])for(const key of Object.keys(values))delete values[key];
+  granted.clear();removed.length=0;const beforeOrphanNative=nativeConnections;
+  const orphanOrigin="https://orphan-watch.invalid/*",orphanTab={id:8,url:"https://example.invalid/orphan.mp4",title:"Orphan"};
+  shared["lbrain-popup-job-v1"]={id:"orphan-watch",phase:"saving",tab:orphanTab,
+    preview:{title:"Orphan",summary:"",permission_origins:[orphanOrigin],details:[]}};
+  shared["lbrain-save-reservation-v1"]={id:"orphan-watch",created:Date.now(),state:"saving",
+    allowed_origins:[orphanOrigin],release_origins:[orphanOrigin]};
+  local["lbrain-temporary-origins-v1"]=[orphanOrigin];granted.add(orphanOrigin);
+  cached["https://lbrain.invalid/confirmation/orphan-watch"]=JSON.stringify({capture:video(orphanTab),tab:orphanTab});
+  const orphanWorker=worker(),orphanWatch=watch(orphanWorker,"orphan-watch");
+  await waitFor(()=>orphanWatch.messages.some(message=>message.job?.phase==="failed")
+    && !shared["lbrain-save-reservation-v1"]&&!granted.has(orphanOrigin));
+  const orphanJob=orphanWatch.messages.at(-1).job;
+  const orphan={phase:orphanJob.phase,preview:Boolean(orphanJob.preview),cache:Object.keys(cached).length,
+    permission:granted.has(orphanOrigin),journal:local["lbrain-temporary-origins-v1"]||[],
+    reservation:Boolean(shared["lbrain-save-reservation-v1"]),removed:[...removed],
+    nativeDelta:nativeConnections-beforeOrphanNative};
+  console.log(JSON.stringify({preRestart,lost,reread:rereadResult,armed,afterArm,
+    restored:restoredWatch.messages.find(message=>message.job?.phase==="ready").job.phase,completed,orphan,nativeConnections}));
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["preRestart"], {"phase": "ready", "cache": 0})
+        self.assertEqual(output["lost"], {"phase": "failed", "preview": False, "cache": 0})
+        self.assertEqual(output["reread"], {"phase": "preparing", "fresh": True, "stored": "ready"})
+        self.assertEqual(output["armed"], {"armed": True, "started": False})
+        self.assertEqual(output["afterArm"], {"cache": 1, "saveIntent": True})
+        self.assertEqual(output["restored"], "ready")
+        self.assertEqual(output["completed"], {
+            "phase": "complete", "status": "saved", "cache": 0,
+            "permission": False, "journal": [],
+        })
+        self.assertEqual(output["orphan"], {
+            "phase": "failed", "preview": True, "cache": 1,
+            "permission": False, "journal": [], "reservation": False,
+            "removed": ["https://orphan-watch.invalid/*"], "nativeDelta": 0,
+        })
+        self.assertEqual(output["nativeConnections"], 1)
+
+    def test_extension_reservation_alarm_reclaims_stale_permission_and_preserves_live_save(self) -> None:
+        script = r'''
+const fs=require("fs"),vm=require("vm"),{webcrypto}=require("crypto");
+const source=fs.readFileSync(process.argv[1],"utf8"),shared={},local={},cached={},granted=new Set(),removed=[],scheduled={};
+let failRemove=false;
+const storage=values=>({async get(key){if(key===null)return{...values};return{[key]:values[key]}},
+  async set(entries){Object.assign(values,entries)},async remove(key){delete values[key]}});
+const caches={async match(key){return cached[key]===undefined?undefined:new Response(cached[key])},async open(){return{
+  async match(key){return cached[key]===undefined?undefined:new Response(cached[key])},async delete(key){delete cached[key]}}},
+  async delete(){for(const key of Object.keys(cached))delete cached[key]}};
+function worker(){let alarmHandler,messageHandler;const alarms={onAlarm:{addListener(fn){alarmHandler=fn}},
+  async create(name,details){scheduled[name]=details},async clear(name){delete scheduled[name];return true}};
+  const chrome={alarms,runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}},
+    onConnect:{addListener(){}},getURL(value){return"chrome-extension://test/"+value},lastError:null},
+    contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},
+    windows:{onRemoved:{addListener(){}}},permissions:{onAdded:{addListener(){}},
+      async contains({origins}){return origins.every(origin=>granted.has(origin))},async remove({origins}){
+        if(failRemove)return false;let changed=false;for(const origin of origins)if(granted.delete(origin)){
+          removed.push(origin);changed=true}return changed}},storage:{session:storage(shared),local:storage(local),
+        onChanged:{addListener(){}}},notifications:{onButtonClicked:{addListener(){}}},tabs:{async create(){}}};
+  const context={chrome,caches,crypto:webcrypto,URL,TextEncoder,Blob,Response,setTimeout,clearTimeout,console};
+  chrome.runtime.onMessage={addListener(fn){messageHandler=fn}};
+  vm.createContext(context);vm.runInContext(source,context);return{alarmHandler,messageHandler,context}}
+function send(worker,message){return new Promise(resolve=>worker.messageHandler(message,{},resolve))}
+function seed(id,origin){for(const values of [shared,local,cached,scheduled])for(const key of Object.keys(values))delete values[key];
+  granted.clear();removed.length=0;shared["lbrain-popup-job-v1"]={id,phase:"saving",tab:{id:7,url:"https://example.invalid/"},
+    preview:{title:"Saved",summary:"",permission_origins:[origin],details:[]}};
+  shared["lbrain-save-reservation-v1"]={id,created:Date.now()-11*60*1000,state:"saving",
+    allowed_origins:[origin],release_origins:[origin]};local["lbrain-temporary-origins-v1"]=[origin];
+  cached[`https://lbrain.invalid/confirmation/${id}`]="confirmed";granted.add(origin)}
+function state(id,origin){return{phase:shared["lbrain-popup-job-v1"]?.phase||null,
+  preview:Boolean(shared["lbrain-popup-job-v1"]?.preview),reservation:shared["lbrain-save-reservation-v1"]?.id||null,
+  permission:granted.has(origin),journal:local["lbrain-temporary-origins-v1"]||[],cache:Object.keys(cached).length,
+  retry:Boolean(scheduled["lbrain-save-reservation-expiry-v1"]),removed:[...removed]}}
+(async()=>{
+  const scheduler=worker();const reserved=await send(scheduler,{type:"confirmation.reserve",id:"scheduled",permission_origins:[]});
+  const scheduledLifecycle={reserved:reserved.reserved,scheduled:Boolean(scheduled["lbrain-save-reservation-expiry-v1"])};
+  await send(scheduler,{type:"confirmation.release",id:"scheduled"});
+  scheduledLifecycle.cleared=!scheduled["lbrain-save-reservation-expiry-v1"]&&!shared["lbrain-save-reservation-v1"];
+
+  const staleOrigin="https://stale-alarm.invalid/*";seed("stale-alarm",staleOrigin);const staleWorker=worker();
+  await staleWorker.alarmHandler({name:"lbrain-save-reservation-expiry-v1"});const stale=state("stale-alarm",staleOrigin);
+
+  const failedOrigin="https://retry-alarm.invalid/*";seed("retry-alarm",failedOrigin);failRemove=true;const retryWorker=worker();
+  await retryWorker.alarmHandler({name:"lbrain-save-reservation-expiry-v1"});const retained=state("retry-alarm",failedOrigin);
+  failRemove=false;await retryWorker.alarmHandler({name:"lbrain-save-reservation-expiry-v1"});
+  const retried=state("retry-alarm",failedOrigin);
+
+  const liveOrigin="https://live-alarm.invalid/*";seed("live-alarm",liveOrigin);const liveWorker=worker();
+  vm.runInContext("saveReservation = 'live-alarm'",liveWorker.context);
+  await liveWorker.alarmHandler({name:"lbrain-save-reservation-expiry-v1"});const live=state("live-alarm",liveOrigin);
+  console.log(JSON.stringify({scheduledLifecycle,stale,retained,retried,live}));
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["scheduledLifecycle"], {"reserved": True, "scheduled": True, "cleared": True})
+        self.assertEqual(output["stale"], {
+            "phase": "failed", "preview": True, "reservation": None,
+            "permission": False, "journal": [], "cache": 1, "retry": False,
+            "removed": ["https://stale-alarm.invalid/*"],
+        })
+        self.assertEqual(output["retained"], {
+            "phase": "failed", "preview": True, "reservation": "retry-alarm",
+            "permission": True, "journal": ["https://retry-alarm.invalid/*"], "cache": 1,
+            "retry": True, "removed": [],
+        })
+        self.assertEqual(output["retried"], {
+            "phase": "failed", "preview": True, "reservation": None,
+            "permission": False, "journal": [], "cache": 1, "retry": False,
+            "removed": ["https://retry-alarm.invalid/*"],
+        })
+        self.assertEqual(output["live"], {
+            "phase": "saving", "preview": True, "reservation": "live-alarm",
+            "permission": True, "journal": ["https://live-alarm.invalid/*"], "cache": 1,
+            "retry": True, "removed": [],
+        })
+
+    def test_extension_legacy_window_repreflights_after_native_failure_and_retries(self) -> None:
+        script = r'''
+const fs=require("fs"),vm=require("vm"),{webcrypto}=require("crypto");
+const confirmSource=fs.readFileSync(process.argv[1],"utf8"),workerSource=fs.readFileSync(process.argv[2],"utf8");
+let workerMessage,workerConnect,contextClick,createdUrl="",permissionAdded,nativeConnections=0,closed=0;
+const shared={},local={},cached={},nativeReplies=[],events=[],messages=[],permissionResolvers=[],requests=[];
+const origin="https://cdn.invalid/*",granted=new Set(),removed=[];
+const storage=values=>({async get(key){if(key===null)return{...values};return{[key]:values[key]}},
+  async set(entries){Object.assign(values,entries)},async remove(key){delete values[key]}});
+const caches={async open(){return{async put(key,response){events.push("cache.put");cached[key]=await response.text()},
+  async match(key){return cached[key]===undefined?undefined:new Response(cached[key])},
+  async delete(key){events.push("cache.delete");delete cached[key]}}},
+  async delete(){for(const key of Object.keys(cached))delete cached[key]}};
+function connectNative(){nativeConnections++;let listener;return{onMessage:{addListener(fn){listener=fn}},
+  onDisconnect:{addListener(){}},disconnect(){},postMessage(message){
+    if(message.type==="chunk")queueMicrotask(()=>listener({type:"ack",channel:message.channel,sequence:message.sequence}));
+    if(message.type==="end")nativeReplies.push(value=>listener(value))}}}
+global.caches=caches;global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},
+  onMessage:{addListener(fn){workerMessage=fn}},onConnect:{addListener(fn){workerConnect=fn}},
+  getURL(value){return"chrome-extension://test/"+value},connectNative,lastError:null},
+  contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(fn){contextClick=fn}}},
+  action:{onClicked:{addListener(){}}},windows:{async create(options){createdUrl=options.url;return{id:19}},
+    onRemoved:{addListener(){}}},permissions:{onAdded:{addListener(fn){permissionAdded=fn}},
+    async contains({origins}){return origins.every(value=>granted.has(value))},
+    async remove({origins}){let changed=false;for(const value of origins){if(granted.delete(value)){
+      removed.push(value);changed=true}}return changed}},storage:{session:storage(shared),local:storage(local),onChanged:{addListener(){}}},
+  notifications:{async create(){},onButtonClicked:{addListener(){}}},tabs:{async create(){}}};
+global.crypto=webcrypto;eval(workerSource);
+function sendWorker(message){messages.push(message);events.push(`runtime:${message.type}`);
+  const sender={url:createdUrl,tab:{windowId:19}};return new Promise(resolve=>workerMessage(message,sender,resolve))}
+async function waitFor(predicate){for(let i=0;i<250;i++){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,0))}
+  throw new Error("condition did not settle")}
+function legacyPort(){let uiListener,serviceListener;const servicePort={name:"lbrain-confirm",
+  onMessage:{addListener(fn){serviceListener=fn}},postMessage(message){const outbound=message?.type==="preview"
+      ? {...message,preview:{...message.preview,permission_origins:[origin]}}:message;
+    queueMicrotask(()=>uiListener(outbound))}};workerConnect(servicePort);return{
+    onMessage:{addListener(fn){uiListener=fn}},postMessage(message){queueMicrotask(()=>serviceListener(message))},disconnect(){}}}
+const listeners={},nodes={};const element=id=>nodes[id]||(nodes[id]={textContent:"",disabled:false,hidden:false,dataset:{},
+  addEventListener(type,fn){listeners[`${id}:${type}`]=fn},append(){},replaceChildren(){},setAttribute(){},removeAttribute(){},
+  classList:{add(){},remove(){},toggle(){}}});const body=element("body");body.dataset.phase="preparing";
+const document={body,querySelector(selector){return selector==="body"?body:element(selector.replace(/^#/,""))},
+  createElement(tag){return element(`created-${tag}-${Object.keys(nodes).length}`)}};
+(async()=>{
+  const tab={id:7,url:"https://example.invalid/movie.mp4",title:"Movie"};contextClick({menuItemId:"lbrain-save-page"},tab);
+  await waitFor(()=>Boolean(createdUrl));await new Promise(resolve=>setTimeout(resolve,0));
+  const uiChrome={runtime:{connect({name}){if(name!=="lbrain-confirm")throw new Error("wrong port");return legacyPort()},
+      sendMessage:sendWorker},windows:{async getCurrent(){return{id:19}}},permissions:{request({origins}){
+      events.push("permission.request");requests.push(origins);return new Promise(resolve=>permissionResolvers.push(resolve))}},
+    tabs:{async query(){return[tab]}}};
+  const context={chrome:uiChrome,caches,document,location:{search:new URL(createdUrl).search},window:{close(){closed++}},
+    URLSearchParams,URL,Response,console,setTimeout,clearTimeout,queueMicrotask};vm.createContext(context);vm.runInContext(confirmSource,context);
+  await waitFor(()=>messages.filter(value=>value.type==="confirmation.preflight").length===1&&!element("save").disabled);
+  const firstPreflight=messages.find(value=>value.type==="confirmation.preflight");
+  const firstOffset=events.length,firstClick=listeners["save:click"]();
+  const firstImmediate={events:events.slice(firstOffset),phase:body.dataset.phase};
+  granted.add(origin);permissionAdded({origins:[origin]});permissionResolvers.shift()(true);
+  await waitFor(()=>nativeReplies.length===1);const firstBeforeNative=events.slice(firstOffset,firstOffset+3);
+  nativeReplies.shift()({status:"failed",error:"disk unavailable"});await firstClick;
+  await waitFor(()=>messages.filter(value=>value.type==="confirmation.preflight").length===2&&!element("save").disabled);
+  const afterFailure={phase:body.dataset.phase,preflights:messages.filter(value=>value.type==="confirmation.preflight").length,
+    releases:messages.filter(value=>value.type==="confirmation.release").length,closed};
+
+  const secondOffset=events.length,secondClick=listeners["save:click"]();
+  const secondImmediate={events:events.slice(secondOffset),phase:body.dataset.phase};
+  granted.add(origin);permissionAdded({origins:[origin]});permissionResolvers.shift()(true);
+  await waitFor(()=>nativeReplies.length===1);const secondBeforeNative=events.slice(secondOffset,secondOffset+3);
+  nativeReplies.shift()({status:"saved",target:"Inbox/Captures/movie.md",capture_id:"movie",version:1});await secondClick;
+  await waitFor(()=>!shared["lbrain-save-reservation-v1"]);
+  console.log(JSON.stringify({firstPreflight,firstImmediate,firstBeforeNative,afterFailure,secondImmediate,secondBeforeNative,
+    requests,nativeConnections,closed,removed,granted:[...granted],journal:local["lbrain-temporary-origins-v1"]||[],
+    cached:Object.keys(cached).length,arms:messages.filter(value=>value.type==="confirmation.arm").length}));
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            [
+                "node", "-e", script,
+                str(CAPTURE_EXTENSION / "confirm.js"),
+                str(CAPTURE_EXTENSION / "service_worker.js"),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["firstPreflight"]["type"], "confirmation.preflight")
+        self.assertEqual(output["firstPreflight"]["window_id"], 19)
+        self.assertEqual(output["firstPreflight"]["permission_origins"], ["https://cdn.invalid/*"])
+        self.assertEqual(output["firstImmediate"], {"events": ["permission.request"], "phase": "saving"})
+        self.assertEqual(output["firstBeforeNative"], [
+            "permission.request", "cache.put", "runtime:confirmation.decide",
+        ])
+        self.assertEqual(output["afterFailure"], {
+            "phase": "failed", "preflights": 2, "releases": 1, "closed": 0,
+        })
+        self.assertEqual(output["secondImmediate"], {"events": ["permission.request"], "phase": "saving"})
+        self.assertEqual(output["secondBeforeNative"], [
+            "permission.request", "cache.put", "runtime:confirmation.decide",
+        ])
+        self.assertEqual(output["requests"], [["https://cdn.invalid/*"], ["https://cdn.invalid/*"]])
+        self.assertEqual(output["nativeConnections"], 2)
+        self.assertEqual(output["closed"], 1)
+        self.assertEqual(output["removed"], ["https://cdn.invalid/*", "https://cdn.invalid/*"])
+        self.assertEqual(output["granted"], [])
+        self.assertEqual(output["journal"], [])
+        self.assertEqual(output["cached"], 0)
+        self.assertEqual(output["arms"], 0)
+
+    def test_extension_popup_reopens_from_session_without_duplicate_native_save(self) -> None:
+        script = r'''
+const fs=require("fs"),{webcrypto}=require("crypto");
+let connectHandler,messageHandler,nativeMessage,endSeen=false,nativeConnections=0;
+const shared={},local={},cached={},removed=[],granted=new Set();
+const area={async get(key){if(key===null)return{...this.values};return{[key]:this.values[key]}},
+  async set(values){Object.assign(this.values,values)},async remove(key){delete this.values[key]}};
+const session={...area,values:shared};const localStorage={...area,values:local};
+global.caches={async open(){return{
+  async put(key,response){cached[key]=await response.text()},
+  async match(key){return cached[key]===undefined?undefined:new Response(cached[key])},
+  async delete(key){delete cached[key]}}},async delete(){for(const key of Object.keys(cached))delete cached[key]}};
+function nativePort(){nativeConnections++;return{onMessage:{addListener(fn){nativeMessage=fn}},onDisconnect:{addListener(){}},disconnect(){},
+  postMessage(message){if(message.type==="chunk")queueMicrotask(()=>nativeMessage({type:"ack",channel:message.channel,sequence:message.sequence}));
+    if(message.type==="end")endSeen=true}}}
+global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(fn){messageHandler=fn}},
+  onConnect:{addListener(fn){connectHandler=fn}},getURL(value){return"chrome-extension://test/"+value},
+  connectNative:nativePort,lastError:null},contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},
+  action:{onClicked:{addListener(){}}},windows:{onRemoved:{addListener(){}}},
+  permissions:{async remove({origins}){for(const origin of origins)if(granted.delete(origin))removed.push(origin);return true},
+    async contains({origins}){return origins.every(origin=>granted.has(origin))}},
+  storage:{session,local:localStorage,onChanged:{addListener(){}}},
+  notifications:{async create(){},onButtonClicked:{addListener(){}}},tabs:{async create(){}}};
+global.crypto=webcrypto;
+eval(fs.readFileSync(process.argv[1],"utf8"));
+function send(message){return new Promise(resolve=>messageHandler(message,{},resolve))}
+async function waitFor(predicate){for(let i=0;i<100;i++){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,0))}
+  throw new Error("condition did not settle")}
+function watch(id){let listener,disconnected;const messages=[];const port={name:"lbrain-popup",onMessage:{addListener(fn){listener=fn}},
+  onDisconnect:{addListener(fn){disconnected=fn}},postMessage(message){messages.push(message)}};connectHandler(port);listener({type:"watch",id});
+  return{messages,close(){disconnected()}}}
+(async()=>{
+  let tab={id:7,url:"https://example.invalid/movie.mp4",title:"Movie"};
+  const preparing=await send({type:"confirmation.prepare",tab,scope:"page"});
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.phase==="ready");
+  let id=preparing.id;const firstPopup=watch(id);await waitFor(()=>firstPopup.messages.length);
+  const readyPhase=firstPopup.messages.at(-1).job.phase;firstPopup.close();await new Promise(resolve=>setTimeout(resolve,0));
+  const firstId=id;
+  const restoredReady=await send({type:"confirmation.prepare",tab,scope:"page"});
+  id=restoredReady.id;
+  const restoredPopup=watch(id);await waitFor(()=>restoredPopup.messages.length);restoredPopup.close();
+  const oldId=id;tab={id:8,url:"https://example.invalid/other.mp4",title:"Other movie"};
+  const replacement=await send({type:"confirmation.prepare",tab,scope:"page"});
+  const oldCacheRemoved=!Object.keys(cached).some(key=>key.includes(oldId));id=replacement.id;
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.phase==="ready");
+  const readyPopup=watch(id);await waitFor(()=>readyPopup.messages.length);
+  const preflight=await send({type:"confirmation.preflight",id,permission_origins:["https://new.invalid/*"]});
+  const armed=await send({type:"confirmation.arm",id});readyPopup.close();await new Promise(resolve=>setTimeout(resolve,0));
+  const afterDisconnect={reservation:shared["lbrain-save-reservation-v1"]?.id||null,
+    release:[...(shared["lbrain-save-reservation-v1"]?.release_origins||[])],
+    journal:[...(local["lbrain-temporary-origins-v1"]||[])],state:shared["lbrain-save-reservation-v1"]?.state||null,
+    saveIntent:Boolean(shared["lbrain-save-reservation-v1"]?.save_intent),
+    contains:await chrome.permissions.contains({origins:["https://new.invalid/*"]})};
+  const pendingOther=await send({type:"confirmation.prepare",
+    tab:{id:10,url:"https://example.invalid/pending-other.mp4",title:"Pending other"},scope:"page"});
+  const reentered=await send({type:"confirmation.preflight",id,permission_origins:["https://new.invalid/*"]});
+  const merged={allowed:[...(shared["lbrain-save-reservation-v1"]?.allowed_origins||[])],
+    release:[...(shared["lbrain-save-reservation-v1"]?.release_origins||[])],
+    state:shared["lbrain-save-reservation-v1"]?.state||null,
+    saveIntent:Boolean(shared["lbrain-save-reservation-v1"]?.save_intent)};
+  granted.add("https://new.invalid/*");
+  const savePopup=watch(id);await waitFor(()=>savePopup.messages.length);
+  const first=send({type:"confirmation.decide",id,release_origins:["https://new.invalid/*"]});
+  await waitFor(()=>endSeen&&shared["lbrain-popup-job-v1"]?.phase==="saving");
+  savePopup.close();await new Promise(resolve=>setTimeout(resolve,0));
+  const reopened=await send({type:"confirmation.prepare",
+    tab:{id:9,url:"https://example.invalid/third.mp4",title:"Third movie"},scope:"page"});
+  const savingPopup=watch(id);await waitFor(()=>savingPopup.messages.length);const reopenedWatch=savingPopup.messages.at(-1).job.phase;
+  const duplicate=send({type:"confirmation.decide",id,release_origins:[]});
+  await new Promise(resolve=>setTimeout(resolve,0));
+  const during={phase:shared["lbrain-popup-job-v1"].phase,nativeConnections,
+    reservation:shared["lbrain-save-reservation-v1"]?.id};
+  nativeMessage({status:"saved",target:"Inbox/Captures/movie.md",capture_id:"movie",version:1});
+  const completed=await first;const duplicateResult=await duplicate;
+  const terminal=await send({type:"confirmation.prepare",tab,scope:"page"});
+  const completeMessages=watch(id);await waitFor(()=>completeMessages.messages.length);
+  console.log(JSON.stringify({preparing:preparing.phase,ready:readyPhase,restoredReady:restoredReady.phase,
+    restoredFresh:restoredReady.id!==firstId,replacement:replacement.phase,replacedId:replacement.id!==oldId,oldCacheRemoved,
+    reopened:reopened.phase,reopenedSameId:reopened.id===id,reopenedWatch,during,
+    completed:completed.phase,status:completed.receipt.status,duplicateError:duplicateResult.error,
+    terminal:terminal.phase,terminalWatch:completeMessages.messages.at(-1).job.phase,nativeConnections,
+    preflightMissing:preflight.missing,armed,afterDisconnect,pendingOther:{id:pendingOther.id,phase:pendingOther.phase},
+    reentered:{reserved:reentered.reserved,missing:reentered.missing},merged,removed,
+    granted:[...granted],journal:local["lbrain-temporary-origins-v1"]||[]}));
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["preparing"], "preparing")
+        self.assertEqual(output["ready"], "ready")
+        self.assertEqual(output["restoredReady"], "preparing")
+        self.assertTrue(output["restoredFresh"])
+        self.assertEqual(output["replacement"], "preparing")
+        self.assertTrue(output["replacedId"])
+        self.assertTrue(output["oldCacheRemoved"])
+        self.assertEqual(output["reopened"], "saving")
+        self.assertTrue(output["reopenedSameId"])
+        self.assertEqual(output["reopenedWatch"], "saving")
+        self.assertEqual(output["during"]["phase"], "saving")
+        self.assertEqual(output["during"]["nativeConnections"], 1)
+        self.assertTrue(output["during"]["reservation"])
+        self.assertEqual(output["completed"], "complete")
+        self.assertEqual(output["status"], "saved")
+        self.assertIn("save slot", output["duplicateError"])
+        self.assertEqual(output["terminal"], "complete")
+        self.assertEqual(output["terminalWatch"], "complete")
+        self.assertEqual(output["nativeConnections"], 1)
+        self.assertTrue(output["afterDisconnect"]["reservation"])
+        self.assertEqual(output["preflightMissing"], ["https://new.invalid/*"])
+        self.assertEqual(output["armed"], {"armed": True, "started": False})
+        self.assertEqual(output["afterDisconnect"]["release"], ["https://new.invalid/*"])
+        self.assertEqual(output["afterDisconnect"]["journal"], ["https://new.invalid/*"])
+        self.assertEqual(output["afterDisconnect"]["state"], "permission_pending")
+        self.assertTrue(output["afterDisconnect"]["saveIntent"])
+        self.assertFalse(output["afterDisconnect"]["contains"])
+        self.assertEqual(output["pendingOther"]["phase"], "ready")
+        self.assertEqual(output["pendingOther"]["id"], output["afterDisconnect"]["reservation"])
+        self.assertEqual(output["reentered"], {"reserved": True, "missing": ["https://new.invalid/*"]})
+        self.assertEqual(output["merged"]["allowed"], ["https://new.invalid/*"])
+        self.assertEqual(output["merged"]["release"], ["https://new.invalid/*"])
+        self.assertEqual(output["merged"]["state"], "permission_pending")
+        self.assertTrue(output["merged"]["saveIntent"])
         self.assertEqual(output["removed"], ["https://new.invalid/*"])
+        self.assertEqual(output["granted"], [])
+        self.assertEqual(output["journal"], [])
+
+    def test_extension_popup_watchers_and_preflight_replacement_do_not_leak_leases(self) -> None:
+        script = r'''
+const fs=require("fs"),{webcrypto}=require("crypto");
+let connectHandler,messageHandler,windowRemoved,blockedGet,blockNextReservationGet=false,raceOldId="",nativeConnections=0;
+const shared={},local={},cached={},ghostWrites=[],liveWindows=new Set([19,20]);
+const session={async get(key){
+    if(key==="lbrain-save-reservation-v1"&&blockNextReservationGet){blockNextReservationGet=false;
+      return new Promise(resolve=>{blockedGet=()=>resolve({[key]:shared[key]})})}
+    return{[key]:shared[key]}},
+  async set(values){const reservation=values["lbrain-save-reservation-v1"];
+    if(raceOldId&&reservation?.id===raceOldId&&shared["lbrain-popup-job-v1"]?.id!==raceOldId)ghostWrites.push(reservation.id);
+    Object.assign(shared,values)},async remove(key){delete shared[key]}};
+global.caches={async open(){return{async put(key,response){cached[key]=await response.text()},
+  async match(key){return cached[key]===undefined?undefined:new Response(cached[key])},
+  async delete(key){delete cached[key]}}},async delete(){}};
+global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(fn){messageHandler=fn}},
+  onConnect:{addListener(fn){connectHandler=fn}},getURL(value){return"chrome-extension://test/"+value},
+  connectNative(){nativeConnections++;let listener;return{onMessage:{addListener(fn){listener=fn}},onDisconnect:{addListener(){}},
+    disconnect(){},postMessage(message){if(message.type==="chunk")queueMicrotask(()=>listener({
+      type:"ack",channel:message.channel,sequence:message.sequence}));if(message.type==="end")queueMicrotask(()=>listener({
+      status:"saved",target:"Inbox/Captures/reconnect.md",capture_id:"reconnect",version:1}))}}},lastError:null},
+  contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},
+  action:{onClicked:{addListener(){}}},windows:{async get(id){if(liveWindows.has(id))return{id};throw new Error("closed")},
+    onRemoved:{addListener(fn){windowRemoved=fn}}},permissions:{
+    async contains({origins}){return origins.length===0},async remove(){return false}},
+  storage:{session,local:{async get(key){return{[key]:local[key]}},async set(values){Object.assign(local,values)},
+    async remove(key){delete local[key]}},onChanged:{addListener(){}}},notifications:{async create(){},onButtonClicked:{addListener(){}}},
+  tabs:{async create(){}}};
+global.crypto=webcrypto;eval(fs.readFileSync(process.argv[1],"utf8"));
+function send(message,sender={}){return new Promise(resolve=>messageHandler(message,sender,resolve))}
+async function waitFor(predicate){for(let i=0;i<100;i++){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,0))}
+  throw new Error("condition did not settle")}
+function watch(id){let listener,disconnect;const port={name:"lbrain-popup",onMessage:{addListener(fn){listener=fn}},
+  onDisconnect:{addListener(fn){disconnect=fn}},postMessage(){}};connectHandler(port);listener({type:"watch",id});return()=>disconnect()}
+async function ready(tab){const job=await send({type:"confirmation.prepare",tab,scope:"page"});
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.phase==="ready");return job}
+(async()=>{
+  const firstTab={id:1,url:"https://example.invalid/first.mp4",title:"First"};let job=await ready(firstTab);
+  const firstId=job.id,previewOrigin="https://preview.invalid/*",close=watch(firstId);
+  const previewPreflight=await send({type:"confirmation.preflight",id:firstId,permission_origins:[previewOrigin]});close();
+  const toolbar=await send({type:"confirmation.prepare",
+    tab:{id:5,url:"https://example.invalid/toolbar.mp4",title:"Toolbar"},scope:"page"});
+  const toolbarFlow={previewMissing:previewPreflight.missing,phase:toolbar.phase,fresh:toolbar.id!==firstId,
+    oldLease:shared["lbrain-save-reservation-v1"]?.id===firstId,journal:local["lbrain-temporary-origins-v1"]||[]};
+  await send({type:"confirmation.cancel",id:toolbar.id});
+
+  const contextTab={id:6,url:"https://example.invalid/context.mp4",title:"Context"};job=await ready(contextTab);
+  const contextId=job.id,contextOrigin="https://context-preview.invalid/*",closeContext=watch(contextId);
+  const contextPreflight=await send({type:"confirmation.preflight",id:contextId,permission_origins:[contextOrigin]});
+  closeContext();const other=await send({type:"confirmation.reserve",id:"context-menu",permission_origins:[]});
+  const contextFlow={missing:contextPreflight.missing,reserved:other.reserved,
+    reservation:shared["lbrain-save-reservation-v1"]?.id||null,
+    journal:local["lbrain-temporary-origins-v1"]||[]};
+  await send({type:"confirmation.release",id:"context-menu"});await send({type:"confirmation.cancel",id:contextId});
+
+  const ownerTab={id:7,url:"https://example.invalid/owner.mp4",title:"Owner"};job=await ready(ownerTab);
+  const ownerId=job.id,closeOwner=watch(ownerId);
+  await send({type:"confirmation.preflight",id:ownerId,permission_origins:["https://owner.invalid/*"]});
+  const blockedToolbar=await send({type:"confirmation.prepare",
+    tab:{id:8,url:"https://example.invalid/blocked.mp4",title:"Blocked"},scope:"page"});
+  const blockedContext=await send({type:"confirmation.reserve",id:"blocked-context",permission_origins:[]});
+  const ownerBeforeClose={job:shared["lbrain-popup-job-v1"]?.id||null,
+    reservation:shared["lbrain-save-reservation-v1"]?.id||null};
+  closeOwner();const ownerReplacement=await send({type:"confirmation.prepare",
+    tab:{id:8,url:"https://example.invalid/blocked.mp4",title:"Blocked"},scope:"page"});
+  const popupOwner={toolbarError:blockedToolbar.error||null,contextError:blockedContext.error||null,
+    before:ownerBeforeClose,replacementPhase:ownerReplacement.phase,replacementFresh:ownerReplacement.id!==ownerId,
+    oldLease:shared["lbrain-save-reservation-v1"]?.id===ownerId,
+    journal:local["lbrain-temporary-origins-v1"]||[]};
+  await send({type:"confirmation.cancel",id:ownerReplacement.id});
+
+  const reconnectTab={id:9,url:"https://example.invalid/reconnect.mp4",title:"Reconnect"};job=await ready(reconnectTab);
+  const reconnectId=job.id,closeReconnectOld=watch(reconnectId);
+  await send({type:"confirmation.preflight",id:reconnectId,permission_origins:[]});
+  blockNextReservationGet=true;
+  const heldMutation=send({type:"confirmation.permissions",id:reconnectId,origins:[]});
+  await waitFor(()=>Boolean(blockedGet));closeReconnectOld();const closeReconnectNew=watch(reconnectId);
+  const releaseHeld=blockedGet;blockedGet=null;releaseHeld();await heldMutation;await new Promise(resolve=>setTimeout(resolve,0));
+  const keptBeforeDecide=shared["lbrain-save-reservation-v1"]?.id||null;
+  const reconnectDecision=await send({type:"confirmation.decide",id:reconnectId});
+  const reconnect={keptBeforeDecide,phase:reconnectDecision.phase,status:reconnectDecision.receipt.status,
+    nativeConnections,reservation:shared["lbrain-save-reservation-v1"]?.id||null};
+  closeReconnectNew();await send({type:"confirmation.cancel",id:reconnectId});
+
+  const secondTab={id:2,url:"https://example.invalid/second.mp4",title:"Second"};job=await ready(secondTab);
+  const closeOld=watch(job.id),closeNew=watch(job.id);
+  await send({type:"confirmation.preflight",id:job.id,permission_origins:[]});closeOld();
+  await new Promise(resolve=>setTimeout(resolve,0));const afterOld=shared["lbrain-save-reservation-v1"]?.id||null;
+  closeNew();await waitFor(()=>!shared["lbrain-save-reservation-v1"]);const afterLast=shared["lbrain-save-reservation-v1"]?.id||null;
+  await send({type:"confirmation.cancel",id:job.id});
+
+  const raceTab={id:3,url:"https://example.invalid/race.mp4",title:"Race"};job=await ready(raceTab);raceOldId=job.id;
+  blockNextReservationGet=true;const preflight=send({type:"confirmation.preflight",id:job.id,permission_origins:[]});
+  await waitFor(()=>Boolean(blockedGet));
+  const replacementTab={id:4,url:"https://example.invalid/replacement.mp4",title:"Replacement"};
+  const replacement=send({type:"confirmation.prepare",tab:replacementTab,scope:"page"});
+  await new Promise(resolve=>setTimeout(resolve,0));blockedGet();const preflightResult=await preflight;const replaced=await replacement;
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.id===replaced.id);
+  const race={oldId:job.id,newId:replaced.id,preflightError:preflightResult.error||null,ghostWrites,
+    reservation:shared["lbrain-save-reservation-v1"]?.id||null,current:shared["lbrain-popup-job-v1"].id};
+  await send({type:"confirmation.cancel",id:replaced.id});
+
+  const legacyOwner="legacy-owner",legacyOther="legacy-other";
+  const legacySender=(id,windowId)=>({url:`chrome-extension://test/confirm.html?id=${id}`,tab:{windowId}});
+  const legacyPreflight=await send({type:"confirmation.preflight",id:legacyOwner,window_id:19,
+    permission_origins:["https://legacy-owner.invalid/*"]},legacySender(legacyOwner,19));
+  const legacyBlocked=await send({type:"confirmation.preflight",id:legacyOther,window_id:20,
+    permission_origins:[]},legacySender(legacyOther,20));
+  const legacyContextBlocked=await send({type:"confirmation.reserve",id:"legacy-context",permission_origins:[]});
+  liveWindows.delete(19);windowRemoved(19);
+  await waitFor(()=>shared["lbrain-save-reservation-v1"]?.id!==legacyOwner);
+  const legacyReplacement=await send({type:"confirmation.preflight",id:legacyOther,window_id:20,
+    permission_origins:[]},legacySender(legacyOther,20));
+  const legacyOwnerFlow={missing:legacyPreflight.missing,preflightError:legacyBlocked.error||null,
+    contextError:legacyContextBlocked.error||null,replacement:legacyReplacement,
+    reservation:shared["lbrain-save-reservation-v1"]?.id||null,
+    journal:local["lbrain-temporary-origins-v1"]||[]};
+  await send({type:"confirmation.release",id:legacyOther});
+  console.log(JSON.stringify({toolbarFlow,contextFlow,popupOwner,reconnect,legacyOwnerFlow,watchers:{afterOld,afterLast},race}));
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["toolbarFlow"], {
+            "previewMissing": ["https://preview.invalid/*"],
+            "phase": "preparing",
+            "fresh": True,
+            "oldLease": False,
+            "journal": [],
+        })
+        self.assertEqual(output["contextFlow"], {
+            "missing": ["https://context-preview.invalid/*"],
+            "reserved": True,
+            "reservation": "context-menu",
+            "journal": [],
+        })
+        self.assertIn("preview is already open", output["popupOwner"]["toolbarError"])
+        self.assertIn("already being saved", output["popupOwner"]["contextError"])
+        self.assertTrue(output["popupOwner"]["before"]["job"])
+        self.assertEqual(output["popupOwner"]["before"]["job"], output["popupOwner"]["before"]["reservation"])
+        self.assertEqual(output["popupOwner"]["replacementPhase"], "preparing")
+        self.assertTrue(output["popupOwner"]["replacementFresh"])
+        self.assertFalse(output["popupOwner"]["oldLease"])
+        self.assertEqual(output["popupOwner"]["journal"], [])
+        self.assertTrue(output["reconnect"]["keptBeforeDecide"])
+        self.assertEqual(output["reconnect"]["phase"], "complete")
+        self.assertEqual(output["reconnect"]["status"], "saved")
+        self.assertEqual(output["reconnect"]["nativeConnections"], 1)
+        self.assertIsNone(output["reconnect"]["reservation"])
+        self.assertEqual(output["legacyOwnerFlow"]["missing"], ["https://legacy-owner.invalid/*"])
+        self.assertIn("already being saved", output["legacyOwnerFlow"]["preflightError"])
+        self.assertIn("already being saved", output["legacyOwnerFlow"]["contextError"])
+        self.assertEqual(output["legacyOwnerFlow"]["replacement"], {"reserved": True, "missing": []})
+        self.assertEqual(output["legacyOwnerFlow"]["reservation"], "legacy-other")
+        self.assertEqual(output["legacyOwnerFlow"]["journal"], [])
+        self.assertTrue(output["watchers"]["afterOld"])
+        self.assertIsNone(output["watchers"]["afterLast"])
+        self.assertNotEqual(output["race"]["oldId"], output["race"]["newId"])
+        self.assertEqual(output["race"]["ghostWrites"], [])
+        self.assertNotEqual(output["race"]["reservation"], output["race"]["oldId"])
+        self.assertEqual(output["race"]["current"], output["race"]["newId"])
+
+    def test_extension_popup_failure_keeps_prepared_capture_for_retry(self) -> None:
+        script = r'''
+const fs=require("fs"),{webcrypto}=require("crypto");
+let messageHandler,connectHandler,nativeConnections=0;const shared={},cached={},nativeReplies=[],notifications=[];
+const session={async get(key){return{[key]:shared[key]}},async set(values){Object.assign(shared,values)},
+  async remove(key){delete shared[key]}};
+global.caches={async open(){return{async put(key,response){cached[key]=await response.text()},
+  async match(key){return cached[key]===undefined?undefined:new Response(cached[key])},
+  async delete(key){delete cached[key]}}},async delete(){}};
+function connectNative(){nativeConnections++;let listener;return{onMessage:{addListener(fn){listener=fn}},
+  onDisconnect:{addListener(){}},disconnect(){},postMessage(message){
+    if(message.type==="chunk")queueMicrotask(()=>listener({type:"ack",channel:message.channel,sequence:message.sequence}));
+    if(message.type==="end")nativeReplies.push(value=>listener(value))}}}
+global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(fn){messageHandler=fn}},
+  onConnect:{addListener(fn){connectHandler=fn}},getURL(value){return"chrome-extension://test/"+value},connectNative,lastError:null},
+  contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},
+  windows:{onRemoved:{addListener(){}}},permissions:{async remove(){return true},async contains(){return false}},
+  storage:{session,local:{async get(key){return key===null?{}:{[key]:undefined}},async set(){},async remove(){}}},
+  notifications:{async create(id,options){notifications.push({id,...options})},onButtonClicked:{addListener(){}}},
+  tabs:{async create(){}}};
+global.crypto=webcrypto;eval(fs.readFileSync(process.argv[1],"utf8"));
+function send(message){return new Promise(resolve=>messageHandler(message,{},resolve))}
+async function waitFor(predicate){for(let i=0;i<100;i++){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,0))}
+  throw new Error("condition did not settle")}
+function watch(id){let listener,disconnect;const port={name:"lbrain-popup",onMessage:{addListener(fn){listener=fn}},
+  onDisconnect:{addListener(fn){disconnect=fn}},postMessage(){}};connectHandler(port);listener({type:"watch",id});return()=>disconnect()}
+(async()=>{const tab={id:7,url:"https://example.invalid/movie.mp4",title:"Movie"};
+  const preparing=await send({type:"confirmation.prepare",tab,scope:"page"});
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.phase==="ready");const id=preparing.id;
+  const firstPreflight=await send({type:"confirmation.preflight",id,permission_origins:[]});
+  const close=watch(id);
+  const first=send({type:"confirmation.decide",id,release_origins:[]});await waitFor(()=>nativeReplies.length===1);
+  const closedPhase=shared["lbrain-popup-job-v1"].phase;close();await new Promise(resolve=>setTimeout(resolve,0));
+  nativeReplies.shift()({status:"failed",error:"disk unavailable"});const failure=await first;
+  const afterFailure={phase:shared["lbrain-popup-job-v1"].phase,error:shared["lbrain-popup-job-v1"].error,
+    cached:Object.keys(cached).length};
+  const retryPreflight=await send({type:"confirmation.preflight",id,permission_origins:[]});
+  const retry=send({type:"confirmation.decide",id,release_origins:[]});await waitFor(()=>nativeReplies.length===1);
+  nativeReplies.shift()({status:"saved",target:"Inbox/Captures/movie.md",capture_id:"movie",version:1});
+  const completed=await retry;
+  console.log(JSON.stringify({firstPreflight,retryPreflight,failure:failure.error,afterFailure,completed:completed.phase,
+    status:completed.receipt.status,cached:Object.keys(cached).length,nativeConnections,closedPhase,
+    failureNotifications:notifications.filter(value=>value.title==="LBrain capture needs attention").map(value=>value.message)}))})()
+  .catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["firstPreflight"], {"reserved": True, "missing": []})
+        self.assertIn("disk unavailable", output["failure"])
+        self.assertEqual(output["afterFailure"], {
+            "phase": "failed", "error": "disk unavailable", "cached": 1,
+        })
+        self.assertEqual(output["retryPreflight"], {"reserved": True, "missing": []})
+        self.assertEqual(output["completed"], "complete")
+        self.assertEqual(output["status"], "saved")
+        self.assertEqual(output["cached"], 0)
+        self.assertEqual(output["nativeConnections"], 2)
+        self.assertEqual(output["closedPhase"], "saving")
+        self.assertIn("disk unavailable", output["failureNotifications"])
+
+    def test_extension_mv3_restart_recovers_orphaned_saving_and_blocks_duplicate_native(self) -> None:
+        script = r'''
+const fs=require("fs"),vm=require("vm"),{webcrypto}=require("crypto");
+const source=fs.readFileSync(process.argv[1],"utf8");
+const shared={},local={},cached={},granted=new Set(),removed=[],nativeReplies=[];let nativeConnections=0;
+const storage=values=>({async get(key){if(key===null)return{...values};return{[key]:values[key]}},
+  async set(entries){Object.assign(values,entries)},async remove(key){delete values[key]}});
+const session=storage(shared),localStorage=storage(local);
+const caches={async open(){return{async put(key,response){cached[key]=await response.text()},
+  async match(key){return cached[key]===undefined?undefined:new Response(cached[key])},
+  async delete(key){delete cached[key]}}},async delete(){for(const key of Object.keys(cached))delete cached[key]}};
+function worker(){let handler;const chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},
+  onMessage:{addListener(fn){handler=fn}},onConnect:{addListener(){}},getURL(value){return"chrome-extension://test/"+value},
+  connectNative(){nativeConnections++;let listener;return{onMessage:{addListener(fn){listener=fn}},onDisconnect:{addListener(){}},
+    disconnect(){},postMessage(message){if(message.type==="chunk")queueMicrotask(()=>listener({type:"ack",channel:message.channel,sequence:message.sequence}));
+      if(message.type==="end")nativeReplies.push(value=>listener(value))}}},lastError:null},
+  contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},
+  windows:{onRemoved:{addListener(){}}},permissions:{async contains({origins}){return origins.every(origin=>granted.has(origin))},
+    async remove({origins}){for(const origin of origins)if(granted.delete(origin))removed.push(origin);return true}},
+  storage:{session,local:localStorage,onChanged:{addListener(){}}},notifications:{async create(){},onButtonClicked:{addListener(){}}},
+  tabs:{async create(){}}};
+  const context={chrome,caches,crypto:webcrypto,URL,TextEncoder,Blob,Response,AbortSignal,setTimeout,clearTimeout,
+    queueMicrotask,console,btoa:value=>Buffer.from(value,"binary").toString("base64")};
+  vm.createContext(context);vm.runInContext(source,context);return{handler}}
+function send(handler,message,sender={}){return new Promise(resolve=>handler(message,sender,resolve))}
+async function waitFor(predicate){for(let i=0;i<100;i++){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,0))}
+  throw new Error("condition did not settle")}
+const video=tab=>({schema:"lbrain.capture.v1",title:tab.title,summary:"Original video link captured without the video binary.",
+  origin:tab.url,scope:"page",author:"",published_at:"",content_markdown:"Video",capture_kind:"video",
+  has_video:true,preview_characters:0,extraction_status:"complete",remote_assets:[],assets:[]});
+(async()=>{
+  const activeTab={id:7,url:"https://example.invalid/active.mp4",title:"Active"};const live=worker();
+  const preparing=await send(live.handler,{type:"confirmation.prepare",tab:activeTab,scope:"page"});
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.phase==="ready");
+  await send(live.handler,{type:"confirmation.preflight",id:preparing.id,permission_origins:[]});
+  const liveSave=send(live.handler,{type:"confirmation.decide",id:preparing.id,release_origins:[]});
+  await waitFor(()=>nativeReplies.length===1&&shared["lbrain-popup-job-v1"]?.phase==="saving");
+  shared["lbrain-save-reservation-v1"].created=Date.now()-11*60*1000;
+  const resumed=await send(live.handler,{type:"confirmation.prepare",
+    tab:{id:8,url:"https://example.invalid/other.mp4",title:"Other"},scope:"page"});
+  const busyReserve=await send(live.handler,{type:"confirmation.reserve",id:"legacy-reserve",permission_origins:[]});
+  const legacyId="legacy-preflight",legacyWindow=19;
+  const busyPreflight=await send(live.handler,{type:"confirmation.preflight",id:legacyId,
+    window_id:legacyWindow,permission_origins:[]},{url:`chrome-extension://test/confirm.html?id=${legacyId}`,
+    tab:{windowId:legacyWindow}});
+  const active={phase:resumed.phase,sameId:resumed.id===preparing.id,nativeConnections,
+    reserveError:busyReserve.error||null,preflightError:busyPreflight.error||null};
+  nativeReplies.shift()({status:"saved",target:"Inbox/Captures/active.md",capture_id:"active",version:1});await liveSave;
+
+  for(const values of [shared,local,cached])for(const key of Object.keys(values))delete values[key];
+  granted.clear();removed.length=0;granted.add("https://orphan.invalid/*");
+  const orphanTab={id:9,url:"https://example.invalid/orphan.mp4",title:"Orphan"};
+  shared["lbrain-popup-job-v1"]={id:"orphan",phase:"saving",tab:orphanTab};
+  shared["lbrain-save-reservation-v1"]={id:"orphan",created:Date.now(),state:"saving",
+    allowed_origins:["https://orphan.invalid/*"],release_origins:["https://orphan.invalid/*"]};
+  local["lbrain-temporary-origins-v1"]=["https://orphan.invalid/*"];
+  cached["https://lbrain.invalid/confirmation/orphan"]=JSON.stringify({capture:video(orphanTab),tab:orphanTab});
+  const restartedOrphan=worker();
+  const duplicateReserve=await send(restartedOrphan.handler,{type:"confirmation.reserve",id:"orphan",permission_origins:[]});
+  const duplicateDecide=await send(restartedOrphan.handler,{type:"confirmation.decide",id:"orphan",release_origins:[]});
+  const beforeRecovery={reserveError:duplicateReserve.error||null,decideError:duplicateDecide.error||null,nativeConnections};
+  const recovered=await send(restartedOrphan.handler,{type:"confirmation.prepare",tab:orphanTab,scope:"page"});
+  const afterRecovery={phase:recovered.phase,error:recovered.error,removed:[...removed],journal:local["lbrain-temporary-origins-v1"]||[],
+    reservation:Boolean(shared["lbrain-save-reservation-v1"]),nativeConnections};
+  const cancelled=await send(restartedOrphan.handler,{type:"confirmation.cancel",id:"orphan"});
+  const retried=await send(restartedOrphan.handler,{type:"confirmation.prepare",tab:orphanTab,scope:"page"});
+  await waitFor(()=>shared["lbrain-popup-job-v1"]?.phase==="ready");
+  console.log(JSON.stringify({active,beforeRecovery,afterRecovery,cancelled:cancelled.cancelled,retry:{phase:retried.phase,
+    newId:retried.id!=="orphan",stored:shared["lbrain-popup-job-v1"].phase},nativeConnections}));
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["active"]["phase"], "saving")
+        self.assertTrue(output["active"]["sameId"])
+        self.assertEqual(output["active"]["nativeConnections"], 1)
+        self.assertIn("already being saved", output["active"]["reserveError"])
+        self.assertIn("already being saved", output["active"]["preflightError"])
+        self.assertIn("already being saved", output["beforeRecovery"]["reserveError"])
+        self.assertIn("not ready", output["beforeRecovery"]["decideError"])
+        self.assertEqual(output["beforeRecovery"]["nativeConnections"], 1)
+        self.assertEqual(output["afterRecovery"]["phase"], "failed")
+        self.assertTrue(output["afterRecovery"]["error"])
+        self.assertEqual(output["afterRecovery"]["removed"], ["https://orphan.invalid/*"])
+        self.assertEqual(output["afterRecovery"]["journal"], [])
+        self.assertFalse(output["afterRecovery"]["reservation"])
+        self.assertEqual(output["afterRecovery"]["nativeConnections"], 1)
+        self.assertTrue(output["cancelled"])
+        self.assertEqual(output["retry"], {"phase": "preparing", "newId": True, "stored": "ready"})
+        self.assertEqual(output["nativeConnections"], 1)
 
     def test_bundle_extracts_pdf_and_subtitle_text_and_recovers_partial_media(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -3104,6 +5901,34 @@ function send(message){return new Promise(resolve=>messageHandler(message,{},res
             self.assertEqual(text, "First page OCR text.")
             self.assertEqual(method, "ocr-truncated")
 
+    def test_pdf_text_finds_homebrew_tool_when_native_host_path_is_empty(self) -> None:
+        spec = importlib.util.spec_from_file_location("capture_operations_pdf_path", CAPTURE_OPERATIONS)
+        assert spec and spec.loader
+        operations = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(operations)
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            pdf = base / "document.pdf"
+            pdf.write_bytes(b"%PDF synthetic fixture")
+            tool = base / "pdftotext"
+            tool.write_text("#!/bin/sh\nprintf 'Native Host PDF text.\\n'\n", encoding="utf-8")
+            tool.chmod(0o755)
+            with mock.patch.object(operations, "LOCAL_TOOL_DIRS", (str(base),)), mock.patch.dict(
+                os.environ, {"PATH": ""}
+            ):
+                text, method = operations.local_pdf_text(pdf)
+            self.assertEqual((text, method), ("Native Host PDF text.", "text"))
+
+    def test_capture_validate_keeps_checker_message(self) -> None:
+        spec = importlib.util.spec_from_file_location("capture_operations_validate", CAPTURE_OPERATIONS)
+        assert spec and spec.loader
+        operations = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(operations)
+        completed = subprocess.CompletedProcess([], 1, stdout="ERROR broken capture\n", stderr="")
+        with mock.patch.object(operations.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(operations.validate(ROOT), (False, "ERROR broken capture"))
+        self.assertNotIn("--quiet", run.call_args.args[0])
+
     def test_capture_binary_assets_use_git_lfs_without_a_remote(self) -> None:
         if shutil.which("git-lfs") is None:
             self.skipTest("git-lfs is not installed")
@@ -3396,6 +6221,33 @@ function send(message){return new Promise(resolve=>messageHandler(message,{},res
             )
             self.assertFalse(contains_document_secret(code))
             self.assertFalse(contains_document_runtime_state(code))
+            self.assertTrue(
+                contains_document_secret(
+                    "https://cdn.invalid/private.html?Policy=private&Signature=fixture&Key-Pair-Id=key"
+                )
+            )
+            self.assertTrue(
+                contains_document_secret("HTTPS://cdn.invalid/private?hdnea=fixture~hmac=private")
+            )
+            self.assertTrue(
+                contains_document_secret(
+                    '```javascript\nconst url = "https://cdn.invalid/private?Policy=private&Signature=fixture&Key-Pair-Id=key";\n```'
+                )
+            )
+            self.assertTrue(
+                contains_document_secret("https://alice:fixture-password-12345@cdn.invalid/private")
+            )
+            self.assertTrue(
+                contains_document_secret("https://app.invalid/callback#id_token=fixture-secret-value")
+            )
+            self.assertTrue(
+                contains_document_secret("https://app.invalid/#/callback?auth_token=fixture-secret-value")
+            )
+            self.assertTrue(
+                contains_document_secret("https://app.invalid/#callback?code=fixture-secret-value")
+            )
+            self.assertFalse(contains_document_secret("https://app.invalid/#/document/42"))
+            self.assertFalse(contains_document_secret("https://cdn.invalid/public.html?id=signed"))
             indented_code = "   " + code.replace("\n```\n", "\n   ```\n")
             self.assertFalse(contains_document_secret(indented_code))
             self.assertFalse(contains_document_runtime_state(indented_code))

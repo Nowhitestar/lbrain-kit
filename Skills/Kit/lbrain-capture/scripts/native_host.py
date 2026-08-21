@@ -9,6 +9,7 @@ import binascii
 import hashlib
 import html
 import json
+import mimetypes
 import quopri
 import re
 import shutil
@@ -22,7 +23,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 from urllib.parse import quote, urlsplit, urlunsplit
 
-from operations import OperationError, capture_bundle, operation_lock, safe_asset_path
+from operations import OperationError, capture_bundle, operation_lock, replace_exact_url, safe_asset_path
 
 
 STREAM_PROTOCOL = "lbrain.capture.stream.v1"
@@ -81,11 +82,6 @@ def normalized_url(value: str) -> str:
         path,
     )
     return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, parsed.query, ""))
-
-
-def replace_exact_url(value: str, source: str, target: str) -> str:
-    pattern = r"(?<![A-Za-z0-9%/?=&])" + re.escape(source) + r"(?=$|[\s\"'<>\]\)])"
-    return re.sub(pattern, lambda _: target, value)
 
 
 def mime_headers(stream: BinaryIO) -> Any:
@@ -301,7 +297,11 @@ def permitted_media_type(body: bytes, actual: str, declared: str) -> str:
     if declared == "image/svg+xml" and b"<svg" in body.lower():
         return "image/svg+xml"
     def signature(media_type: str) -> bool:
-        if media_type.startswith("text/") or media_type in {"application/json", "application/x-subrip"}:
+        if media_type == "text/vtt":
+            return body.lstrip(b"\xef\xbb\xbf \t\r\n").startswith(b"WEBVTT")
+        if media_type == "application/x-subrip":
+            return re.search(rb"\d+\s*\r?\n\d{2}:\d{2}:\d{2}[,.]\d{3}\s+-->", body) is not None
+        if media_type.startswith("text/") or media_type == "application/json":
             return b"\x00" not in body
         if media_type == "image/jpeg":
             return body.startswith(b"\xff\xd8\xff")
@@ -354,10 +354,33 @@ def permitted_media_type(body: bytes, actual: str, declared: str) -> str:
             return body.startswith(b"PK") or body.startswith(b"\xd0\xcf\x11\xe0")
         return False
 
+    for subtitle_type in (actual, declared):
+        if subtitle_type in {"text/vtt", "application/x-subrip"} and signature(subtitle_type):
+            return subtitle_type
+    safe_text_types = {"text/plain", "text/csv", "text/markdown", "text/tab-separated-values"}
+    if actual in safe_text_types and declared in {*safe_text_types, "", "application/octet-stream"}:
+        return declared if declared in safe_text_types else actual
+    def media_family(media_type: str) -> str:
+        if media_type.startswith("image/"):
+            return "image"
+        if media_type.startswith("audio/") or media_type == "application/ogg":
+            return "audio"
+        if media_type == "application/json":
+            return "json"
+        if media_type.startswith("text/") or media_type == "application/x-subrip":
+            return "text"
+        if media_type.startswith("application/"):
+            return "document"
+        return ""
+
+    compatible_actual = declared in {"", "application/octet-stream"} or (
+        media_family(actual) and media_family(actual) == media_family(declared)
+    )
+    if (actual and not actual.startswith("text/") and actual != "application/octet-stream"
+            and compatible_actual and signature(actual)):
+        return actual
     if declared and not declared.startswith("text/") and declared != "application/octet-stream":
         return declared if signature(declared) else ""
-    if actual and actual != "application/octet-stream" and signature(actual):
-        return actual
     if actual not in {"", "application/octet-stream"}:
         return ""
     return declared if signature(declared) else ""
@@ -373,11 +396,22 @@ def permitted_media_file(path: Path, actual: str, declared: str) -> str:
     return media_type if media_type != "image/svg+xml" or safe_svg_file(path) else ""
 
 
+def stored_asset_name(raw: dict[str, Any], media_type: str) -> str:
+    name = safe_asset_path(raw.get("name"), "asset name")
+    extension = mimetypes.guess_extension(media_type, strict=False)
+    current_type = mimetypes.guess_type(name.name, strict=False)[0] or ""
+    mismatched_type = bool(current_type and current_type != media_type)
+    if extension and (name.suffix.lower() in {"", ".bin"} or mismatched_type):
+        name = name.with_suffix(extension) if name.suffix else name.with_name(name.name + extension)
+    return name.as_posix()
+
+
 def stored_asset(directory: Path, raw: dict[str, Any], body: bytes, media_type: str = "") -> dict[str, Any]:
     asset_id = raw.get("id")
     if not isinstance(asset_id, str) or not asset_id:
         raise OperationError("remote asset requires a stable id")
-    name = safe_asset_path(raw.get("name"), "asset name").as_posix()
+    stored_type = media_type or str(raw.get("media_type") or "application/octet-stream")
+    name = stored_asset_name(raw, stored_type)
     staged_name = f"assets/{name}"
     target = directory.joinpath(*Path(staged_name).parts)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -386,7 +420,7 @@ def stored_asset(directory: Path, raw: dict[str, Any], body: bytes, media_type: 
         "name": name,
         "staged_name": staged_name,
         "placeholder": raw.get("placeholder") or f"lbrain-asset://{asset_id}",
-        "media_type": media_type or str(raw.get("media_type") or "application/octet-stream"),
+        "media_type": stored_type,
         "sha256": hashlib.sha256(body).hexdigest(),
         "size": len(body),
     }
@@ -396,7 +430,8 @@ def stored_asset_file(directory: Path, raw: dict[str, Any], source: Path, media_
     asset_id = raw.get("id")
     if not isinstance(asset_id, str) or not asset_id:
         raise OperationError("remote asset requires a stable id")
-    name = safe_asset_path(raw.get("name"), "asset name").as_posix()
+    stored_type = media_type or str(raw.get("media_type") or "application/octet-stream")
+    name = stored_asset_name(raw, stored_type)
     staged_name = f"assets/{name}"
     target = directory.joinpath(*Path(staged_name).parts)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -405,7 +440,7 @@ def stored_asset_file(directory: Path, raw: dict[str, Any], source: Path, media_
         "name": name,
         "staged_name": staged_name,
         "placeholder": raw.get("placeholder") or f"lbrain-asset://{asset_id}",
-        "media_type": media_type or str(raw.get("media_type") or "application/octet-stream"),
+        "media_type": stored_type,
         "sha256": file_hash(target),
         "size": target.stat().st_size,
     }
@@ -522,7 +557,7 @@ def prepare_snapshot(
         if source:
             content = replace_exact_url(content, source, placeholder)
     if failures:
-        warnings = "\n".join(f"- Media could not be preserved: {item['url']}" for item in failures)
+        warnings = "\n".join(f"- Media could not be preserved: {item['id']}" for item in failures)
         content = f"{content}\n\n## Capture warnings\n\n{warnings}".strip()
         if payload.get("extraction_status") == "complete":
             payload["pre_media_extraction_status"] = "complete"

@@ -10,6 +10,7 @@
 - A partial retry sees changed rendered source content → keep the old version immutable and create the next Capture Version.
 - Browser saves a WeChat Official Account article → preserve `#js_content`, title, author, date, lazy-loaded body images, and the canonical origin; exclude recommendations and page chrome.
 - Browser saves an X Article → preserve the long-form article, author, figures, captions, and origin; exclude surrounding timeline content.
+- Browser saves one X post → preserve its author, timestamp, quoted content, media, and status origin as Markdown; exclude replies and action controls.
 - Browser saves an X Thread → preserve consecutive posts by the first author and quoted posts within them; exclude unrelated replies and action controls.
 - Browser saves a direct PDF → preserve the original binary and locally extracted searchable text; use local OCR when the PDF has no text layer and report `partial` when extraction is unavailable.
 - Browser saves an article with document links and a video → preserve non-video attachments and subtitle files, retain the original video link and rendered transcript, and never download the video binary.

@@ -5,6 +5,7 @@
   "description": "Save the current rendered page to a local LBrain Capture Bundle.",
   "permissions": [
     "activeTab",
+    "alarms",
     "contextMenus",
     "nativeMessaging",
     "notifications",
@@ -21,6 +22,7 @@
     "service_worker": "service_worker.js"
   },
   "action": {
+    "default_popup": "confirm.html",
     "default_title": "Save to LBrain"
   }
 }
