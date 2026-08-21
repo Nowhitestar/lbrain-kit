@@ -3534,8 +3534,131 @@ const capture={schema:"lbrain.capture.v1",title:"Recovery",summary:"Recovery",or
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
-            json.loads(result.stdout), {"timeouts": [30000, 30000], "bounded": 4, "maxActive": 3, "attachments": 0, "direct": "rejected"}
+            json.loads(result.stdout), {"timeouts": [30000, 30000], "bounded": 4, "maxActive": 2, "attachments": 0, "direct": "rejected"}
         )
+
+    def test_extension_bounds_media_before_materializing_or_connecting(self) -> None:
+        script = r'''
+const fs=require("fs");let headerReads=0,headerCancelled=false,cancelled=false,released=false,nativeConnections=0;
+global.fetch=async()=>({ok:true,headers:{get(name){
+  if(name==="content-type")return"application/pdf";
+  if(name==="content-length")return"268435457";
+  return null}},body:{async cancel(){headerCancelled=true},getReader(){headerReads++;throw new Error("oversized body was read")}}});
+global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}},
+  onConnect:{addListener(){}},lastError:null,connectNative(){nativeConnections++;throw new Error("unexpected native connection")}},
+  contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},
+  windows:{onRemoved:{addListener(){}}},notifications:{onButtonClicked:{addListener(){}}}};
+eval(fs.readFileSync(process.argv[1],"utf8"));
+async function error(promise){try{await promise;return""}catch(reason){return String(reason.message||reason)}}
+const chunks=[new Uint8Array([1,2,3]),new Uint8Array([4,5])];let index=0;
+const streamed={headers:{get(name){return name==="content-type"?"application/octet-stream":null}},body:{getReader(){return{
+  async read(){return index<chunks.length?{done:false,value:chunks[index++]}:{done:true}},
+  async cancel(){cancelled=true},releaseLock(){released=true}}}}};
+(async()=>{const direct=await error(LBrainCaptureWorker.snapshotFor(
+  {id:7,url:"https://files.invalid/report.pdf"},
+  {capture_kind:"document",origin:"https://files.invalid/report.pdf",remote_assets:[]}
+));
+const bounded=await error(LBrainCaptureWorker.responseBlobWithin(streamed,4));
+const oversized={size:268435457,reader:{async read(){return{done:true}},releaseLock(){}}};
+const preflight=await error(LBrainCaptureWorker.streamCapture(
+  {schema:"lbrain.capture.v1"},
+  {kind:"binary",mediaType:"application/pdf",bytes:oversized,attachments:[]}
+));
+console.log(JSON.stringify({direct,bounded,headerReads,headerCancelled,cancelled,released,nativeConnections,preflight}))})()
+  .catch(reason=>{console.error(reason);process.exit(1)});
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertIn("256 MiB", output["direct"])
+        self.assertIn("256 MiB", output["bounded"])
+        self.assertIn("256 MiB", output["preflight"])
+        self.assertEqual(
+            {key: output[key] for key in ("headerReads", "headerCancelled", "cancelled", "released", "nativeConnections")},
+            {"headerReads": 0, "headerCancelled": True, "cancelled": True, "released": True, "nativeConnections": 0},
+        )
+
+    def test_native_receiver_enforces_stream_limits_and_disk_reserve(self) -> None:
+        spec = importlib.util.spec_from_file_location("capture_host_limits", CAPTURE_NATIVE_HOST)
+        assert spec and spec.loader
+        host = importlib.util.module_from_spec(spec)
+        with mock.patch.object(sys, "path", [str(CAPTURE_NATIVE_HOST.parent), *sys.path]):
+            spec.loader.exec_module(host)
+        payload = b"{}"
+        base = {
+            "protocol": host.STREAM_PROTOCOL,
+            "type": "begin",
+            "acknowledgements": True,
+            "integrity": "sha256-chunks",
+            "stream_id": "limits",
+            "payload_size": len(payload),
+            "payload_sha256": hashlib.sha256(payload).hexdigest(),
+            "snapshot_size": 0,
+            "snapshot_sha256": "",
+            "snapshot_kind": "none",
+            "snapshot_media_type": "application/octet-stream",
+            "attachments": [],
+        }
+        attachment = {"id": "asset", "size": 0, "sha256": "", "media_type": "image/png"}
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            with self.assertRaisesRegex(host.OperationError, "size limit"):
+                host.receive_stream(
+                    {**base, "snapshot_size": host.MAX_CAPTURE_ASSET_BYTES + 1},
+                    io.BytesIO(), io.BytesIO(), directory,
+                )
+            with self.assertRaisesRegex(host.OperationError, "metadata"):
+                host.receive_stream(
+                    {**base, "attachments": [{**attachment, "size": host.MAX_CAPTURE_ASSET_BYTES + 1}]},
+                    io.BytesIO(), io.BytesIO(), directory,
+                )
+            with self.assertRaisesRegex(host.OperationError, "aggregate size"):
+                host.receive_stream(
+                    {
+                        **base,
+                        "snapshot_size": host.MAX_CAPTURE_ASSET_BYTES,
+                        "attachments": [
+                            {**attachment, "size": host.MAX_CAPTURE_ASSET_BYTES},
+                        ],
+                    },
+                    io.BytesIO(), io.BytesIO(), directory,
+                )
+            with mock.patch.object(
+                host.shutil,
+                "disk_usage",
+                return_value=mock.Mock(free=len(payload) + host.CAPTURE_DISK_RESERVE_BYTES - 1),
+            ), self.assertRaisesRegex(host.OperationError, "disk space"):
+                host.receive_stream(base, io.BytesIO(), io.BytesIO(), directory)
+
+    def test_capture_bundle_preserves_disk_reserve_before_finalizing(self) -> None:
+        spec = importlib.util.spec_from_file_location("capture_operations_disk_reserve", CAPTURE_OPERATIONS)
+        assert spec and spec.loader
+        operations = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(operations)
+        payload = {
+            "schema": "lbrain.capture.v1",
+            "title": "Disk reserve",
+            "summary": "The Bundle must leave a safe disk reserve.",
+            "origin": "https://example.invalid/disk-reserve",
+            "scope": "page",
+            "content_markdown": "Synthetic body.",
+            "extraction_status": "complete",
+            "assets": [],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.copy_repo(Path(temporary))
+            with mock.patch.object(
+                operations.shutil,
+                "disk_usage",
+                return_value=mock.Mock(free=operations.CAPTURE_DISK_RESERVE_BYTES),
+            ), self.assertRaisesRegex(operations.OperationError, "disk space"):
+                operations.capture_bundle(root, payload, None)
+            self.assertEqual(list((root / "Inbox/Captures").glob("*Disk-reserve*.md")), [])
 
     def test_native_receiver_does_not_hold_every_attachment_open(self) -> None:
         script = r'''

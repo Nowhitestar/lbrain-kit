@@ -3,6 +3,11 @@ const PAGE = "lbrain-save-page";
 const SELECTION = "lbrain-save-selection";
 const STREAM_PROTOCOL = "lbrain.capture.stream.v1";
 const CHUNK_BYTES = 384 * 1024;
+const MEBIBYTE = 1024 * 1024;
+const MAX_CAPTURE_PAYLOAD_BYTES = 32 * MEBIBYTE;
+const MAX_CAPTURE_ASSET_BYTES = 256 * MEBIBYTE;
+const MAX_CAPTURE_STREAM_BYTES = 512 * MEBIBYTE;
+const MAX_CAPTURE_MEDIA_BYTES = MAX_CAPTURE_STREAM_BYTES - MAX_CAPTURE_PAYLOAD_BYTES;
 const CONFIRMATION_CACHE = "lbrain-confirmations-v1";
 const CONFIRMATION_KEY_BASE = "https://lbrain.invalid/confirmation/";
 const SAVE_RESERVATION = "lbrain-save-reservation-v1";
@@ -441,6 +446,43 @@ async function fetchFromPage(source, pageUrl, signal) {
   }
 }
 
+async function responseBlobWithin(response, limit) {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > limit) {
+    try {
+      await response.body?.cancel?.();
+    } catch (_) {}
+    throw new Error("Capture media exceeds the 256 MiB per-file limit.");
+  }
+  if (!response.body?.getReader) {
+    const blob = await response.blob();
+    if (blob.size > limit) throw new Error("Capture media exceeds the 256 MiB per-file limit.");
+    return blob;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      const bytes = next.value instanceof Uint8Array ? next.value : new Uint8Array(next.value);
+      if (!bytes.byteLength) continue;
+      size += bytes.byteLength;
+      if (size > limit) {
+        try {
+          await reader.cancel();
+        } catch (_) {}
+        throw new Error("Capture media exceeds the 256 MiB per-file limit.");
+      }
+      chunks.push(bytes);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return new Blob(chunks, { type: response.headers.get("content-type") || "" });
+}
+
 function saveAsMHTML(tabId) {
   return new Promise((resolve, reject) => {
     chrome.pageCapture.saveAsMHTML({ tabId }, (blob) => {
@@ -484,22 +526,22 @@ async function fetchAttachments(capture, pageUrl) {
   const assets = (capture.remote_assets || []).filter((asset) => !asset.media_type.startsWith("video/"));
   const attachments = Array(assets.length);
   const signal = AbortSignal.timeout(30000);
-  let next = 0;
-  const worker = async () => {
-    while (next < assets.length) {
-      const index = next++;
-      const asset = assets[index];
-      try {
-        const response = await fetchFromPage(asset.url, pageUrl, signal);
-        const contentType = (response.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
-        if (!response.ok || (contentType === "text/html" && asset.media_type !== "text/html")) continue;
-        attachments[index] = { id: asset.id, mediaType: contentType, bytes: await response.blob() };
-      } catch (_) {
-        // The authenticated page archive remains the fallback; an absent resource becomes partial.
-      }
+  let capturedBytes = 0;
+  for (const [index, asset] of assets.entries()) {
+    try {
+      const response = await fetchFromPage(asset.url, pageUrl, signal);
+      const contentType = (response.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
+      if (!response.ok || (contentType === "text/html" && asset.media_type !== "text/html")) continue;
+      const bytes = await responseBlobWithin(
+        response,
+        Math.min(MAX_CAPTURE_ASSET_BYTES, MAX_CAPTURE_MEDIA_BYTES - capturedBytes)
+      );
+      capturedBytes += bytes.size;
+      attachments[index] = { id: asset.id, mediaType: contentType, bytes };
+    } catch (_) {
+      // The authenticated page archive remains the fallback; an absent resource becomes partial.
     }
-  };
-  await Promise.all(Array.from({ length: Math.min(6, assets.length) }, worker));
+  }
   return attachments.filter(Boolean);
 }
 
@@ -510,7 +552,12 @@ async function snapshotFor(tab, capture) {
     if (!response.ok) throw new Error(`The current file could not be read (${response.status}).`);
     const mediaType = (response.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
     if (mediaType.startsWith("video/")) throw new Error("Video binaries are not saved.");
-    return { kind: "binary", mediaType, bytes: await response.blob(), attachments: [] };
+    return {
+      kind: "binary",
+      mediaType,
+      bytes: await responseBlobWithin(response, MAX_CAPTURE_ASSET_BYTES),
+      attachments: []
+    };
   }
   if (capture.capture_kind === "video" && !(capture.remote_assets || []).length) {
     return { kind: "none", mediaType: "", bytes: new Uint8Array(), attachments: [] };
@@ -528,6 +575,15 @@ async function snapshotFor(tab, capture) {
     blob = await saveAsMHTML(tab.id);
   } catch (_) {
     return { kind: "none", mediaType: "", bytes: new Uint8Array(), attachments };
+  }
+  const attachmentBytes = attachments.reduce((total, attachment) => total + byteLength(attachment.bytes), 0);
+  if (blob.size > MAX_CAPTURE_ASSET_BYTES || blob.size + attachmentBytes > MAX_CAPTURE_MEDIA_BYTES) {
+    try {
+      await blob.reader.cancel();
+    } finally {
+      blob.reader.releaseLock();
+    }
+    throw new Error("Capture media exceeds the 256 MiB per-file or 512 MiB total capture limit.");
   }
   return {
     kind: "mhtml",
@@ -547,6 +603,16 @@ function encode(bytes) {
 
 async function streamCapture(payload, snapshot) {
   const payloadBytes = new TextEncoder().encode(JSON.stringify(payload));
+  if (payloadBytes.length > MAX_CAPTURE_PAYLOAD_BYTES) {
+    throw new Error("Capture text exceeds the 32 MiB payload limit.");
+  }
+  const mediaSizes = [byteLength(snapshot.bytes), ...snapshot.attachments.map(
+    (attachment) => byteLength(attachment.bytes)
+  )];
+  if (mediaSizes.some((size) => size > MAX_CAPTURE_ASSET_BYTES)
+      || payloadBytes.length + mediaSizes.reduce((total, size) => total + size, 0) > MAX_CAPTURE_STREAM_BYTES) {
+    throw new Error("Capture media exceeds the 256 MiB per-file or 512 MiB total capture limit.");
+  }
   const attachmentMetadata = [];
   for (const attachment of snapshot.attachments) {
     attachmentMetadata.push({
@@ -1625,5 +1691,5 @@ chrome.notifications.onButtonClicked.addListener(async (id, button) => {
 
 globalThis.LBrainCaptureWorker = {
   directCapture, popupJob, preparePayload, preparePopupJob, previewFor, savePrepared, snapshotFor, streamCapture,
-  streamCaptureWithFallback
+  streamCaptureWithFallback, responseBlobWithin
 };

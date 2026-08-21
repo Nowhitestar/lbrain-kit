@@ -23,12 +23,21 @@ from pathlib import Path
 from typing import Any, BinaryIO
 from urllib.parse import quote, urlsplit, urlunsplit
 
-from operations import OperationError, capture_bundle, operation_lock, replace_exact_url, safe_asset_path
+from operations import (
+    CAPTURE_DISK_RESERVE_BYTES,
+    OperationError,
+    capture_bundle,
+    operation_lock,
+    replace_exact_url,
+    safe_asset_path,
+)
 
 
 STREAM_PROTOCOL = "lbrain.capture.stream.v1"
 MAX_MESSAGE_BYTES = 1024 * 1024
 MAX_PAYLOAD_BYTES = 32 * 1024 * 1024
+MAX_CAPTURE_ASSET_BYTES = 256 * 1024 * 1024
+MAX_CAPTURE_STREAM_BYTES = 512 * 1024 * 1024
 
 
 def read_message(stream: BinaryIO) -> dict[str, Any]:
@@ -578,7 +587,10 @@ def receive_stream(
         raise OperationError("capture stream integrity negotiation is invalid")
     payload_size = required_stream_value(first, "payload_size", int)
     snapshot_size = required_stream_value(first, "snapshot_size", int)
-    if not 0 <= payload_size <= MAX_PAYLOAD_BYTES or snapshot_size < 0:
+    if (
+        not 0 <= payload_size <= MAX_PAYLOAD_BYTES
+        or not 0 <= snapshot_size <= MAX_CAPTURE_ASSET_BYTES
+    ):
         raise OperationError("capture stream exceeds its size limit")
     payload_hash = required_stream_value(first, "payload_sha256", str)
     snapshot_hash = required_stream_value(first, "snapshot_sha256", str)
@@ -604,7 +616,7 @@ def receive_stream(
             or asset_id in attachment_values
             or not isinstance(size, int)
             or isinstance(size, bool)
-            or size < 0
+            or not 0 <= size <= MAX_CAPTURE_ASSET_BYTES
             or not isinstance(sha256, str)
             or (not chunk_integrity and not re.fullmatch(r"[0-9a-f]{64}", sha256))
             or (chunk_integrity and sha256 and not re.fullmatch(r"[0-9a-f]{64}", sha256))
@@ -612,8 +624,12 @@ def receive_stream(
         ):
             raise OperationError("stream attachment metadata is invalid")
         attachment_values[asset_id] = (size, sha256, media_type)
-    required_bytes = payload_size + snapshot_size + sum(size for size, _, _ in attachment_values.values())
-    if required_bytes > shutil.disk_usage(directory).free:
+    required_bytes = payload_size + snapshot_size + sum(
+        size for size, _, _ in attachment_values.values()
+    )
+    if required_bytes > MAX_CAPTURE_STREAM_BYTES:
+        raise OperationError("capture stream exceeds its aggregate size limit")
+    if required_bytes + CAPTURE_DISK_RESERVE_BYTES > shutil.disk_usage(directory).free:
         raise OperationError("not enough disk space for capture stream")
     payload_path, snapshot_path = directory / "payload.json", directory / "snapshot.bin"
     attachment_paths = {

@@ -940,6 +940,7 @@ MAX_EXTRACTED_TEXT_BYTES = 8 * 1024 * 1024
 MAX_OCR_PAGES = 100
 MAX_OCR_SECONDS = 10 * 60
 OCR_DISK_RESERVE_BYTES = 256 * 1024 * 1024
+CAPTURE_DISK_RESERVE_BYTES = 512 * 1024 * 1024
 
 
 def limited_text(source: BinaryIO, limit: int = MAX_EXTRACTED_TEXT_BYTES) -> tuple[str, bool]:
@@ -1651,7 +1652,7 @@ def capture_bundle(
         version = frontmatter_number(recovery_head, "capture_version")
         previous = frontmatter_text(recovery_head, "previous_version")
         required_bytes = sum(int(asset["size"]) for asset in assets) + len(content.encode("utf-8")) + 4096
-        if shutil.disk_usage(root).free < required_bytes:
+        if shutil.disk_usage(root).free < required_bytes + CAPTURE_DISK_RESERVE_BYTES:
             raise OperationError("not enough disk space for Capture Bundle")
         temporary, asset_directory, manifest_path, asset_paths = build_bundle_assets(
             root, capture_id, version, assets
@@ -1753,7 +1754,7 @@ def capture_bundle(
     version = max((item[0] for item in versions), default=0) + 1
     previous = versions[-1][2].relative_to(root).as_posix() if versions else ""
     required_bytes = sum(int(asset["size"]) for asset in assets) + len(content.encode("utf-8")) + 4096
-    if shutil.disk_usage(root).free < required_bytes:
+    if shutil.disk_usage(root).free < required_bytes + CAPTURE_DISK_RESERVE_BYTES:
         raise OperationError("not enough disk space for Capture Bundle")
     asset_directory: Path | None = None
     asset_digest: str | None = None
