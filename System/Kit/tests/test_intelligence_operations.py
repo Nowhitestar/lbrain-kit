@@ -2380,7 +2380,7 @@ class IntelligenceOperationTest(unittest.TestCase):
         self.assertEqual(manifest["action"]["default_popup"], "confirm.html")
         self.assertEqual(
             set(manifest["permissions"]),
-            {"activeTab", "alarms", "contextMenus", "nativeMessaging", "notifications", "pageCapture", "scripting", "storage"},
+            {"activeTab", "alarms", "contextMenus", "nativeMessaging", "notifications", "scripting", "storage"},
         )
         self.assertNotIn("history", manifest["permissions"])
         self.assertNotIn("tabs", manifest["permissions"])
@@ -3403,20 +3403,17 @@ const capture={schema:"lbrain.capture.v1",title:"Recovery",summary:"Recovery",or
             },
         )
 
-    def test_extension_retries_without_mhtml_when_its_stream_cannot_be_read(self) -> None:
+    def test_extension_preserves_article_assets_without_page_capture(self) -> None:
         script = (
-            "const fs=require('fs');let listeners=[];let attempts=0;let ended=[],channels=[[],[]];"
-            "function port(){const index=attempts++;let onMessage;return{onMessage:{addListener(fn){onMessage=fn}},"
-            "onDisconnect:{addListener(){}},disconnect(){},postMessage(message){"
-            "if(message.type==='chunk'){channels[index].push(message.channel);queueMicrotask(()=>onMessage({type:'ack',channel:message.channel,sequence:message.sequence}))};"
-            "if(message.type==='end'){ended.push(index);queueMicrotask(()=>onMessage({status:'saved',target:'Inbox/Captures/example.md',capture_id:'id',version:1}))}}}};"
-            "global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}},onConnect:{addListener(){}},lastError:null,connectNative:port},"
+            "const fs=require('fs');let credentials='',pageCaptureCalls=0;"
+            "global.fetch=async(_url,options)=>{credentials=options.credentials;return{ok:true,headers:{get(){return'image/png'}},async blob(){return new Blob(['image'])}}};"
+            "global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}},onConnect:{addListener(){}},lastError:null},"
             "contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},"
+            "scripting:{async executeScript(){}},pageCapture:{saveAsMHTML(){pageCaptureCalls++}},"
             "windows:{onRemoved:{addListener(){}}},notifications:{onButtonClicked:{addListener(){}}}};"
             "eval(fs.readFileSync(process.argv[1],'utf8'));"
-            "const broken={size:8,reader:{async read(){throw new Error('network error')},releaseLock(){}}};"
-            "LBrainCaptureWorker.streamCaptureWithFallback({schema:'lbrain.capture.v1'},{kind:'mhtml',mediaType:'multipart/related',bytes:broken,attachments:[{id:'image',mediaType:'image/png',bytes:new Blob(['image'])}]})"
-            ".then(result=>console.log(JSON.stringify({status:result.status,attempts,ended,secondAsset:channels[1].includes('asset:image')})))"
+            "LBrainCaptureWorker.snapshotFor({id:7,url:'https://evil.invalid/current'},{capture_kind:'article',origin:'https://example.invalid/canonical',remote_assets:[{id:'image',url:'https://example.invalid/image.png',name:'images/image.png',media_type:'image/png'}]})"
+            ".then(snapshot=>console.log(JSON.stringify({kind:snapshot.kind,attachments:snapshot.attachments.length,bytes:snapshot.bytes.length,pageCaptureCalls,credentials})))"
             ".catch(error=>{console.error(error);process.exit(1)});"
         )
         result = subprocess.run(
@@ -3428,31 +3425,7 @@ const capture={schema:"lbrain.capture.v1",title:"Recovery",summary:"Recovery",or
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             json.loads(result.stdout),
-            {"status": "saved", "attempts": 2, "ended": [1], "secondAsset": True},
-        )
-
-    def test_extension_creates_mhtml_after_fetching_attachments(self) -> None:
-        script = (
-            "const fs=require('fs');let fetched=false,snapshotAfterFetch=false,credentials='';"
-            "global.fetch=async(_url,options)=>{fetched=true;credentials=options.credentials;return{ok:true,headers:{get(){return'image/png'}},async blob(){return new Blob(['image'])}}};"
-            "global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}},onConnect:{addListener(){}},lastError:null},"
-            "contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},"
-            "scripting:{async executeScript(){}},pageCapture:{saveAsMHTML(_options,done){snapshotAfterFetch=fetched;done(new Blob(['snapshot']))}},"
-            "windows:{onRemoved:{addListener(){}}},notifications:{onButtonClicked:{addListener(){}}}};"
-            "eval(fs.readFileSync(process.argv[1],'utf8'));"
-            "LBrainCaptureWorker.snapshotFor({id:7,url:'https://evil.invalid/current'},{capture_kind:'article',origin:'https://example.invalid/canonical',remote_assets:[{id:'image',url:'https://example.invalid/image.png',name:'images/image.png',media_type:'image/png'}]})"
-            ".then(snapshot=>console.log(JSON.stringify({snapshotAfterFetch,attachments:snapshot.attachments.length,streamed:Boolean(snapshot.bytes.reader),credentials})))"
-            ".catch(error=>{console.error(error);process.exit(1)});"
-        )
-        result = subprocess.run(
-            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            json.loads(result.stdout), {"snapshotAfterFetch": True, "attachments": 1, "streamed": True, "credentials": "omit"}
+            {"kind": "none", "attachments": 1, "bytes": 0, "pageCaptureCalls": 0, "credentials": "omit"},
         )
 
     def test_extension_does_not_follow_a_credentialed_cross_origin_redirect(self) -> None:
@@ -3463,7 +3436,7 @@ const capture={schema:"lbrain.capture.v1",title:"Recovery",summary:"Recovery",or
             "return{ok:true,headers:{get(){return'image/png'}},async blob(){return new Blob(['image'])}}};"
             "global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}},onConnect:{addListener(){}},lastError:null},"
             "contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},"
-            "scripting:{async executeScript(){}},pageCapture:{saveAsMHTML(_options,done){done(new Blob(['snapshot']))}},"
+            "scripting:{async executeScript(){}},"
             "windows:{onRemoved:{addListener(){}}},notifications:{onButtonClicked:{addListener(){}}}};"
             "eval(fs.readFileSync(process.argv[1],'utf8'));"
             "LBrainCaptureWorker.snapshotFor({id:7,url:'https://article.invalid/post'},{capture_kind:'article',origin:'https://article.invalid/post',remote_assets:[{id:'image',url:'https://article.invalid/redirect',name:'images/image.png',media_type:'image/png'}]})"
@@ -3485,18 +3458,17 @@ const capture={schema:"lbrain.capture.v1",title:"Recovery",summary:"Recovery",or
             "attachments": 1,
         })
 
-    def test_extension_keeps_fetched_assets_when_mhtml_is_unavailable(self) -> None:
+    def test_extension_keeps_fetched_assets_for_sanitized_html_snapshot(self) -> None:
         script = (
             "const fs=require('fs');let credentials='';"
             "global.fetch=async(_url,options)=>{credentials=options.credentials;return{ok:true,headers:{get(){return'image/png'}},async blob(){return new Blob(['image'])}}};"
-            "let mhtmlCalls=0;"
             "global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}},onConnect:{addListener(){}},lastError:{message:'network error'}},"
             "contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},action:{onClicked:{addListener(){}}},"
-            "scripting:{async executeScript(){}},pageCapture:{saveAsMHTML(){mhtmlCalls+=1;throw new Error('network error')}},"
+            "scripting:{async executeScript(){}},"
             "windows:{onRemoved:{addListener(){}}},notifications:{onButtonClicked:{addListener(){}}}};"
             "eval(fs.readFileSync(process.argv[1],'utf8'));"
             "LBrainCaptureWorker.snapshotFor({id:7,url:'https://article.invalid/post'},{capture_kind:'html',origin:'https://article.invalid/post',remote_assets:[{id:'image',url:'https://article.invalid/image.png',name:'images/image.png',media_type:'image/png'}]})"
-            ".then(snapshot=>console.log(JSON.stringify({kind:snapshot.kind,attachments:snapshot.attachments.length,bytes:snapshot.bytes.length,mhtmlCalls,credentials})))"
+            ".then(snapshot=>console.log(JSON.stringify({kind:snapshot.kind,attachments:snapshot.attachments.length,bytes:snapshot.bytes.length,credentials})))"
             ".catch(error=>{console.error(error);process.exit(1)});"
         )
         result = subprocess.run(
@@ -3508,7 +3480,7 @@ const capture={schema:"lbrain.capture.v1",title:"Recovery",summary:"Recovery",or
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             json.loads(result.stdout),
-            {"kind": "none", "attachments": 1, "bytes": 0, "mhtmlCalls": 0, "credentials": "include"},
+            {"kind": "none", "attachments": 1, "bytes": 0, "credentials": "include"},
         )
 
     def test_extension_bounds_attachment_fetch_time(self) -> None:
@@ -3535,6 +3507,36 @@ const capture={schema:"lbrain.capture.v1",title:"Recovery",summary:"Recovery",or
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             json.loads(result.stdout), {"timeouts": [30000, 30000], "bounded": 4, "maxActive": 2, "attachments": 0, "direct": "rejected"}
+        )
+
+    def test_extension_caps_attachment_fetch_candidates(self) -> None:
+        script = r'''
+const fs=require("fs");let fetches=0,preloaded=0;
+global.fetch=async()=>{fetches++;throw new Error("offline")};
+global.chrome={runtime:{onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}},
+  onConnect:{addListener(){}},lastError:null},contextMenus:{removeAll(fn){fn()},create(){},onClicked:{addListener(){}}},
+  action:{onClicked:{addListener(){}}},scripting:{async executeScript(options){preloaded=options.args[0].length}},
+  windows:{onRemoved:{addListener(){}}},notifications:{onButtonClicked:{addListener(){}}}};
+eval(fs.readFileSync(process.argv[1],"utf8"));
+const remote_assets=Array.from({length:300},(_,index)=>({id:`image-${index}`,url:`https://cdn.invalid/${index}.png`,
+  name:`images/${index}.png`,media_type:"image/png"}));
+(async()=>{const capture={capture_kind:"html",origin:"https://article.invalid/post",title:"Article",
+  summary:"Summary",preview_characters:10,remote_assets};
+const preview=LBrainCaptureWorker.previewFor(capture);
+const snapshot=await LBrainCaptureWorker.snapshotFor({id:7,url:capture.origin},capture);
+console.log(JSON.stringify({fetches,preloaded,attachments:snapshot.attachments.length,media:preview.details[2][1]}))})()
+  .catch(reason=>{console.error(reason);process.exit(1)});
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(CAPTURE_EXTENSION / "service_worker.js")],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            {"fetches": 256, "preloaded": 256, "attachments": 0, "media": "256 张图片，0 个文档/字幕"},
         )
 
     def test_extension_bounds_media_before_materializing_or_connecting(self) -> None:
@@ -3581,6 +3583,12 @@ console.log(JSON.stringify({direct,bounded,headerReads,headerCancelled,cancelled
         self.assertEqual(
             {key: output[key] for key in ("headerReads", "headerCancelled", "cancelled", "released", "nativeConnections")},
             {"headerReads": 0, "headerCancelled": True, "cancelled": True, "released": True, "nativeConnections": 0},
+        )
+        worker = (CAPTURE_EXTENSION / "service_worker.js").read_text(encoding="utf-8")
+        save = worker.index("async function savePrepared")
+        self.assertLess(
+            worker.index("capturePayloadBytes(payload);", save),
+            worker.index("await snapshotFor(tab, capture)", save),
         )
 
     def test_native_receiver_enforces_stream_limits_and_disk_reserve(self) -> None:
@@ -3634,6 +3642,19 @@ console.log(JSON.stringify({direct,bounded,headerReads,headerCancelled,cancelled
                 return_value=mock.Mock(free=len(payload) + host.CAPTURE_DISK_RESERVE_BYTES - 1),
             ), self.assertRaisesRegex(host.OperationError, "disk space"):
                 host.receive_stream(base, io.BytesIO(), io.BytesIO(), directory)
+            source = directory / "source.bin"
+            source.write_bytes(b"asset")
+            with mock.patch.object(
+                host.shutil,
+                "disk_usage",
+                return_value=mock.Mock(free=host.CAPTURE_DISK_RESERVE_BYTES + source.stat().st_size - 1),
+            ), self.assertRaisesRegex(host.OperationError, "staging"):
+                host.stored_asset_file(
+                    directory,
+                    {"id": "asset", "name": "images/asset.png"},
+                    source,
+                    "image/png",
+                )
 
     def test_capture_bundle_preserves_disk_reserve_before_finalizing(self) -> None:
         spec = importlib.util.spec_from_file_location("capture_operations_disk_reserve", CAPTURE_OPERATIONS)

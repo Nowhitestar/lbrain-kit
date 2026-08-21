@@ -9,7 +9,6 @@
     "contextMenus",
     "nativeMessaging",
     "notifications",
-    "pageCapture",
     "scripting",
     "storage"
   ],

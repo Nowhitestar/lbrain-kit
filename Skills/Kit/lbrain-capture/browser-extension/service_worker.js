@@ -8,6 +8,7 @@ const MAX_CAPTURE_PAYLOAD_BYTES = 32 * MEBIBYTE;
 const MAX_CAPTURE_ASSET_BYTES = 256 * MEBIBYTE;
 const MAX_CAPTURE_STREAM_BYTES = 512 * MEBIBYTE;
 const MAX_CAPTURE_MEDIA_BYTES = MAX_CAPTURE_STREAM_BYTES - MAX_CAPTURE_PAYLOAD_BYTES;
+const MAX_CAPTURE_ATTACHMENTS = 256;
 const CONFIRMATION_CACHE = "lbrain-confirmations-v1";
 const CONFIRMATION_KEY_BASE = "https://lbrain.invalid/confirmation/";
 const SAVE_RESERVATION = "lbrain-save-reservation-v1";
@@ -291,7 +292,7 @@ function exactPermissionOrigin(value) {
 }
 
 function previewFor(capture, pageUrl = capture.origin) {
-  const assets = capture.remote_assets || [];
+  const assets = (capture.remote_assets || []).slice(0, MAX_CAPTURE_ATTACHMENTS);
   const image = (asset) => asset.media_type.startsWith("image/") || asset.name.startsWith("images/");
   const images = assets.filter(image).length;
   const documents = assets.filter((asset) => !image(asset) && !asset.media_type.startsWith("video/")).length;
@@ -483,16 +484,6 @@ async function responseBlobWithin(response, limit) {
   return new Blob(chunks, { type: response.headers.get("content-type") || "" });
 }
 
-function saveAsMHTML(tabId) {
-  return new Promise((resolve, reject) => {
-    chrome.pageCapture.saveAsMHTML({ tabId }, (blob) => {
-      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-      else if (!blob) reject(new Error("Chrome could not create a page snapshot."));
-      else resolve({ size: blob.size, reader: blob.stream().getReader() });
-    });
-  });
-}
-
 async function preloadMedia(tabId, sources) {
   await chrome.scripting.executeScript({
     target: { tabId },
@@ -523,7 +514,9 @@ async function preloadMedia(tabId, sources) {
 }
 
 async function fetchAttachments(capture, pageUrl) {
-  const assets = (capture.remote_assets || []).filter((asset) => !asset.media_type.startsWith("video/"));
+  const assets = (capture.remote_assets || [])
+    .filter((asset) => !asset.media_type.startsWith("video/"))
+    .slice(0, MAX_CAPTURE_ATTACHMENTS);
   const attachments = Array(assets.length);
   const signal = AbortSignal.timeout(30000);
   let capturedBytes = 0;
@@ -564,33 +557,11 @@ async function snapshotFor(tab, capture) {
   }
   const imageSources = (capture.remote_assets || [])
     .filter((asset) => asset.media_type.startsWith("image/") || asset.name.startsWith("images/"))
+    .slice(0, MAX_CAPTURE_ATTACHMENTS)
     .map((asset) => asset.url);
   await preloadMedia(tab.id, imageSources);
   const attachments = await fetchAttachments(capture, tab.url);
-  if (capture.capture_kind === "html") {
-    return { kind: "none", mediaType: "", bytes: new Uint8Array(), attachments };
-  }
-  let blob;
-  try {
-    blob = await saveAsMHTML(tab.id);
-  } catch (_) {
-    return { kind: "none", mediaType: "", bytes: new Uint8Array(), attachments };
-  }
-  const attachmentBytes = attachments.reduce((total, attachment) => total + byteLength(attachment.bytes), 0);
-  if (blob.size > MAX_CAPTURE_ASSET_BYTES || blob.size + attachmentBytes > MAX_CAPTURE_MEDIA_BYTES) {
-    try {
-      await blob.reader.cancel();
-    } finally {
-      blob.reader.releaseLock();
-    }
-    throw new Error("Capture media exceeds the 256 MiB per-file or 512 MiB total capture limit.");
-  }
-  return {
-    kind: "mhtml",
-    mediaType: "multipart/related",
-    bytes: blob,
-    attachments
-  };
+  return { kind: "none", mediaType: "", bytes: new Uint8Array(), attachments };
 }
 
 function encode(bytes) {
@@ -601,11 +572,16 @@ function encode(bytes) {
   return btoa(value);
 }
 
-async function streamCapture(payload, snapshot) {
+function capturePayloadBytes(payload) {
   const payloadBytes = new TextEncoder().encode(JSON.stringify(payload));
   if (payloadBytes.length > MAX_CAPTURE_PAYLOAD_BYTES) {
     throw new Error("Capture text exceeds the 32 MiB payload limit.");
   }
+  return payloadBytes;
+}
+
+async function streamCapture(payload, snapshot) {
+  const payloadBytes = capturePayloadBytes(payload);
   const mediaSizes = [byteLength(snapshot.bytes), ...snapshot.attachments.map(
     (attachment) => byteLength(attachment.bytes)
   )];
@@ -711,20 +687,6 @@ async function streamCapture(payload, snapshot) {
   });
 }
 
-async function streamCaptureWithFallback(payload, snapshot) {
-  try {
-    return await streamCapture(payload, snapshot);
-  } catch (error) {
-    if (snapshot.kind !== "mhtml" || !String(error?.message || error).startsWith("Could not read snapshot:")) throw error;
-    return streamCapture(payload, {
-      kind: "none",
-      mediaType: "",
-      bytes: new Uint8Array(),
-      attachments: snapshot.attachments
-    });
-  }
-}
-
 async function showReceipt(receipt) {
   const id = `lbrain-${receipt.capture_id}-${receipt.version}`;
   if (receipt.open_uri) await chrome.storage.session.set({ [id]: receipt.open_uri });
@@ -778,7 +740,8 @@ async function savePrepared(tab, capture) {
     ? storedRecovery
     : matchingLegacy;
   if (recovery) Object.assign(payload, recovery);
-  const receipt = await streamCaptureWithFallback(payload, await snapshotFor(tab, capture));
+  capturePayloadBytes(payload);
+  const receipt = await streamCapture(payload, await snapshotFor(tab, capture));
   if (receipt.status === "partial") {
     await chrome.storage.local.set({
       [recoveryKey]: {
@@ -1691,5 +1654,5 @@ chrome.notifications.onButtonClicked.addListener(async (id, button) => {
 
 globalThis.LBrainCaptureWorker = {
   directCapture, popupJob, preparePayload, preparePopupJob, previewFor, savePrepared, snapshotFor, streamCapture,
-  streamCaptureWithFallback, responseBlobWithin
+  capturePayloadBytes, responseBlobWithin
 };

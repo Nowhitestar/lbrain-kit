@@ -80,6 +80,16 @@ def required_stream_value(message: dict[str, Any], key: str, expected: type) -> 
     return value
 
 
+def write_with_disk_reserve(output: BinaryIO, body: bytes) -> None:
+    if not body:
+        return
+    directory = Path(str(output.name)).resolve().parent
+    if len(body) + CAPTURE_DISK_RESERVE_BYTES > shutil.disk_usage(directory).free:
+        raise OperationError("not enough disk space for capture staging")
+    output.write(body)
+    output.flush()
+
+
 def normalized_url(value: str) -> str:
     parsed = urlsplit(value.strip())
     path = quote(parsed.path, safe="/%:@-._~!$&'()*+,;=")
@@ -116,7 +126,7 @@ def decode_mime_body(source: Path, target: Path, encoding: str) -> None:
                 boundary = len(compact) // 4 * 4
                 if boundary:
                     try:
-                        decoded.write(base64.b64decode(compact[:boundary], validate=True))
+                        write_with_disk_reserve(decoded, base64.b64decode(compact[:boundary], validate=True))
                     except binascii.Error as error:
                         raise OperationError("MHTML part is not valid base64") from error
                 remainder = compact[boundary:]
@@ -129,9 +139,10 @@ def decode_mime_body(source: Path, target: Path, encoding: str) -> None:
                     break
                 if len(line) > 128 * 1024:
                     raise OperationError("MHTML quoted-printable line is too large")
-                decoded.write(quopri.decodestring(line))
+                write_with_disk_reserve(decoded, quopri.decodestring(line))
         elif encoding in {"", "7bit", "8bit", "binary"}:
-            shutil.copyfileobj(encoded, decoded, 1024 * 1024)
+            for chunk in iter(lambda: encoded.read(1024 * 1024), b""):
+                write_with_disk_reserve(decoded, chunk)
         else:
             raise OperationError("MHTML part uses an unsupported transfer encoding")
 
@@ -160,24 +171,24 @@ def copy_mime_body(stream: BinaryIO, output: BinaryIO | None, marker: bytes, clo
             if end < 0:
                 if len(remainder) > len(marker) + 1024:
                     if output is not None:
-                        output.write(buffer[:start + 1])
+                        write_with_disk_reserve(output, buffer[:start + 1])
                     buffer = buffer[start + 1:]
                 continue
             boundary_line = remainder[:end].rstrip(b"\r")
             if boundary_line not in {marker, closing}:
                 if output is not None:
-                    output.write(buffer[:start + 1])
+                    write_with_disk_reserve(output, buffer[:start + 1])
                 buffer = buffer[start + 1:]
                 continue
             unread = len(remainder) - end - 1
             if unread:
                 stream.seek(stream.tell() - unread)
             if output is not None and prefix:
-                output.write(prefix)
+                write_with_disk_reserve(output, prefix)
             return boundary_line
         if len(buffer) > keep:
             if output is not None:
-                output.write(buffer[:-keep])
+                write_with_disk_reserve(output, buffer[:-keep])
             buffer = buffer[-keep:]
 
 
@@ -424,7 +435,8 @@ def stored_asset(directory: Path, raw: dict[str, Any], body: bytes, media_type: 
     staged_name = f"assets/{name}"
     target = directory.joinpath(*Path(staged_name).parts)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(body)
+    with target.open("wb") as output:
+        write_with_disk_reserve(output, body)
     return {
         "name": name,
         "staged_name": staged_name,
@@ -444,7 +456,9 @@ def stored_asset_file(directory: Path, raw: dict[str, Any], source: Path, media_
     staged_name = f"assets/{name}"
     target = directory.joinpath(*Path(staged_name).parts)
     target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source, target)
+    with source.open("rb") as input_file, target.open("wb") as output:
+        for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+            write_with_disk_reserve(output, chunk)
     return {
         "name": name,
         "staged_name": staged_name,
@@ -682,7 +696,7 @@ def receive_stream(
         if counts[channel] > expected[channel]:
             raise OperationError("capture stream is larger than declared")
         with paths[channel].open("ab") as output:
-            output.write(chunk)
+            write_with_disk_reserve(output, chunk)
         hashes[channel].update(chunk)
         if acknowledgements:
             write_message(responses, {
