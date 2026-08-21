@@ -3,7 +3,7 @@
 
 All notable Kit-owned changes are documented here. Kit releases follow semantic versioning; Personal Skills carry their own versions.
 
-## 0.5.0 — 2026-08-11
+## 0.5.0 — 2026-08-21
 
 - Added a first-party Manifest V3 Web Clipper that previews the exact capture type before any write, streams the current authenticated rendered page directly to an on-demand local Native Messaging Host, and never uses Downloads, browsing history, permanent site permissions, a daemon, local port, cloud model, or automatic push.
 - Added durable Inbox Capture Bundles with stable identity, immutable versions, SHA-256 manifests, Git LFS assets, Obsidian-relative media, no-op receipts, partial recovery, local `capture:` commits, and fail-safe path/disk/symlink validation.
